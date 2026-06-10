@@ -1,0 +1,9 @@
+.cache/
+.cursor-build/
+build-debug/
+build/
+build-release/
+.vscode/
+.DS_Store
+compile_commands.json
+compile_flags.txt

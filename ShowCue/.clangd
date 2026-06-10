@@ -1,0 +1,12 @@
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - -std=gnu++17
+
+Diagnostics:
+  Suppress:
+    - pp_including_incompatible_module
+  UnusedIncludes: None
+
+Index:
+  Background: Build
