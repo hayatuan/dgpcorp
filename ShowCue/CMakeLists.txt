@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
-# Đặt tên cho dự án phần mềm của anh
-project(Show_Control VERSION 1.0.0 LANGUAGES C CXX)
+# ShowCue — trình phát sự kiện cue-based (JUCE 8)
+project(ShowCue VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Giúp clangd / Cursor Problems đọc đúng include JUCE
@@ -13,16 +13,20 @@ add_subdirectory(JUCE)
 # Khởi tạo cấu hình ứng dụng Âm thanh (Audio Application)
 # ICON_BIG / ICON_SMALL: JUCE tự tạo .icns (macOS) và .ico (Windows) qua juceaide.
 # PNG 1024×1024 cho macOS; ICO riêng cho Windows khi cross-build.
-juce_add_gui_app(Show_Control
-    PRODUCT_NAME "Show Control"
-    VERSION 1.0.0
-    BUNDLE_ID "com.dgpco.showcontrol"
+juce_add_gui_app(ShowCue
+    PRODUCT_NAME "ShowCue"
+    VERSION 1.0.0-beta
+    BUNDLE_ID "com.dgpco.showcue"
     ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.ico"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "ShowCue cần truy cập thiết bị âm thanh để kết nối với Soundcard/Mixer sân khấu của bạn."
+    LOCAL_NETWORK_PERMISSION_ENABLED TRUE
+    LOCAL_NETWORK_PERMISSION_TEXT "ShowCue cần truy cập mạng để kiểm tra cập nhật phần mềm và đồng bộ dữ liệu show."
     IS_AUDIO_APPLICATION TRUE)
 
 # Khai báo các file code C++ nằm trong thư mục Source
-target_sources(Show_Control PRIVATE
+target_sources(ShowCue PRIVATE
     Source/Main.cpp
     Source/ShowControlMacWindow.h
     Source/ShowControlIDEIndex.cpp
@@ -57,26 +61,39 @@ target_sources(Show_Control PRIVATE
     Source/FfmpegSetupDialog.h
     Source/AudioDeviceSettingsPanel.h
     Source/GlobalPreferencesDialog.h
+    Source/ShowLocalization.h
+    Source/ShowAppPreferences.h
+    Source/ShowApplicationState.h
     Source/ShowAboutDialog.h
     Source/ShowUpdateChecker.h
+    Source/ShowUpdateChecker.cpp
+    Source/SystemPermissionsPanel.h
+    Source/SystemPermissionsPanel.cpp
     Source/BusMixerPanel.h
     Source/AudioMetadataReader.h
     Source/ShowWaveformCache.h
     )
 
 if (APPLE)
-    target_sources(Show_Control PRIVATE Source/ShowControlMacWindow.mm)
+    target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm)
 
     set(_showcontrol_app_icon_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png")
     if(EXISTS "${_showcontrol_app_icon_png}")
-        target_sources(Show_Control PRIVATE "${_showcontrol_app_icon_png}")
+        target_sources(ShowCue PRIVATE "${_showcontrol_app_icon_png}")
         set_source_files_properties("${_showcontrol_app_icon_png}"
+            PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    endif()
+
+    set(_showcue_donate_qr_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/DonateQR.png")
+    if(EXISTS "${_showcue_donate_qr_png}")
+        target_sources(ShowCue PRIVATE "${_showcue_donate_qr_png}")
+        set_source_files_properties("${_showcue_donate_qr_png}"
             PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     endif()
 endif()
 
 # Nạp tất cả các module xử lý Mixer và driver phần cứng âm thanh
-target_link_libraries(Show_Control PRIVATE
+target_link_libraries(ShowCue PRIVATE
     juce::juce_audio_utils
     juce::juce_audio_devices
     juce::juce_audio_formats
@@ -89,7 +106,7 @@ target_link_libraries(Show_Control PRIVATE
     juce::juce_core)
 
 # Tự động tạo file Header hệ thống
-juce_generate_juce_header(Show_Control)
+juce_generate_juce_header(ShowCue)
 
 # Bundle ffmpeg cạnh binary (.app/Contents/MacOS) — ưu tiên ThirdParty tĩnh, rồi ffmpeg hệ thống lúc build.
 set(_showcontrol_ffmpeg_src "")
@@ -102,7 +119,7 @@ else()
         HINTS /opt/homebrew/bin /usr/local/bin)
     if(_showcontrol_ffmpeg_system)
         set(_showcontrol_ffmpeg_src "${_showcontrol_ffmpeg_system}")
-        message(STATUS "Show Control: bundle ffmpeg from ${_showcontrol_ffmpeg_system}")
+        message(STATUS "ShowCue: bundle ffmpeg from ${_showcontrol_ffmpeg_system}")
     endif()
 endif()
 
@@ -113,17 +130,17 @@ if(_showcontrol_ffmpeg_src)
     set(_showcontrol_ffmpeg_dest_name "ffmpeg")
   endif()
   if(WIN32)
-    add_custom_command(TARGET Show_Control POST_BUILD
+    add_custom_command(TARGET ShowCue POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${_showcontrol_ffmpeg_src}"
-        "$<TARGET_FILE_DIR:Show_Control>/${_showcontrol_ffmpeg_dest_name}"
+        "$<TARGET_FILE_DIR:ShowCue>/${_showcontrol_ffmpeg_dest_name}"
       COMMENT "Bundle ${_showcontrol_ffmpeg_dest_name} into app")
   else()
-    add_custom_command(TARGET Show_Control POST_BUILD
+    add_custom_command(TARGET ShowCue POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${_showcontrol_ffmpeg_src}"
-        "$<TARGET_FILE_DIR:Show_Control>/${_showcontrol_ffmpeg_dest_name}"
-      COMMAND chmod +x "$<TARGET_FILE_DIR:Show_Control>/${_showcontrol_ffmpeg_dest_name}"
+        "$<TARGET_FILE_DIR:ShowCue>/${_showcontrol_ffmpeg_dest_name}"
+      COMMAND chmod +x "$<TARGET_FILE_DIR:ShowCue>/${_showcontrol_ffmpeg_dest_name}"
       COMMENT "Bundle ${_showcontrol_ffmpeg_dest_name} into app")
   endif()
 endif()
@@ -147,7 +164,7 @@ if(CMAKE_EXPORT_COMPILE_COMMANDS)
         COMMENT "Sync compile_commands.json + compile_flags.txt for clangd")
 
     add_custom_command(
-        TARGET Show_Control POST_BUILD
+        TARGET ShowCue POST_BUILD
         COMMAND ${CMAKE_COMMAND} ${_sync_ide_db_args}
         COMMENT "Sync compile_commands.json + compile_flags.txt for clangd")
 

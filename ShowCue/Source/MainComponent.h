@@ -2,7 +2,8 @@
 #include <atomic>
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <juce_audio_devices/juce_audio_devices.h> 
+#include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>     
 #include "ShowTheme.h"
 #include "ShowControlLookAndFeel.h"
@@ -23,6 +24,8 @@
 #include "SetSecondaryWindow.h"
 #include "StageMonitorComponent.h"
 
+namespace showcontrol::update { class ShowUpdateChecker; }
+
 namespace ShowControlCommandIDs
 {
     enum
@@ -32,6 +35,8 @@ namespace ShowControlCommandIDs
         openPreferences  = 0x53430003
     };
 }
+
+class OneShotApplicationTimer;
 
 class MainComponent  : public juce::Component,
                        public juce::DragAndDropContainer,
@@ -61,6 +66,7 @@ public:
     bool keyStateChanged (bool isKeyDown) override;
     void timerCallback() override; 
     void visibilityChanged() override;
+    void parentHierarchyChanged() override;
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray& files, int x, int y) override;
@@ -68,11 +74,15 @@ public:
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
     void loadList (int listIndex, int trackCount, bool isGrid);
-    void saveProject(); 
-    void loadProject(); 
+    void saveProject();
+    void saveApplicationState();
+    void loadApplicationState();
+    void prepareForApplicationShutdown();
+    void loadProject();
     juce::File getProjectFile();
     void triggerManualMusicIngestion();
     void applyThemePreference (int themeId);
+    void setAppLanguage (int languageIndex);
     void lookAndFeelChanged() override;
     void refreshSidebarPlayingStatus();
     void showAudioSettingsDialog();
@@ -86,6 +96,37 @@ public:
     void normalizeActiveList (bool useLufs);
     void applyProjectDefaultsToPad (SoundPad* pad) const;
     void triggerGlobalPanicFadeAll();
+    void executePanicFadeAllLocked();
+    void applyPanicFadeUiAftermath (int fadedCount);
+    void finalizeStartupPlaylistUi();
+    juce::var buildPlaylistJson() const;
+    bool loadPlaylistFromJson (const juce::var& playlistVar);
+    void reloadPadWaveformFromConfig (SoundPad* pad);
+    void reloadAllPadWaveformsFromConfig();
+    void reloadAllPadWaveformsStaggered (int batchSize = 6, int batchDelayMs = 16);
+    void refreshStartupPlaylistDisplay();
+
+    struct AudioFormatMigrationEntry
+    {
+        int listIndex = -1;
+        int padIndex  = -1;
+        juce::String filePath;
+    };
+
+    struct AudioFormatMigrationResult
+    {
+        int listIndex = -1;
+        int padIndex  = -1;
+        juce::String formatString;
+        int sampleRate   = 0;
+        int bitDepth     = 0;
+        int numChannels  = 0;
+    };
+
+    bool collectPadsNeedingFormatMigration (juce::Array<AudioFormatMigrationEntry>& out) const;
+    void startBackgroundAudioFormatMigration (const juce::Array<AudioFormatMigrationEntry>& entries);
+    void applyAudioFormatMigrationResults (const juce::Array<AudioFormatMigrationResult>& results);
+    void refreshUiAfterFormatMigration();
 
     juce::ApplicationCommandTarget* getNextCommandTarget() override;
     void getAllCommands (juce::Array<juce::CommandID>& commands) override;
@@ -93,7 +134,13 @@ public:
     bool perform (const juce::ApplicationCommandTarget::InvocationInfo& info) override;
 
 private:
+    void finishDeferredStartup();
+    void shutdownActiveTimers() noexcept;
+    void applyFactoryDefaultApplicationState();
+    std::unique_ptr<juce::XmlElement> buildProjectXml();
+
     juce::Component* topLevelKeyListenerHost = nullptr;
+    ShowControlLookAndFeel appLookAndFeel;
     SidebarPanel sidebarPanel;
     InspectorPanel inspectorPanel; 
 
@@ -162,6 +209,7 @@ private:
     void detachInspectorFromPadsInList (ListData* list) noexcept;
     void releaseAllPadResources() noexcept;
     void shutdownAudioAndPads() noexcept;
+    void releaseAllLookAndFeelAttachments() noexcept;
     void enterEmptyProjectState();
     void syncSidebarFromAllLists (const juce::Array<juce::String>& names);
     void syncPlayoutModeBarFromActiveList();
@@ -180,6 +228,9 @@ private:
     void compactCueListPads (ListData& list);
     void updateCueGridUIFromData (ListData& list);
     bool tryHandleDeleteOrBackspaceKey (const juce::KeyPress& key);
+    static bool isSpacebarKey (const juce::KeyPress& key) noexcept;
+    bool executeSpacebarTransportKey (const juce::KeyPress& key);
+    bool handleApplicationHotkey (const juce::KeyPress& key);
     bool handleDeleteKeyForActiveSelection();
     void promptDeleteSelectedPadsConfirmation();
     juce::Array<int> collectActiveListDeletionIndices() const;
@@ -230,6 +281,8 @@ private:
     /** Chuyển PAD grid ↔ Cue List trong bộ CUE đang active (chỉ message thread). */
     void setPlayoutMode (bool isPadMode);
     void refreshAllPanelThemes (bool shouldBeDark);
+    void refreshLocalizedUi();
+    void refreshLocalizedBusNames();
     void darkModeSettingChanged() override;
     void toggleStageMonitorWindow();
     void pushStageMonitorUpdate();
@@ -244,9 +297,8 @@ private:
      *   Audio callback render từng pad vào tempBuffer (2ch, pre-allocated),
      *   rồi mix vào cặp kênh (bus*2, bus*2+1) của device output buffer.
      *
-     * RT-safe: CriticalSection bảo vệ danh sách pad cho add/remove từ message thread.
-     * Lock này hiếm khi bị tranh chấp (chỉ khi user thêm/xóa pad) nên tác động thực tế
-     * đến luồng audio là negligible — cùng pattern với juce::MixerAudioSource.
+     * RT-safe: slots[] là std::atomic<PadRealtimeSource*> — audio callback snapshot
+     * không khóa; unregister đợi PadRealtimeSource::waitUntilAudioIdle().
      */
     class MultiOutputAudioCallback : public juce::AudioIODeviceCallback
     {
@@ -316,12 +368,7 @@ private:
             const juce::AudioIODeviceCallbackContext& context)      override;
 
     private:
-        std::array<PadRealtimeSource*, kMaxPadSlots> slots {};
-
-        // CriticalSection: bảo vệ slots[] — cùng pattern juce::MixerAudioSource.
-        // Audio callback giữ lock trong thời gian xử lý block; message thread giữ
-        // khi add/remove. Contention xảy ra cực hiếm → tác động RT không đáng kể.
-        juce::CriticalSection padListCS;
+        std::array<std::atomic<PadRealtimeSource*>, kMaxPadSlots> slots {};
 
         // Pre-allocated render buffer (2ch × maxBlockSize) — resize trong audioDeviceAboutToStart
         juce::AudioBuffer<float> tempBuffer;
@@ -342,17 +389,20 @@ private:
     void registerAllPadsWithMixer();
     void forceAllPadsIdleAtStartup();
 
-    juce::TimeSliceThread timeSliceThread { "ShowControl ReadAhead" };
+    juce::TimeSliceThread timeSliceThread { "ShowCue ReadAhead" };
     juce::AudioDeviceManager deviceManager;
     MultiOutputAudioCallback multiOutputCallback;
 
-    ShowControlLookAndFeel appLookAndFeel;
     juce::TooltipWindow tooltipWindow { this };
+    bool deferredStartupComplete = false;
     int activeListIndex = -1; int selectedBgmIndex = 0; bool isDarkMode = true;
     /** 0 = BÀN PAD, 1 = DANH SÁCH CUE QLab — định tuyến Space/P/S (không đè GO/Panic). */
     int activeList = 0;
     SoundPad* lastUiSyncedPlayingPad = nullptr;
+    /** 1 = Dark, 2 = Light, 3 = Match System */
     int themePreferenceId = 1;
+    /** 0 = Match System, 1 = Tiếng Việt, 2 = English */
+    int languagePreferenceIndex = 1;
     bool projectDefaultNormalizeLufs = false;
     HotkeyScopeMode hotkeyScopeMode = HotkeyScopeMode::activeList;
     int lastHotkeyKeyCode = 0;
@@ -403,12 +453,19 @@ private:
     AudioEngine audioEngine;
     HotkeyManager hotkeyManager;
     std::unique_ptr<juce::Timer> pendingGoTimer;
+    std::unique_ptr<OneShotApplicationTimer> startupReassertTimer;
+    std::unique_ptr<OneShotApplicationTimer> startupGuardTimer;
+    std::unique_ptr<OneShotApplicationTimer> deferredIdlePadsTimer;
     /** Chặn userPlayToggle / GO khi khôi phục selection lúc mở app (chỉ message thread). */
     std::atomic<bool> isInitialLoading { false };
+    std::atomic<bool> audioFormatMigrationRunning { false };
     juce::uint32 startupInputGuardUntilMs = 0;
+    juce::uint32 lastPanicFadeRequestMs = 0;
+    std::atomic<bool> panicFadeDispatchScheduled { false };
     bool isPlaybackCommandBlocked() const noexcept
     {
-        return isInitialLoading.load (std::memory_order_relaxed);
+        return ! deferredStartupComplete
+            || isInitialLoading.load (std::memory_order_relaxed);
     }
     int pendingGoPadIndex = -1;
     int sidebarWidth = 250;
@@ -435,6 +492,11 @@ private:
     BusMixerPanel busMixerPanel;
     juce::ComponentAnimator layoutAnimator;
     std::unique_ptr<SplitterButtonLookAndFeel> splitterButtonLaf;
+
+    std::unique_ptr<showcontrol::update::ShowUpdateChecker> updateChecker;
+
+    /** Khai báo cuối — hủy sau cùng (sau pads/audio) để tránh leak AudioFormat. */
+    juce::AudioFormatManager formatManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

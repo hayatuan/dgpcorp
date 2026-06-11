@@ -52,6 +52,7 @@ public:
 
     void resized() override;
     void paint (juce::Graphics& g) override;
+    void lookAndFeelChanged() override;
     void mouseDown (const juce::MouseEvent& event) override;
     bool keyPressed (const juce::KeyPress& key) override;
 

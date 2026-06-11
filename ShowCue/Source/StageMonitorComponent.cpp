@@ -1,11 +1,12 @@
 #include "StageMonitorComponent.h"
+#include "ShowLocalization.h"
 
 namespace showcontrol::stage_monitor
 {
     static constexpr juce::uint32 kColourStandbyText  = 0xFFDFB24E;
     static constexpr juce::uint32 kColourRemaining   = 0xFF57D18C;
     static constexpr juce::uint32 kColourTrackName   = 0xFFF2C94C;
-    static constexpr juce::uint32 kColourStatusLine = 0xFF9B51E0;
+    static constexpr juce::uint32 kColourStatusLine = 0xFF0A84FF;
     static constexpr juce::uint32 kColourElapsed     = 0xFFE26A4A;
     static constexpr juce::uint32 kColourFooter     = 0xFF6E6E6E;
     static constexpr juce::uint32 kColourProgressBg    = 0xFF2A2A2A;
@@ -194,7 +195,7 @@ void StageMonitorComponent::paintStandby (juce::Graphics& g) const
 
     g.setColour (juce::Colour (kColourStandbyText));
     g.setFont (ShowTheme::fontBold (layout.standbyFontH));
-    g.drawText (juce::String::fromUTF8 (u8"KHÔNG CÓ CUE"),
+    g.drawText (showcontrol::localization::tr (u8"KHÔNG CÓ CUE"),
                 layout.standbyMain, juce::Justification::centred, true);
 
     g.setColour (juce::Colour (kColourFooter));
@@ -226,8 +227,8 @@ void StageMonitorComponent::paintPlaying (juce::Graphics& g) const
         g.setColour (juce::Colour (kColourStatusLine));
         g.setFont (ShowTheme::font (layout.statusFontH));
         const auto status = snapshot.isCueMode
-                                ? juce::String::fromUTF8 (u8"CUE đang phát ở chế độ lặp lại")
-                                : juce::String::fromUTF8 (u8"BGM đang phát ở chế độ lặp lại");
+                                ? showcontrol::localization::tr (u8"CUE đang phát ở chế độ lặp lại")
+                                : showcontrol::localization::tr (u8"BGM đang phát ở chế độ lặp lại");
         g.drawText (status, layout.loopStatus, hCentred);
     }
 
@@ -257,6 +258,12 @@ void StageMonitorComponent::paint (juce::Graphics& g)
         paintStandby (g);
     else
         paintPlaying (g);
+}
+
+void StageMonitorComponent::lookAndFeelChanged()
+{
+    juce::Component::lookAndFeelChanged();
+    repaint();
 }
 
 void StageMonitorComponent::notifyLayoutAfterWindowChromeChange()
@@ -292,11 +299,11 @@ void StageMonitorComponent::showDisplayOptionsMenu()
 
     juce::PopupMenu menu;
     menu.addItem (kMenuAlwaysOnTop,
-                  juce::String::fromUTF8 (u8"Luôn hiện trên cùng (Ghim Top)"),
+                  showcontrol::localization::tr (u8"Luôn hiện trên cùng (Ghim Top)"),
                   true,
                   pinned);
     menu.addItem (kMenuFullScreen,
-                  juce::String::fromUTF8 (u8"Toàn màn hình (Full Screen)"),
+                  showcontrol::localization::tr (u8"Toàn màn hình (Full Screen)"),
                   true,
                   full);
 
@@ -360,7 +367,7 @@ bool StageMonitorComponent::keyPressed (const juce::KeyPress& key)
 
 //==============================================================================
 StageMonitorWindow::StageMonitorWindow (std::function<void()> onWindowClosed)
-    : DocumentWindow (juce::String::fromUTF8 (u8"Stage Monitor — Show Control"),
+    : DocumentWindow (juce::String::fromUTF8 (u8"Stage Monitor — ShowCue"),
                       juce::Colours::black,
                       DocumentWindow::allButtons),
       closedCallback (std::move (onWindowClosed))

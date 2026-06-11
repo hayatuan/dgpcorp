@@ -5,6 +5,7 @@
 #include "SoundPad.h"
 #include "AudioMetadataReader.h"
 #include "ShowTheme.h"
+#include "ShowLocalization.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowGraphicsSafe.h"
 #include "MasterDeckComponent.h"
@@ -20,9 +21,10 @@ namespace MasterDeckUi
         if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
             return;
 
-        g.setColour (colourSource.findColour (MasterDeckComponent::panelBgColourId));
+        const auto& laf = colourSource.getLookAndFeel();
+        g.setColour (laf.findColour (juce::ListBox::backgroundColourId));
         g.fillRoundedRectangle (bounds, 6.0f);
-        g.setColour (colourSource.findColour (MasterDeckComponent::panelBorderColourId));
+        g.setColour (laf.findColour (juce::ListBox::outlineColourId));
         g.drawRoundedRectangle (bounds, 6.0f, 1.0f);
     }
 
@@ -72,6 +74,12 @@ public:
         repaint();
     }
 
+    void lookAndFeelChanged() override
+    {
+        juce::Component::lookAndFeelChanged();
+        repaint();
+    }
+
     void paint (juce::Graphics& g) override
     {
         const auto& src = (colourHost != nullptr ? *colourHost : *this);
@@ -79,12 +87,14 @@ public:
         if (b.getWidth() <= 0.0f || b.getHeight() <= 0.0f)
             return;
 
-        g.setColour (src.findColour (MasterDeckComponent::panelBgColourId));
+        const auto& laf = src.getLookAndFeel();
+        g.setColour (laf.findColour (juce::ListBox::backgroundColourId));
         g.fillRoundedRectangle (b, 4.0f);
-        g.setColour (src.findColour (MasterDeckComponent::panelBorderColourId));
+        g.setColour (laf.findColour (juce::ListBox::outlineColourId));
         g.drawRoundedRectangle (b, 4.0f, 1.0f);
 
-        auto track = b.reduced (3.0f, b.getHeight() * 0.32f);
+        constexpr float kTrackH = 12.0f;
+        auto track = b.reduced (3.0f, 0.0f).withSizeKeepingCentre (b.getWidth() - 6.0f, kTrackH);
         g.setColour (src.findColour (MasterDeckComponent::meterTrackColourId));
         g.fillRoundedRectangle (track, 2.0f);
 
@@ -140,10 +150,13 @@ public:
         }
 
         const auto& src = slider.getLookAndFeel();
-        auto track = juce::Rectangle<float> ((float) x + width * 0.32f, (float) y + 4.0f,
-                                             (float) width * 0.36f, (float) height - 8.0f);
+        const float trackW = juce::jlimit (4.0f, 6.0f, (float) width * 0.42f);
+        auto track = juce::Rectangle<float> ((float) x + ((float) width - trackW) * 0.5f,
+                                             (float) y + 2.0f,
+                                             trackW,
+                                             (float) height - 4.0f);
         g.setColour (src.findColour (MasterDeckComponent::meterTrackColourId));
-        g.fillRoundedRectangle (track, track.getWidth() * 0.5f);
+        g.fillRoundedRectangle (track, trackW * 0.5f);
         g.setColour (src.findColour (MasterDeckComponent::panelBorderColourId));
         g.drawRoundedRectangle (track, track.getWidth() * 0.5f, 1.0f);
 
@@ -385,6 +398,13 @@ public:
         fadeAllBtn.setButtonText ({});
         fadeAllBtn.setLookAndFeel (deckTransportLook.get());
 
+        for (auto* transportBtn : { &pauseAllBtn, &stopAllBtn, &fadeAllBtn,
+                                    &bgmPrevBtn, &bgmPlayPauseBtn, &bgmNextBtn })
+        {
+            transportBtn->setWantsKeyboardFocus (false);
+            transportBtn->setMouseClickGrabsKeyboardFocus (false);
+        }
+
         pauseAllBtn.onClick = [this] { if (onPauseAll) onPauseAll(); };
         stopAllBtn.onClick = [this] { if (onStopAll) onStopAll(); };
         fadeAllBtn.onClick = [this] { if (onFadeAll) onFadeAll(); };
@@ -414,16 +434,19 @@ public:
 
         addAndMakeVisible (stageMonitorBtn);
         stageMonitorBtn.setComponentID ("deck_monitor");
-        stageMonitorBtn.setButtonText ("Monitor");
-        stageMonitorBtn.setTooltip (juce::String::fromUTF8 (
-            u8"Bật/Tắt màn hình phụ giám sát đếm ngược dành cho sân khấu và đạo diễn kịch bản."));
+        stageMonitorBtn.setButtonText (showcontrol::localization::tr (u8"Monitor"));
+        pauseAllBtn.setTooltip (showcontrol::localization::tr (
+            u8"Kích hoạt phanh tay tạm dừng hoặc phát tiếp tục tại chỗ"));
         stageMonitorBtn.setLookAndFeel (deckTransportLook.get());
         stageMonitorBtn.onClick = [this] { if (onStageMonitorToggleRequested) onStageMonitorToggleRequested(); };
 
         addAndMakeVisible (audioSettingsBtn);
         audioSettingsBtn.setComponentID ("deck_gear");
         audioSettingsBtn.setButtonText ({});
-        audioSettingsBtn.setTooltip (juce::String::fromUTF8 (u8"Cài đặt — Thiết bị âm thanh, Output Bus và Giao diện"));
+        stageMonitorBtn.setTooltip (showcontrol::localization::tr (
+            u8"Bật/Tắt màn hình phụ giám sát đếm ngược dành cho sân khấu và đạo diễn kịch bản."));
+        audioSettingsBtn.setTooltip (showcontrol::localization::tr (
+            u8"Cài đặt — Thiết bị âm thanh, Output Bus và Giao diện"));
         audioSettingsBtn.setLookAndFeel (deckTransportLook.get());
         audioSettingsBtn.onClick = [this] { if (onAudioSettingsRequested) onAudioSettingsRequested(); };
 
@@ -511,12 +534,24 @@ public:
         systemTimeLabel.setFont (ShowTheme::timerFont (22.0f, true));
     }
 
+    void refreshLocalizedText()
+    {
+        stageMonitorBtn.setButtonText (showcontrol::localization::tr (u8"Monitor"));
+        pauseAllBtn.setTooltip (showcontrol::localization::tr (
+            u8"Kích hoạt phanh tay tạm dừng hoặc phát tiếp tục tại chỗ"));
+        stageMonitorBtn.setTooltip (showcontrol::localization::tr (
+            u8"Bật/Tắt màn hình phụ giám sát đếm ngược dành cho sân khấu và đạo diễn kịch bản."));
+        audioSettingsBtn.setTooltip (showcontrol::localization::tr (
+            u8"Cài đặt — Thiết bị âm thanh, Output Bus và Giao diện"));
+        repaint();
+    }
+
     void lookAndFeelChanged() override
     {
+        updateThemeColors (resolveActiveDarkMode());
         juce::Component::lookAndFeelChanged();
-
-        if (auto* showLaf = dynamic_cast<ShowControlLookAndFeel*> (&getLookAndFeel()))
-            updateThemeColors (showLaf->isDarkMode());
+        repaintTransportCluster();
+        refreshLocalizedText();
     }
 
     void updateThemeColors (bool isDark)
@@ -544,8 +579,7 @@ public:
         masterVolSlider.setColour (juce::Slider::trackColourId, findColour (MasterDeckComponent::meterTrackColourId));
         masterVolSlider.setColour (juce::Slider::backgroundColourId, findColour (MasterDeckComponent::panelBgColourId));
         masterVolSlider.setColour (juce::Slider::thumbColourId, findColour (MasterDeckComponent::thumbColourId));
-        horizontalPeakMeter.repaint();
-        repaint();
+        repaintTransportCluster();
     }
 
     void resetPauseState() {}
@@ -659,9 +693,9 @@ public:
         if (b.getWidth() <= 0.0f || b.getHeight() <= 0.0f)
             return;
 
-        const auto pal = ShowTheme::get (isDarkMode);
-        g.fillAll (findColour (MasterDeckComponent::backgroundColourId));
-        g.setColour (findColour (MasterDeckComponent::panelBorderColourId));
+        const auto pal = ShowTheme::get (resolveActiveDarkMode());
+        g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+        g.setColour (getLookAndFeel().findColour (juce::ListBox::outlineColourId));
         g.drawRoundedRectangle (b.reduced (0.5f), 6.0f, 1.0f);
 
         MasterDeckUi::drawPanelFrame (g, getLeftColumnBounds().toFloat(), *this);
@@ -678,7 +712,7 @@ public:
         g.setColour (findColour (MasterDeckComponent::panelHeaderColourId).withAlpha (0.92f));
         g.setFont (ShowTheme::fontBold (13.5f));
         const juce::String currentName = activePad ? activePad->getPadName()
-                                                   : juce::String::fromUTF8 (u8"KHÔNG CÓ BÀI HÁT ĐANG PHÁT");
+                                                   : showcontrol::localization::tr (u8"KHÔNG CÓ BÀI HÁT ĐANG PHÁT");
         g.drawFittedText (currentName, leftCol.getX() + 8, leftCol.getY() + 6,
                           leftCol.getWidth() - 16, 28, juce::Justification::topLeft, 2, 0.90f);
 
@@ -746,6 +780,8 @@ public:
         g.fillRect (ledArea.expanded (0.0f, 1.5f));
         g.setColour (ledCol.withAlpha (0.88f));
         g.fillRect (ledArea);
+
+        paintVolumeFaderTicks (g);
     }
 
     void resized() override
@@ -767,70 +803,134 @@ public:
 
     void layoutTransportAndVolume()
     {
+        constexpr int kMeterH      = 14;
+        constexpr int kMeterGap      = 7;
+        constexpr int kBtnGap        = 6;
+        constexpr int kBtnH          = 30;
+        constexpr int kBgmRowGap     = 4;
+        constexpr int kAdminRowH     = 35;
+        constexpr int kAdminGap      = 6;
+        constexpr int kAudioBtnW     = 34;
+        constexpr int kMonitorBtnW   = 85;
+        constexpr int kClockW        = 120;
+        constexpr int kVolValueH     = 14;
+        constexpr int kVolLabelH     = 12;
+        constexpr int kVolPad        = 3;
+        constexpr int kSliderW       = 15;
+
         auto transport = getTransportColumnBounds().reduced (8, 6);
         auto volStrip  = getVolStripBounds().reduced (6, 8);
 
-        const int btnGap = 6;
-        const int btnH   = 30;
-        const int adminRowH = 35;
-        const int buttonGap = 6;
-        const int audioBtnW = 34;
-        const int monitorBtnW = 85;
-        const int clockW = 120;
+        const auto meterBounds = transport.removeFromBottom (kMeterH);
+        transport.removeFromBottom (kMeterGap);
 
-        auto topAdminRow = transport.removeFromTop (adminRowH);
+        const int controlBlockH = isBgmMode ? (kBtnH + kBgmRowGap + kBtnH) : kBtnH;
 
-        auto clockArea = topAdminRow.removeFromRight (clockW);
+        auto topAdminRow = transport.removeFromTop (kAdminRowH);
+        auto clockArea = topAdminRow.removeFromRight (kClockW);
         systemTimeLabel.setBounds (clockArea);
 
-        auto audioArea = topAdminRow.removeFromLeft (audioBtnW);
-        topAdminRow.removeFromLeft (buttonGap);
-        auto monitorArea = topAdminRow.removeFromLeft (monitorBtnW);
+        auto audioArea = topAdminRow.removeFromLeft (kAudioBtnW);
+        topAdminRow.removeFromLeft (kAdminGap);
+        auto monitorArea = topAdminRow.removeFromLeft (kMonitorBtnW);
 
-        audioSettingsBtn.setBounds (audioArea.withWidth (audioBtnW).withHeight (adminRowH));
-        stageMonitorBtn.setBounds (monitorArea.withHeight (adminRowH));
+        audioSettingsBtn.setBounds (audioArea.withWidth (kAudioBtnW).withHeight (kAdminRowH));
+        stageMonitorBtn.setBounds (monitorArea.withHeight (kAdminRowH));
 
-        transport.removeFromTop (4);
+        auto buttonBlock = transport.removeFromBottom (controlBlockH);
 
         if (isBgmMode)
         {
-            auto row1 = transport.removeFromTop (btnH);
-            const int bw3 = (row1.getWidth() - 2 * btnGap) / 3;
+            auto row1 = buttonBlock.removeFromTop (kBtnH);
+            const int bw3 = (row1.getWidth() - 2 * kBtnGap) / 3;
             bgmPrevBtn.setBounds      (row1.removeFromLeft (bw3));
-            row1.removeFromLeft (btnGap);
+            row1.removeFromLeft (kBtnGap);
             bgmPlayPauseBtn.setBounds (row1.removeFromLeft (bw3));
-            row1.removeFromLeft (btnGap);
+            row1.removeFromLeft (kBtnGap);
             bgmNextBtn.setBounds (row1);
 
-            transport.removeFromTop (4);
-            auto row2 = transport.removeFromTop (btnH);
-            const int bw2 = (row2.getWidth() - btnGap) / 2;
+            buttonBlock.removeFromTop (kBgmRowGap);
+            auto row2 = buttonBlock;
+            const int bw2 = (row2.getWidth() - kBtnGap) / 2;
             stopAllBtn.setBounds (row2.removeFromLeft (bw2));
-            row2.removeFromLeft (btnGap);
+            row2.removeFromLeft (kBtnGap);
             fadeAllBtn.setBounds (row2);
             pauseAllBtn.setBounds (0, 0, 0, 0);
         }
         else
         {
-            auto row1 = transport.removeFromTop (btnH);
-            const int bw3 = (row1.getWidth() - 2 * btnGap) / 3;
+            auto row1 = buttonBlock;
+            const int bw3 = (row1.getWidth() - 2 * kBtnGap) / 3;
             pauseAllBtn.setBounds (row1.removeFromLeft (bw3));
-            row1.removeFromLeft (btnGap);
+            row1.removeFromLeft (kBtnGap);
             stopAllBtn.setBounds (row1.removeFromLeft (bw3));
-            row1.removeFromLeft (btnGap);
+            row1.removeFromLeft (kBtnGap);
             fadeAllBtn.setBounds (row1);
             bgmPrevBtn.setBounds (0, 0, 0, 0);
             bgmPlayPauseBtn.setBounds (0, 0, 0, 0);
             bgmNextBtn.setBounds (0, 0, 0, 0);
         }
 
-        transport.removeFromTop (6);
-        horizontalPeakMeter.setBounds (transport);
+        horizontalPeakMeter.setBounds (meterBounds);
 
-        volLabel.setBounds (volStrip.removeFromTop (12));
-        volValueLabel.setBounds (volStrip.removeFromTop (14));
-        volStrip.removeFromTop (4);
-        masterVolSlider.setBounds (volStrip);
+        volValueLabel.setBounds (volStrip.removeFromTop (kVolValueH));
+        volStrip.removeFromTop (kVolPad);
+        volLabel.setBounds (volStrip.removeFromBottom (kVolLabelH));
+        volStrip.removeFromBottom (kVolPad);
+
+        masterVolSlider.setBounds (volStrip.getCentreX() - kSliderW / 2,
+                                   volStrip.getY(),
+                                   kSliderW,
+                                   volStrip.getHeight());
+    }
+
+    void paintVolumeFaderTicks (juce::Graphics& g) const
+    {
+        const auto sliderBounds = masterVolSlider.getBounds();
+        if (sliderBounds.getHeight() < 8)
+            return;
+
+        const auto tickCol = findColour (MasterDeckComponent::standbyTextColourId).withAlpha (0.40f);
+        g.setColour (tickCol);
+
+        const float sliderTop    = (float) sliderBounds.getY();
+        const float sliderHeight = (float) sliderBounds.getHeight();
+        const float sliderRight  = (float) sliderBounds.getRight();
+        const float sliderLeft   = (float) sliderBounds.getX();
+
+        for (int i = 0; i <= 10; ++i)
+        {
+            const float yPos = sliderTop + sliderHeight * ((float) i / 10.0f);
+            g.drawHorizontalLine (yPos, sliderLeft - 6.0f, sliderLeft - 2.0f);
+            g.drawHorizontalLine (yPos, sliderRight + 2.0f, sliderRight + 6.0f);
+        }
+    }
+
+    bool resolveActiveDarkMode() const noexcept
+    {
+        if (auto* showLaf = dynamic_cast<const ShowControlLookAndFeel*> (&getLookAndFeel()))
+            return showLaf->isDarkMode();
+
+        if (auto* parent = getParentComponent())
+            if (auto* parentLaf = dynamic_cast<const ShowControlLookAndFeel*> (&parent->getLookAndFeel()))
+                return parentLaf->isDarkMode();
+
+        return isDarkMode;
+    }
+
+    void repaintTransportCluster()
+    {
+        horizontalPeakMeter.repaint();
+        masterVolSlider.repaint();
+        volLabel.repaint();
+        volValueLabel.repaint();
+
+        for (auto* btn : { &pauseAllBtn, &stopAllBtn, &fadeAllBtn,
+                           &bgmPrevBtn, &bgmPlayPauseBtn, &bgmNextBtn,
+                           &stageMonitorBtn, &audioSettingsBtn })
+            btn->repaint();
+
+        repaint();
     }
 
 private:

@@ -275,8 +275,28 @@ public:
         dspChain.getEq().markUnprepared();
     }
 
+    /** Message thread: đợi audio callback hoàn tất block hiện tại trước khi hủy pad. */
+    void waitUntilAudioIdle() const noexcept
+    {
+        for (int i = 0; i < 500; ++i)
+        {
+            if (audioProcessDepth.load (std::memory_order_acquire) <= 0)
+                return;
+
+            juce::Thread::sleep (1);
+        }
+    }
+
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& info) override
     {
+        const struct ProcessDepthGuard
+        {
+            std::atomic<int>& depth;
+            explicit ProcessDepthGuard (std::atomic<int>& d) noexcept
+                : depth (d) { depth.fetch_add (1, std::memory_order_acq_rel); }
+            ~ProcessDepthGuard() noexcept { depth.fetch_sub (1, std::memory_order_release); }
+        } guard (audioProcessDepth);
+
         juce::ScopedNoDenormals noDenormals;
         processCommandQueue();
 
@@ -355,6 +375,7 @@ private:
     std::atomic<int>  outputBusIndex { 0 };       // RT-safe bus routing index
     std::atomic<uint32_t> trackFinishedGeneration { 0 };
     std::atomic<uint32_t> deferredStopGeneration { 0 };
+    std::atomic<int> audioProcessDepth { 0 };
 
     static constexpr float kGainSilenceThreshold = 1.0e-5f;
 

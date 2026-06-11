@@ -3,40 +3,99 @@
 #include "ShowTheme.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowControlMacWindow.h"
+#include "ShowLocalization.h"
 
 namespace showcontrol::about
 {
-inline juce::File resolveBundledAppIconPng()
+inline juce::File resolveBundledResourceFile (const juce::String& fileName)
 {
    #if JUCE_MAC
-    const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
-    const auto bundled = exe.getParentDirectory().getParentDirectory()
+    const auto bundled = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                             .getParentDirectory().getParentDirectory()
                              .getChildFile ("Resources")
-                             .getChildFile ("AppIcon.png");
+                             .getChildFile (fileName);
 
     if (bundled.existsAsFile())
         return bundled;
    #endif
 
+    const auto devPath = juce::File::getCurrentWorkingDirectory()
+                             .getChildFile ("Resources")
+                             .getChildFile (fileName);
+
+    if (devPath.existsAsFile())
+        return devPath;
+
     return juce::File::getCurrentWorkingDirectory()
+               .getChildFile ("ShowCue")
                .getChildFile ("Resources")
-               .getChildFile ("AppIcon.png");
+               .getChildFile (fileName);
 }
 
-/** About phẳng — nền/màu chữ từ LAF, không đụng TextEditor (tránh crash LnF line 82). */
+inline void paintQrDonatePlaceholder (juce::Graphics& g,
+                                      juce::Rectangle<int> area,
+                                      const juce::LookAndFeel& laf)
+{
+    const auto outline = laf.findColour (juce::Label::textColourId).withAlpha (0.28f);
+    const auto fill    = laf.findColour (juce::ResizableWindow::backgroundColourId).brighter (0.04f);
+    const auto textCol = laf.findColour (ShowControlLookAndFeel::textSecondaryColourId);
+
+    g.setColour (fill);
+    g.fillRoundedRectangle (area.toFloat(), 6.0f);
+
+    g.setColour (outline);
+    const float dash[] = { 5.0f, 4.0f };
+    juce::Path border;
+    border.addRoundedRectangle (area.toFloat().reduced (1.0f), 6.0f);
+    juce::PathStrokeType stroke (1.2f);
+    stroke.createDashedStroke (border, border, dash, 2);
+    g.strokePath (border, stroke);
+
+    g.setColour (textCol);
+    g.setFont (ShowTheme::font (10.0f));
+    g.drawFittedText ("QR CODE\nDONATE\nPLACEHOLDER",
+                      area.reduced (6),
+                      juce::Justification::centred,
+                      3);
+}
+
+/** About phẳng HAYATUAN — nền/màu chữ từ LAF, không TextEditor (tránh crash LnF line 82). */
 class AboutPanel final : public juce::Component
 {
 public:
     AboutPanel()
     {
-        okButton.setButtonText (juce::String::fromUTF8 (u8"Đóng"));
+        okButton.setButtonText (showcontrol::localization::tr (u8"Đóng"));
         okButton.onClick = [this] { if (onCloseRequested) onCloseRequested(); };
         addAndMakeVisible (okButton);
 
-        if (const auto iconFile = resolveBundledAppIconPng(); iconFile.existsAsFile())
+        feedbackButton.setButtonText (showcontrol::localization::tr (u8"Gửi phản hồi Beta"));
+        feedbackButton.onClick = [this]
+        {
+            juce::URL ("https://forms.gle/zmaaB7i9Ltj6oo1M6").launchInDefaultBrowser();
+        };
+        addAndMakeVisible (feedbackButton);
+
+        donateQrComponent.setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (donateQrComponent);
+
+        if (const auto iconFile = resolveBundledResourceFile ("AppIcon.png"); iconFile.existsAsFile())
             appIcon = juce::ImageFileFormat::loadFrom (iconFile);
 
-        setSize (420, 380);
+        if (const auto qrFile = resolveBundledResourceFile ("DonateQR.png"); qrFile.existsAsFile())
+        {
+            donateQrImage = juce::ImageFileFormat::loadFrom (qrFile);
+
+            if (donateQrImage.isValid())
+            {
+                donateQrComponent.setImage (donateQrImage);
+                donateQrComponent.setImagePlacement (juce::RectanglePlacement::centred);
+                hasDonateQrImage = true;
+            }
+        }
+
+        donateQrComponent.setVisible (hasDonateQrImage);
+        setSize (560, 456);
     }
 
     std::function<void()> onCloseRequested;
@@ -49,49 +108,134 @@ public:
         const auto textPrimary   = laf.findColour (juce::Label::textColourId);
         const auto textSecondary = laf.findColour (ShowControlLookAndFeel::textSecondaryColourId);
 
-        auto bounds = getLocalBounds().reduced (28, 24);
-
         if (appIcon.isValid())
         {
-            const int iconSize = 96;
-            auto iconArea = bounds.removeFromTop (iconSize + 12);
             g.drawImage (appIcon,
-                         iconArea.withSizeKeepingCentre (iconSize, iconSize).toFloat(),
+                         iconArea.toFloat(),
                          juce::RectanglePlacement::centred);
         }
 
-        bounds.removeFromTop (8);
-        g.setColour (textPrimary);
-        g.setFont (ShowTheme::font (18.0f).boldened());
-        g.drawFittedText (juce::String::fromUTF8 (u8"ShowControl TRÌNH PHÁT SỰ KIỆN"),
-                          bounds.removeFromTop (30),
-                          juce::Justification::centred,
-                          2);
+        auto text = leftTextArea;
 
-        bounds.removeFromTop (6);
-        g.setFont (ShowTheme::font (13.5f));
-        g.setColour (textSecondary);
-        g.drawFittedText (juce::String::fromUTF8 (u8"Phiên bản ")
-                              + juce::String (ProjectInfo::versionString),
-                          bounds.removeFromTop (22),
-                          juce::Justification::centred,
+        g.setColour (textPrimary);
+        g.setFont (ShowTheme::font (22.0f).boldened());
+        g.drawFittedText (juce::String::fromUTF8 (u8"ShowCue"),
+                          text.removeFromTop (28),
+                          juce::Justification::centredLeft,
                           1);
 
-        bounds.removeFromTop (4);
-        g.drawFittedText (juce::String::fromUTF8 (u8"© 2024 DGP Co. Bảo lưu mọi quyền."),
-                          bounds.removeFromTop (22),
-                          juce::Justification::centred,
+        text.removeFromTop (2);
+        g.setFont (ShowTheme::font (14.0f));
+        g.setColour (textSecondary);
+        g.drawFittedText (showcontrol::localization::tr (u8"Phần mềm phát nhạc sự kiện"),
+                          text.removeFromTop (20),
+                          juce::Justification::centredLeft,
+                          1);
+
+        text.removeFromTop (6);
+        g.setFont (ShowTheme::font (12.5f));
+        g.drawFittedText (showcontrol::localization::tr (u8"Phiên bản ")
+                              + juce::String (ProjectInfo::versionString),
+                          text.removeFromTop (18),
+                          juce::Justification::centredLeft,
+                          1);
+
+        text.removeFromTop (2);
+        g.drawFittedText (juce::String::fromUTF8 (u8"© 2026 HAYATUAN. Bảo lưu mọi quyền."),
+                          text.removeFromTop (18),
+                          juce::Justification::centredLeft,
                           2);
+
+        text.removeFromTop (10);
+        g.setFont (ShowTheme::font (11.0f));
+        g.setColour (textPrimary.withAlpha (0.88f));
+        g.drawFittedText (juce::String::fromUTF8 (
+            u8"Chức năng chính: Phát nhạc kịch bản CUE & BGM không độ trễ; "
+            u8"Kéo thả dòng thông minh; Đồng bộ tên bài hát Live Update; "
+            u8"Phanh tay Toggle Pause phím P."),
+                          text.removeFromTop (52),
+                          juce::Justification::topLeft,
+                          5);
+
+        text.removeFromTop (6);
+        g.setFont (ShowTheme::font (10.5f).italicised());
+        g.setColour (textSecondary);
+        g.drawFittedText (juce::String::fromUTF8 (
+            u8"Ý tưởng tham khảo từ các ứng dụng tiêu chuẩn công nghiệp: "
+            u8"QLab (macOS), Sports Sound Pro, và Ableton Live."),
+                          text,
+                          juce::Justification::topLeft,
+                          4);
+
+        if (! hasDonateQrImage)
+            paintQrDonatePlaceholder (g, qrArea, laf);
+
+        g.setColour (textSecondary);
+        g.setFont (ShowTheme::font (10.0f));
+        g.drawFittedText (showcontrol::localization::tr (u8"Ủng hộ phát triển"),
+                          qrCaptionArea,
+                          juce::Justification::centred,
+                          1);
+    }
+
+    void lookAndFeelChanged() override
+    {
+        juce::Component::lookAndFeelChanged();
+        okButton.setButtonText (showcontrol::localization::tr (u8"Đóng"));
+        feedbackButton.setButtonText (showcontrol::localization::tr (u8"Gửi phản hồi Beta"));
+        repaint();
     }
 
     void resized() override
     {
-        okButton.setBounds (getWidth() / 2 - 52, getHeight() - 52, 104, 30);
+        constexpr int kButtonWidth  = 148;
+        constexpr int kButtonHeight = 30;
+        constexpr int kButtonGap    = 12;
+        constexpr int kBottomMargin = 16;
+
+        auto bounds = getLocalBounds().reduced (20, 16);
+
+        const int closeY = bounds.getBottom() - kBottomMargin - kButtonHeight;
+        okButton.setBounds (bounds.getCentreX() - kButtonWidth / 2,
+                            closeY,
+                            kButtonWidth,
+                            kButtonHeight);
+        feedbackButton.setBounds (bounds.getCentreX() - kButtonWidth / 2,
+                                  closeY - kButtonGap - kButtonHeight,
+                                  kButtonWidth,
+                                  kButtonHeight);
+
+        bounds.removeFromBottom (kBottomMargin + kButtonHeight * 2 + kButtonGap);
+
+        iconArea = bounds.removeFromTop (72).withSizeKeepingCentre (64, 64);
+
+        bounds.removeFromTop (4);
+        auto content = bounds;
+
+        auto rightColumn = content.removeFromRight (136);
+        qrArea = rightColumn.removeFromTop (120).reduced (4, 0);
+        qrCaptionArea = rightColumn.removeFromTop (18);
+
+        leftTextArea = content.reduced (0, 2);
+
+        if (hasDonateQrImage)
+            donateQrComponent.setBounds (qrArea.reduced (4));
+        else
+            donateQrComponent.setBounds ({});
     }
 
 private:
     juce::TextButton okButton;
+    juce::TextButton feedbackButton;
+    juce::ImageComponent donateQrComponent;
     juce::Image appIcon;
+    juce::Image donateQrImage;
+    bool hasDonateQrImage = false;
+
+    juce::Rectangle<int> iconArea;
+    juce::Rectangle<int> leftTextArea;
+    juce::Rectangle<int> qrArea;
+    juce::Rectangle<int> qrCaptionArea;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AboutPanel)
 };

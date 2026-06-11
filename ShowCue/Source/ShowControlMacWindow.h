@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 namespace showcontrol::mac
@@ -80,6 +81,29 @@ namespace showcontrol::mac
 
         return false;
     }
+
+   #if JUCE_MAC
+    inline std::function<void()>& macMenuRebuildHook() noexcept
+    {
+        static std::function<void()> hook;
+        return hook;
+    }
+
+    inline void registerMacMenuBarHooks (std::function<void()> rebuildAppleMenu)
+    {
+        macMenuRebuildHook() = std::move (rebuildAppleMenu);
+    }
+
+    /** Rebuild menu ShowCue + ép macOS refresh sau khi đổi ngôn ngữ. */
+    inline void refreshNativeMenuBar()
+    {
+        if (macMenuRebuildHook() != nullptr)
+            macMenuRebuildHook()();
+
+        if (auto* model = juce::MenuBarModel::getMacMainMenu())
+            model->menuItemsChanged();
+    }
+   #endif
 }
 
 namespace showcontrol::ui

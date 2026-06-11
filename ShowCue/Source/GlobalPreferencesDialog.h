@@ -7,10 +7,16 @@
 #include "ShowControlLookAndFeel.h"
 #include "ShowControlMacWindow.h"
 #include "ShowFlatIcons.h"
+#include "ShowLocalization.h"
+#include "SystemPermissionsPanel.h"
 
 namespace showcontrol::preferences
 {
-    inline juce::Colour cardSelectionBorder() noexcept { return juce::Colour (0xff9b51e0); }
+    /** Viền chọn card — đồng bộ accent xanh FOH từ LAF, không dùng tím mặc định JUCE. */
+    inline juce::Colour cardSelectionBorder (const juce::LookAndFeel& laf) noexcept
+    {
+        return laf.findColour (ShowControlLookAndFeel::accentColourId);
+    }
 
     inline juce::Colour dynamicDialogBackground (const juce::LookAndFeel& laf) noexcept
     {
@@ -95,7 +101,7 @@ namespace showcontrol::preferences
         g.fillRoundedRectangle (bounds.reduced (3.0f, 2.0f), 3.0f);
     }
 
-    enum class TabIcon { audio, appearance };
+    enum class TabIcon { audio, appearance, permissions };
 
     inline void drawTabIcon (juce::Graphics& g, juce::Rectangle<float> area, TabIcon icon, juce::Colour colour) noexcept
     {
@@ -103,8 +109,52 @@ namespace showcontrol::preferences
 
         if (icon == TabIcon::audio)
             showcontrol::icons::paintHeadphonesIcon (g, iconBounds, colour);
-        else
+        else if (icon == TabIcon::appearance)
             showcontrol::icons::paintLayoutIcon (g, iconBounds, colour);
+        else
+            showcontrol::icons::paintShieldCheckIcon (g, iconBounds, colour);
+    }
+
+    /** Lá cờ Việt Nam phẳng — nền đỏ + sao vàng vector, tâm sao khớp tâm hình học nền đỏ. */
+    inline void drawFlatVietnamFlag (juce::Graphics& g, juce::Rectangle<float> area) noexcept
+    {
+        auto flagBounds = area.reduced (area.getWidth() * 0.08f, area.getHeight() * 0.12f);
+        g.setColour (juce::Colour (0xffda251d));
+        g.fillRoundedRectangle (flagBounds, 3.5f);
+
+        const float centerX = flagBounds.getCentreX();
+        const float centerY = flagBounds.getCentreY();
+        const float outerRadius = flagBounds.getHeight() * 0.24f;
+        const float innerRadius = outerRadius * 0.382f;
+
+        juce::Path star;
+        star.addStar ({ centerX, centerY },
+                      5,
+                      innerRadius,
+                      outerRadius,
+                      -juce::MathConstants<float>::halfPi);
+        g.setColour (juce::Colour (0xfff9d71c));
+        g.fillPath (star);
+    }
+
+    /** Lá cờ Mỹ phẳng — sọc đỏ/trắng + canton xanh. */
+    inline void drawFlatUsFlag (juce::Graphics& g, juce::Rectangle<float> area) noexcept
+    {
+        auto flag = area.reduced (area.getWidth() * 0.08f, area.getHeight() * 0.12f);
+        constexpr int stripes = 7;
+        const float stripeH = flag.getHeight() / (float) stripes;
+
+        for (int i = 0; i < stripes; ++i)
+        {
+            g.setColour (i % 2 == 0 ? juce::Colour (0xffb22234) : juce::Colours::white);
+            g.fillRect (flag.getX(), flag.getY() + stripeH * (float) i,
+                        flag.getWidth(), stripeH + 0.5f);
+        }
+
+        const float cantonW = flag.getWidth() * 0.42f;
+        const float cantonH = stripeH * 4.0f;
+        g.setColour (juce::Colour (0xff3c3b6e));
+        g.fillRect (flag.getX(), flag.getY(), cantonW, cantonH);
     }
 } // namespace showcontrol::preferences
 
@@ -115,8 +165,8 @@ class PreferencesTabButton : public juce::Component
 public:
     std::function<void()> onSelected;
 
-    PreferencesTabButton (showcontrol::preferences::TabIcon iconType, juce::String labelText)
-        : tabIcon (iconType), label (std::move (labelText))
+    PreferencesTabButton (showcontrol::preferences::TabIcon iconType, const char* labelUtf8)
+        : tabIcon (iconType), labelKey (labelUtf8)
     {
         setInterceptsMouseClicks (true, false);
     }
@@ -149,7 +199,7 @@ public:
 
         g.setColour (iconCol);
         g.setFont (ShowTheme::font (11.0f));
-        g.drawText (label, bounds.toNearestInt(), juce::Justification::centred);
+        g.drawText (showcontrol::localization::tr (labelKey), bounds.toNearestInt(), juce::Justification::centred);
     }
 
     void mouseUp (const juce::MouseEvent& e) override
@@ -160,12 +210,12 @@ public:
 
 private:
     showcontrol::preferences::TabIcon tabIcon;
-    juce::String label;
+    const char* labelKey = "";
     bool tabActive = false;
 };
 
 //==============================================================================
-/** Card chọn theme — mini preview + viền tím khi active. */
+/** Card chọn theme — mini preview + viền accent xanh khi active. */
 class ThemeAppearanceCard : public juce::Button
 {
 public:
@@ -213,10 +263,9 @@ public:
                 break;
         }
 
-        // Farrago-style selection ring — tím đậm 2.5px khi Card được chọn
         if (selected)
         {
-            g.setColour (showcontrol::preferences::cardSelectionBorder());
+            g.setColour (showcontrol::preferences::cardSelectionBorder (laf));
             g.drawRoundedRectangle (bounds.reduced (1.25f), 8.0f, 2.5f);
         }
 
@@ -231,25 +280,106 @@ private:
 };
 
 //==============================================================================
+/** Card chọn ngôn ngữ — globe / cờ VN / cờ US + viền accent xanh khi active. */
+class LanguageAppearanceCard : public juce::Button
+{
+public:
+    enum class Kind { matchSystem, vietnamese, english };
+
+    LanguageAppearanceCard (Kind cardKind, const char* labelUtf8)
+        : juce::Button ({}),
+          kind (cardKind),
+          labelKey (labelUtf8)
+    {
+        setClickingTogglesState (true);
+        setRadioGroupId (2002);
+    }
+
+    void paintButton (juce::Graphics& g, bool /*highlighted*/, bool /*down*/) override
+    {
+        const auto& laf = getLookAndFeel();
+        const auto cardBg = showcontrol::preferences::dynamicCardSurface (laf);
+        const auto labelCol = showcontrol::preferences::dynamicPrimaryText (laf);
+        const auto mutedCol = showcontrol::preferences::dynamicMutedText (laf);
+        const bool selected = getToggleState();
+
+        auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (cardBg);
+        g.fillRoundedRectangle (bounds, 8.0f);
+
+        auto preview = bounds.reduced (10.0f, 12.0f);
+        preview.removeFromBottom (preview.getHeight() * 0.18f);
+
+        switch (kind)
+        {
+            case Kind::matchSystem:
+                showcontrol::icons::paintGlobeIcon (g, preview, labelCol.withAlpha (0.78f));
+                break;
+
+            case Kind::vietnamese:
+                showcontrol::preferences::drawFlatVietnamFlag (g, preview);
+                break;
+
+            case Kind::english:
+                showcontrol::preferences::drawFlatUsFlag (g, preview);
+                break;
+        }
+
+        if (selected)
+        {
+            g.setColour (showcontrol::preferences::cardSelectionBorder (laf));
+            g.drawRoundedRectangle (bounds.reduced (1.25f), 8.0f, 2.5f);
+        }
+
+        g.setColour (selected ? labelCol : mutedCol);
+        g.setFont (ShowTheme::font (10.5f));
+        g.drawText (showcontrol::localization::tr (labelKey),
+                    bounds.removeFromBottom (16.0f).toNearestInt(),
+                    juce::Justification::centred);
+    }
+
+private:
+    Kind kind;
+    const char* labelKey = "";
+};
+
+//==============================================================================
 /** Tab Giao diện — 3 Card Appearance nằm ngang. */
 class ThemePreferencesPanel : public juce::Component
 {
 public:
     std::function<void (int themeId)> onThemeChanged;
+    std::function<void (int languageIndex)> onLanguageChanged;
 
-    explicit ThemePreferencesPanel (int themeId)
+    explicit ThemePreferencesPanel (int themeId, int languageIndex)
     {
-        sectionLabel.setText (juce::String::fromUTF8 (u8"Chế độ hiển thị"), juce::dontSendNotification);
         sectionLabel.setFont (ShowTheme::fontBold (13.0f));
         sectionLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (sectionLabel);
 
-        hintLabel.setText (juce::String::fromUTF8 (
-            u8"Chọn giao diện cho toàn bộ ứng dụng. Thay đổi có hiệu lực ngay lập tức."),
-            juce::dontSendNotification);
         hintLabel.setFont (ShowTheme::font (11.0f));
         hintLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (hintLabel);
+
+        languageLabel.setFont (ShowTheme::fontBold (13.0f));
+        languageLabel.setJustificationType (juce::Justification::centredLeft);
+        addAndMakeVisible (languageLabel);
+
+        addAndMakeVisible (systemLangCard);
+        addAndMakeVisible (vietnameseLangCard);
+        addAndMakeVisible (englishLangCard);
+
+        auto pickLanguage = [this] (int id, LanguageAppearanceCard& card)
+        {
+            if (! card.getToggleState())
+                return;
+
+            applyLanguageChoice (id);
+        };
+
+        systemLangCard.onClick    = [this, pickLanguage] { pickLanguage (0, systemLangCard); };
+        vietnameseLangCard.onClick = [this, pickLanguage] { pickLanguage (1, vietnameseLangCard); };
+        englishLangCard.onClick   = [this, pickLanguage] { pickLanguage (2, englishLangCard); };
 
         addAndMakeVisible (systemCard);
         addAndMakeVisible (lightCard);
@@ -272,7 +402,9 @@ public:
         darkCard.onClick   = [this, pickTheme] { pickTheme (1, darkCard); };
 
         syncLabelColours();
+        refreshLocalizedText();
         setThemeSelection (themeId);
+        setLanguageSelection (languageIndex);
     }
 
     void refreshSectionLabelColours()
@@ -280,14 +412,27 @@ public:
         syncLabelColours();
     }
 
+    void refreshLocalizedText()
+    {
+        sectionLabel.setText (showcontrol::localization::tr (u8"Chế độ hiển thị"), juce::dontSendNotification);
+        hintLabel.setText (showcontrol::localization::tr (
+            u8"Chọn giao diện cho toàn bộ ứng dụng. Thay đổi có hiệu lực ngay lập tức."),
+            juce::dontSendNotification);
+        languageLabel.setText (showcontrol::localization::tr (u8"Ngôn ngữ"), juce::dontSendNotification);
+    }
+
     void lookAndFeelChanged() override
     {
         juce::Component::lookAndFeelChanged();
         syncLabelColours();
+        refreshLocalizedText();
         repaint();
         systemCard.repaint();
         lightCard.repaint();
         darkCard.repaint();
+        systemLangCard.repaint();
+        vietnameseLangCard.repaint();
+        englishLangCard.repaint();
     }
 
     void setThemeSelection (int themeId)
@@ -299,6 +444,17 @@ public:
         systemCard.repaint();
         lightCard.repaint();
         darkCard.repaint();
+    }
+
+    void setLanguageSelection (int languageIndex)
+    {
+        currentLanguageIndex = juce::jlimit (0, 2, languageIndex);
+        systemLangCard.setToggleState    (currentLanguageIndex == 0, juce::dontSendNotification);
+        vietnameseLangCard.setToggleState (currentLanguageIndex == 1, juce::dontSendNotification);
+        englishLangCard.setToggleState   (currentLanguageIndex == 2, juce::dontSendNotification);
+        systemLangCard.repaint();
+        vietnameseLangCard.repaint();
+        englishLangCard.repaint();
     }
 
     void paint (juce::Graphics& g) override
@@ -326,14 +482,31 @@ public:
         lightCard.setBounds (row.removeFromLeft (cardW));
         row.removeFromLeft (gap);
         darkCard.setBounds (row.removeFromLeft (cardW));
+
+        bounds.removeFromTop (20);
+        languageLabel.setBounds (bounds.removeFromTop (22));
+        bounds.removeFromTop (14);
+
+        auto langRow = bounds.removeFromTop (cardH);
+        langRow = langRow.withSizeKeepingCentre (totalW, cardH);
+
+        systemLangCard.setBounds (langRow.removeFromLeft (cardW));
+        langRow.removeFromLeft (gap);
+        vietnameseLangCard.setBounds (langRow.removeFromLeft (cardW));
+        langRow.removeFromLeft (gap);
+        englishLangCard.setBounds (langRow.removeFromLeft (cardW));
     }
 
 private:
     int currentThemeId = 1;
-    juce::Label sectionLabel, hintLabel;
+    int currentLanguageIndex = 0;
+    juce::Label sectionLabel, hintLabel, languageLabel;
     ThemeAppearanceCard systemCard { ThemeAppearanceCard::Kind::matchSystem, {} };
     ThemeAppearanceCard lightCard  { ThemeAppearanceCard::Kind::light, {} };
     ThemeAppearanceCard darkCard   { ThemeAppearanceCard::Kind::dark, {} };
+    LanguageAppearanceCard systemLangCard    { LanguageAppearanceCard::Kind::matchSystem, u8"Mặc định hệ thống" };
+    LanguageAppearanceCard vietnameseLangCard { LanguageAppearanceCard::Kind::vietnamese, u8"Tiếng Việt" };
+    LanguageAppearanceCard englishLangCard   { LanguageAppearanceCard::Kind::english, u8"English" };
 
     void syncLabelColours()
     {
@@ -342,6 +515,19 @@ private:
                                 showcontrol::preferences::dynamicPrimaryText (laf));
         hintLabel.setColour (juce::Label::textColourId,
                              showcontrol::preferences::dynamicMutedText (laf));
+        languageLabel.setColour (juce::Label::textColourId,
+                                 showcontrol::preferences::dynamicPrimaryText (laf));
+    }
+
+    void applyLanguageChoice (int languageIndex)
+    {
+        if (currentLanguageIndex == languageIndex)
+            return;
+
+        currentLanguageIndex = languageIndex;
+
+        if (onLanguageChanged != nullptr)
+            onLanguageChanged (languageIndex);
     }
 
     void applyThemeChoice (int themeId)
@@ -366,17 +552,20 @@ public:
         std::function<void (int busIndex, const juce::String& text)> onBusNameLiveChanged;
         std::function<void (const AudioDeviceSettingsPanel::ApplyResult&)> onAudioSettingsApplied;
         std::function<void (int themeId)> onThemeChanged;
+        std::function<void (int languageIndex)> onLanguageChanged;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
                              bool darkMode,
                              const juce::StringArray& busNames,
                              int themeId,
+                             int languageIndex,
                              Callbacks callbacks)
         : cb (std::move (callbacks))
     {
         audioPanel = std::make_unique<AudioDeviceSettingsPanel> (deviceManager, darkMode, busNames, true);
-        themePanel = std::make_unique<ThemePreferencesPanel> (themeId);
+        themePanel = std::make_unique<ThemePreferencesPanel> (themeId, languageIndex);
+        permissionsPanel = std::make_unique<showcontrol::permissions::SystemPermissionsPanel>();
 
         if (cb.onBusNameLiveChanged != nullptr)
             audioPanel->setOnBusNameLiveChanged (cb.onBusNameLiveChanged);
@@ -396,26 +585,47 @@ public:
             pushThemeColoursToEmbeddedPanels();
         };
 
+        themePanel->onLanguageChanged = [this] (int newLanguageIndex)
+        {
+            if (cb.onLanguageChanged != nullptr)
+                cb.onLanguageChanged (newLanguageIndex);
+
+            refreshLocalizedText();
+        };
+
         addAndMakeVisible (audioPanel.get());
         addAndMakeVisible (themePanel.get());
+        addAndMakeVisible (permissionsPanel.get());
 
         audioTabBtn = std::make_unique<PreferencesTabButton> (
             showcontrol::preferences::TabIcon::audio,
-            juce::String::fromUTF8 (u8"Âm thanh"));
+            u8"Âm thanh");
 
         appearanceTabBtn = std::make_unique<PreferencesTabButton> (
             showcontrol::preferences::TabIcon::appearance,
-            juce::String::fromUTF8 (u8"Giao diện"));
+            u8"Giao diện");
+
+        permissionsTabBtn = std::make_unique<PreferencesTabButton> (
+            showcontrol::preferences::TabIcon::permissions,
+            u8"Quyền");
 
         addAndMakeVisible (*audioTabBtn);
         addAndMakeVisible (*appearanceTabBtn);
+        addAndMakeVisible (*permissionsTabBtn);
 
         audioTabBtn->onSelected = [this] { selectTab (0); };
         appearanceTabBtn->onSelected = [this] { selectTab (1); };
+        permissionsTabBtn->onSelected = [this] { selectTab (2); };
 
         selectTab (0);
         setWantsKeyboardFocus (true);
         setSize (680, 560);
+    }
+
+    ~GlobalPreferencesDialog() override
+    {
+        if (permissionsPanel != nullptr)
+            permissionsPanel->haltActiveTimers();
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -433,13 +643,35 @@ public:
 
     void setInitialTabIndex (int tabIndex) noexcept
     {
-        selectTab (juce::jlimit (0, 1, tabIndex));
+        selectTab (juce::jlimit (0, 2, tabIndex));
     }
 
     void lookAndFeelChanged() override
     {
         juce::Component::lookAndFeelChanged();
         pushThemeColoursToEmbeddedPanels();
+        refreshLocalizedText();
+    }
+
+    void refreshLocalizedText()
+    {
+        if (themePanel != nullptr)
+            themePanel->refreshLocalizedText();
+
+        if (permissionsPanel != nullptr)
+            permissionsPanel->refreshLocalizedText();
+
+        if (audioPanel != nullptr)
+            audioPanel->refreshLocalizedText();
+
+        if (audioTabBtn != nullptr)
+            audioTabBtn->repaint();
+
+        if (appearanceTabBtn != nullptr)
+            appearanceTabBtn->repaint();
+
+        if (permissionsTabBtn != nullptr)
+            permissionsTabBtn->repaint();
     }
 
     void paint (juce::Graphics& g) override
@@ -502,16 +734,18 @@ public:
 
         auto tabBar = bounds.removeFromTop (kTabBarHeight).reduced (10, 8);
 
-        const int tabW = juce::jmax (96, tabBar.getWidth() / 2);
-        const int total = tabW * 2;
+        const int tabW = juce::jmax (88, tabBar.getWidth() / 3);
+        const int total = tabW * 3;
         tabBar = tabBar.withSizeKeepingCentre (total, tabBar.getHeight());
 
         audioTabBtn->setBounds (tabBar.removeFromLeft (tabW));
         appearanceTabBtn->setBounds (tabBar.removeFromLeft (tabW));
+        permissionsTabBtn->setBounds (tabBar.removeFromLeft (tabW));
 
         bounds.removeFromTop (1);
         audioPanel->setBounds (bounds);
         themePanel->setBounds (bounds);
+        permissionsPanel->setBounds (bounds);
     }
 
     void parentHierarchyChanged() override
@@ -537,12 +771,12 @@ private:
     {
         if (auto* hit = e.eventComponent)
         {
-            if (hit == audioTabBtn.get() || hit == appearanceTabBtn.get())
+            if (hit == audioTabBtn.get() || hit == appearanceTabBtn.get() || hit == permissionsTabBtn.get())
                 return true;
 
             for (auto* p = hit->getParentComponent(); p != nullptr; p = p->getParentComponent())
             {
-                if (p == audioTabBtn.get() || p == appearanceTabBtn.get())
+                if (p == audioTabBtn.get() || p == appearanceTabBtn.get() || p == permissionsTabBtn.get())
                     return true;
             }
         }
@@ -551,9 +785,10 @@ private:
     }
 
     Callbacks cb;
-    std::unique_ptr<PreferencesTabButton> audioTabBtn, appearanceTabBtn;
+    std::unique_ptr<PreferencesTabButton> audioTabBtn, appearanceTabBtn, permissionsTabBtn;
     std::unique_ptr<AudioDeviceSettingsPanel> audioPanel;
     std::unique_ptr<ThemePreferencesPanel> themePanel;
+    std::unique_ptr<showcontrol::permissions::SystemPermissionsPanel> permissionsPanel;
     int activeTab = 0;
 
     void syncDialogWindowBackground()
@@ -577,9 +812,13 @@ private:
         repaint();
         audioTabBtn->repaint();
         appearanceTabBtn->repaint();
+        permissionsTabBtn->repaint();
 
         if (themePanel != nullptr)
             themePanel->repaint();
+
+        if (permissionsPanel != nullptr)
+            permissionsPanel->repaint();
     }
 
     void selectTab (int index) noexcept
@@ -587,7 +826,12 @@ private:
         activeTab = index;
         audioTabBtn->setTabActive (index == 0);
         appearanceTabBtn->setTabActive (index == 1);
+        permissionsTabBtn->setTabActive (index == 2);
         audioPanel->setVisible (index == 0);
         themePanel->setVisible (index == 1);
+        permissionsPanel->setVisible (index == 2);
+
+        if (index == 2 && permissionsPanel != nullptr)
+            permissionsPanel->resized();
     }
 };

@@ -4,6 +4,7 @@
 #include "ShowControlLookAndFeel.h"
 #include "ConfirmDeleteDialog.h"
 #include "ShowFlatIcons.h"
+#include "ShowLocalization.h"
 
 class SearchBarStyle : public juce::LookAndFeel_V4
 {
@@ -21,6 +22,40 @@ private:
     bool isDarkMode = true;
 };
 
+/** Ô sửa tên danh sách BGM/CUE — Enter lưu, Escape hủy. Message thread only. */
+class ListNameTextEditor : public juce::TextEditor
+{
+public:
+    std::function<void()> onCommit;
+    std::function<void()> onCancel;
+
+    ListNameTextEditor()
+    {
+        setComponentID ("showcue-inline-list-name-editor");
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::returnKey)
+        {
+            if (onCommit != nullptr)
+                onCommit();
+
+            return true;
+        }
+
+        if (key == juce::KeyPress::escapeKey)
+        {
+            if (onCancel != nullptr)
+                onCancel();
+
+            return true;
+        }
+
+        return juce::TextEditor::keyPressed (key);
+    }
+};
+
 //==============================================================================
 class SidebarPanel : public juce::Component,
                        public juce::FileDragAndDropTarget
@@ -29,6 +64,8 @@ public:
     static constexpr int searchBarTop = 8;
     static constexpr int searchBarHeight = 32;
     static constexpr int listContentTop = searchBarTop + searchBarHeight + 12;
+    static constexpr int kSectionHeaderHeight = 28;
+    static constexpr float kSectionHeaderFontSize = 14.0f;
 
     struct SetInfo
     {
@@ -56,18 +93,25 @@ public:
     {
         searchBar.setLookAndFeel (&searchBarStyle);
         addAndMakeVisible (searchBar);
-        searchBar.setTextToShowWhenEmpty (juce::String::fromUTF8 (u8"🔍 Tìm kiếm..."), ShowTheme::darkPalette().textMuted); // overridden by updateThemeColors()
+        refreshSearchPlaceholder (ShowTheme::darkPalette().textMuted);
         searchBar.setFont (ShowTheme::font (13.5f));
         searchBar.setJustification (juce::Justification::centredLeft);
         searchBar.onTextChange = [this] { if (onSearchChanged) onSearchChanged (searchBar.getText()); };
 
-        listNameEditor.setLookAndFeel (&searchBarStyle);
         listNameEditor.setVisible (false);
         listNameEditor.setMultiLine (false);
         listNameEditor.setReturnKeyStartsNewLine (false);
-        listNameEditor.setFont (ShowTheme::font (13.5f));
-        listNameEditor.onReturnKey = [this] { commitInlineRename(); };
-        listNameEditor.onFocusLost = [this] { commitInlineRename(); };
+        listNameEditor.setScrollbarsShown (false);
+        listNameEditor.setPopupMenuEnabled (false);
+        listNameEditor.onCommit = [this] { commitInlineRename(); };
+        listNameEditor.onCancel = [this] { cancelInlineRename(); };
+        listNameEditor.onFocusLost = [this]
+        {
+            if (! inlineRenameEscapePressed)
+                commitInlineRename();
+
+            inlineRenameEscapePressed = false;
+        };
         addChildComponent (listNameEditor);
 
         addBtn.setButtonText ("+");
@@ -85,7 +129,6 @@ public:
     ~SidebarPanel() override
     {
         searchBar.setLookAndFeel (nullptr);
-        listNameEditor.setLookAndFeel (nullptr);
         sets.clear();
     }
 
@@ -125,20 +168,26 @@ public:
             updateThemeColors (showLaf->isDarkMode());
     }
 
+    void refreshLocalizedText()
+    {
+        refreshSearchPlaceholder (ShowTheme::get (isDarkMode).textMuted);
+        repaint();
+    }
+
     void updateThemeColors (bool isDark)
     {
         isDarkMode = isDark;
         searchBarStyle.setDarkMode (isDark);
         const auto pal = ShowTheme::get (isDark);
 
-        searchBar.setTextToShowWhenEmpty (juce::String::fromUTF8 (u8"🔍 Tìm kiếm..."), pal.textMuted);
+        refreshSearchPlaceholder (pal.textMuted);
         searchBar.setColour (juce::TextEditor::backgroundColourId, pal.panelElevated);
         searchBar.setColour (juce::TextEditor::textColourId, pal.textPrimary);
         searchBar.setColour (juce::CaretComponent::caretColourId, pal.accent);
-        listNameEditor.setColour (juce::TextEditor::backgroundColourId, pal.panelElevated);
-        listNameEditor.setColour (juce::TextEditor::textColourId, pal.textPrimary);
-        listNameEditor.setColour (juce::TextEditor::outlineColourId, pal.accent);
-        listNameEditor.setColour (juce::CaretComponent::caretColourId, pal.accent);
+
+        if (renamingListIndex >= 0)
+            ShowControlLookAndFeel::applyInlineListNameEditorStyle (listNameEditor, isDark,
+                                                                    renamingListIndex == selectedIndex);
 
         addBtn.setColour (juce::TextButton::buttonColourId, pal.panelElevated);
         addBtn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
@@ -218,10 +267,9 @@ public:
         const int width = getWidth();
         int y = listContentTop;
 
-        g.setColour (cols.textSecondary);
-        g.setFont (ShowTheme::fontBold (12.0f));
-        g.drawText (juce::String::fromUTF8 (bgmExpanded ? u8"▼  NHẠC NỀN BGM" : u8"▶  NHẠC NỀN BGM"), 16, y, width, 24, juce::Justification::left);
-        y += 24;
+        paintSectionHeader (g, cols.textPrimary, y, width,
+                            localizedSectionHeader (u8"DANH SÁCH NHẠC NỀN BGM", bgmExpanded));
+        y += kSectionHeaderHeight;
 
         int bgmCount = 1;
         for (int i = 0; i < sets.size(); ++i)
@@ -238,10 +286,9 @@ public:
         }
 
         y += 15;
-        g.setColour (cols.textSecondary);
-        g.setFont (ShowTheme::fontBold (12.0f));
-        g.drawText (juce::String::fromUTF8 (cueExpanded ? u8"▼  NHẠC CUE" : u8"▶  NHẠC CUE"), 16, y, width, 24, juce::Justification::left);
-        y += 24;
+        paintSectionHeader (g, cols.textPrimary, y, width,
+                            localizedSectionHeader (u8"DANH SÁCH CUE KỊCH BẢN", cueExpanded));
+        y += kSectionHeaderHeight;
 
         int cueCount = 1;
         for (int i = 0; i < sets.size(); ++i)
@@ -314,14 +361,14 @@ public:
         listDragMoved = false;
 
         int y = listContentTop;
-        if (juce::Rectangle<int> (0, y, getWidth(), 24).contains (pos))
+        if (juce::Rectangle<int> (0, y, getWidth(), kSectionHeaderHeight).contains (pos))
         {
             bgmExpanded = ! bgmExpanded;
             repaint();
             return;
         }
 
-        y += 24;
+        y += kSectionHeaderHeight;
         for (int i = 0; i < sets.size(); ++i)
         {
             if (! sets[i].isGridMode && bgmExpanded && sets[i].matchesSearch)
@@ -329,7 +376,7 @@ public:
         }
 
         y += 15;
-        if (juce::Rectangle<int> (0, y, getWidth(), 24).contains (pos))
+        if (juce::Rectangle<int> (0, y, getWidth(), kSectionHeaderHeight).contains (pos))
         {
             cueExpanded = ! cueExpanded;
             repaint();
@@ -386,14 +433,17 @@ public:
         {
             if (auto row = getRowBoundsForListIndex (renamingListIndex))
             {
-                listNameEditor.setBounds (row->withTrimmedLeft (22).withTrimmedRight (88));
+                const auto regions = layoutSidebarRowRegions (*row);
+                listNameEditor.setBounds (regions.nameArea);
+                listNameEditor.setJustification (juce::Justification::centredLeft);
                 listNameEditor.toFront (false);
             }
         }
     }
 
 private:
-    juce::TextEditor searchBar, listNameEditor;
+    juce::TextEditor searchBar;
+    ListNameTextEditor listNameEditor;
     juce::TextButton addBtn, removeBtn;
     juce::Array<SetInfo> sets;
     int selectedIndex = 0;
@@ -404,13 +454,41 @@ private:
     SearchBarStyle searchBarStyle;
     juce::KeyListener* panicKeyListener = nullptr;
     bool bgmExpanded = true, cueExpanded = true, isDarkMode = true;
+    bool inlineRenameEscapePressed = false;
+    juce::String inlineRenameOriginalName;
     bool folderDragActive = false;
     bool folderDragTargetIsBgm = true;
+
+    void refreshSearchPlaceholder (juce::Colour mutedColour)
+    {
+        searchBar.setTextToShowWhenEmpty (showcontrol::localization::tr (u8"🔍 Tìm kiếm..."), mutedColour);
+    }
+
+    /** Mũi tên mở/đóng — codepoint Unicode, tách khỏi chuỗi dịch để tránh vỡ UTF-8 "â ¼". */
+    static juce::String sidebarChevronPrefix (bool expanded) noexcept
+    {
+        const auto glyph = expanded ? (juce::juce_wchar) 0x25BC  // ▼
+                                    : (juce::juce_wchar) 0x25B6; // ▶
+        return juce::String::charToString (glyph) + "  ";
+    }
+
+    static juce::String localizedSectionHeader (const char* utf8Key, bool expanded)
+    {
+        return sidebarChevronPrefix (expanded) + showcontrol::localization::tr (utf8Key);
+    }
+
+    static void paintSectionHeader (juce::Graphics& g, juce::Colour textColour,
+                                    int y, int width, const juce::String& headerText)
+    {
+        g.setColour (textColour);
+        g.setFont (ShowTheme::fontBold (kSectionHeaderFontSize));
+        g.drawText (headerText, 16, y, width, kSectionHeaderHeight, juce::Justification::centredLeft);
+    }
 
     int computeCueSectionStartY() const
     {
         int y = listContentTop;
-        y += 24;
+        y += kSectionHeaderHeight;
 
         for (int i = 0; i < sets.size(); ++i)
         {
@@ -435,7 +513,7 @@ private:
         if (targetIsBgm)
             return juce::Rectangle<int> (0, listContentTop, width, cueStartY - listContentTop);
 
-        return juce::Rectangle<int> (0, cueStartY, width, juce::jmax (24, getHeight() - cueStartY));
+        return juce::Rectangle<int> (0, cueStartY, width, juce::jmax (kSectionHeaderHeight, getHeight() - cueStartY));
     }
 
     void updateFolderDragTargetFromY (int localY)
@@ -467,7 +545,7 @@ private:
     int hitTestListIndexAt (juce::Point<int> pos) const
     {
         int y = listContentTop;
-        y += 24;
+        y += kSectionHeaderHeight;
 
         for (int i = 0; i < sets.size(); ++i)
         {
@@ -480,7 +558,7 @@ private:
         }
 
         y += 15;
-        y += 24;
+        y += kSectionHeaderHeight;
 
         for (int i = 0; i < sets.size(); ++i)
         {
@@ -495,10 +573,61 @@ private:
         return -1;
     }
 
+    struct SidebarRowLayout
+    {
+        juce::Rectangle<int> nameArea;
+        juce::Rectangle<int> loopIconArea;
+        juce::Rectangle<int> speakerIconArea;
+        juce::Rectangle<int> hotkeyArea;
+    };
+
+    static constexpr int kRowRightPadding   = 12;
+    static constexpr int kRowHotkeyWidth    = 28;
+    static constexpr int kRowIconSlotWidth  = 18;
+    static constexpr int kRowIconGap        = 6;
+    static constexpr int kRowLeftPadding    = 14;
+
+    /** Cắt lát ngang dòng list — icon cố định lề phải, tên chiếm phần còn lại bên trái. */
+    static SidebarRowLayout layoutSidebarRowRegions (juce::Rectangle<int> rowArea) noexcept
+    {
+        SidebarRowLayout layout;
+        auto area = rowArea;
+
+        area.removeFromRight (kRowRightPadding);
+
+        layout.hotkeyArea = area.removeFromRight (kRowHotkeyWidth);
+        area.removeFromRight (kRowIconGap);
+
+        layout.speakerIconArea = area.removeFromRight (kRowIconSlotWidth);
+        area.removeFromRight (kRowIconGap);
+
+        layout.loopIconArea = area.removeFromRight (kRowIconSlotWidth);
+        area.removeFromRight (kRowIconGap);
+
+        area.removeFromLeft (kRowLeftPadding);
+        layout.nameArea = area;
+
+        return layout;
+    }
+
+    static juce::Rectangle<float> centerIconInSlot (juce::Rectangle<int> slot) noexcept
+    {
+        const float sz = showcontrol::icons::kListIconSize;
+        return { (float) slot.getX() + ((float) slot.getWidth() - sz) * 0.5f,
+                 (float) slot.getY() + ((float) slot.getHeight() - sz) * 0.5f,
+                 sz, sz };
+    }
+
+    /** Vùng tên — đồng bộ nhãn paint() và TextEditor inline (resized). */
+    static juce::Rectangle<int> layoutListNameArea (juce::Rectangle<int> rowArea) noexcept
+    {
+        return layoutSidebarRowRegions (rowArea).nameArea;
+    }
+
     juce::Optional<juce::Rectangle<int>> getRowBoundsForListIndex (int listIndex) const
     {
         int y = listContentTop;
-        y += 24;
+        y += kSectionHeaderHeight;
 
         for (int i = 0; i < sets.size(); ++i)
         {
@@ -511,7 +640,7 @@ private:
         }
 
         y += 15;
-        y += 24;
+        y += kSectionHeaderHeight;
 
         for (int i = 0; i < sets.size(); ++i)
         {
@@ -589,30 +718,28 @@ private:
         if (isDraggedRow)
             g.setOpacity (0.38f);
 
+        const auto rowLayout = layoutSidebarRowRegions ({ 10, y, getWidth() - 20, 31 });
+
         g.setColour (isSelected ? cols.textPrimary : cols.textSecondary);
         g.setFont (ShowTheme::font (13.5f));
 
         juce::String displayName = sets[index].name;
         if (sets[index].isLocked)
             displayName += juce::String::fromUTF8 (u8" 🔒");
-        g.drawText (displayName, 22, y, getWidth() - 110, 31, juce::Justification::centredLeft);
 
-        constexpr float kSidebarRowH = 31.0f;
-        const float sidebarIconY = (float) y + (kSidebarRowH - showcontrol::icons::kListIconSize) * 0.5f;
+        g.drawText (displayName, rowLayout.nameArea, juce::Justification::centredLeft, true);
 
         if (sets[index].isLooping)
         {
             showcontrol::icons::paintLoopIcon (g,
-                                               { (float) getWidth() - 118.0f, sidebarIconY,
-                                                 showcontrol::icons::kListIconSize, showcontrol::icons::kListIconSize },
+                                               centerIconInSlot (rowLayout.loopIconArea),
                                                cols.accent, true);
         }
 
         if (sets[index].isPlaying)
         {
             showcontrol::icons::paintSpeakerIcon (g,
-                                                  { (float) getWidth() - 95.0f, sidebarIconY,
-                                                    showcontrol::icons::kListIconSize, showcontrol::icons::kListIconSize },
+                                                  centerIconInSlot (rowLayout.speakerIconArea),
                                                   showcontrol::icons::speakerPlayingColour (isSelected),
                                                   isSelected);
         }
@@ -625,7 +752,7 @@ private:
         #endif
         g.setColour (cols.textMuted);
         g.setFont (ShowTheme::font (11.0f));
-        g.drawText (shortcutText, getWidth() - 85, y, 70, 31, juce::Justification::centredRight);
+        g.drawText (shortcutText, rowLayout.hotkeyArea, juce::Justification::centredRight, true);
 
         if (isDraggedRow)
             g.setOpacity (1.0f);
@@ -634,14 +761,14 @@ private:
     void showNewSetMenu()
     {
         juce::PopupMenu m;
-        m.addItem (1, juce::String::fromUTF8 (u8"Thêm BGM"));
-        m.addItem (2, juce::String::fromUTF8 (u8"Thêm Cue"));
+        m.addItem (1, showcontrol::localization::tr (u8"Thêm BGM"));
+        m.addItem (2, showcontrol::localization::tr (u8"Thêm Cue"));
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (addBtn), [this] (int result)
         {
             if (result == 1 && onAddList)
-                onAddList (sets.size(), juce::String::fromUTF8 (u8"Bộ BGM Mới"), 12, false);
+                onAddList (sets.size(), showcontrol::localization::defaultBgmListName(), 12, false);
             if (result == 2 && onAddList)
-                onAddList (sets.size(), juce::String::fromUTF8 (u8"Bộ Cue Mới"), 0, true);
+                onAddList (sets.size(), showcontrol::localization::defaultCueListName(), 0, true);
         });
     }
 
@@ -651,26 +778,26 @@ private:
             return;
 
         juce::PopupMenu menu;
-        menu.addItem ((int) SidebarMenuId::rename,    juce::String::fromUTF8 (u8"Đổi tên"));
-        menu.addItem ((int) SidebarMenuId::duplicate, juce::String::fromUTF8 (u8"Nhân bản"));
-        menu.addItem ((int) SidebarMenuId::addSounds, juce::String::fromUTF8 (u8"Thêm âm thanh..."));
+        menu.addItem ((int) SidebarMenuId::rename,    showcontrol::localization::tr (u8"Đổi tên"));
+        menu.addItem ((int) SidebarMenuId::duplicate, showcontrol::localization::tr (u8"Nhân bản"));
+        menu.addItem ((int) SidebarMenuId::addSounds, showcontrol::localization::tr (u8"Thêm âm thanh..."));
 
         // isGridMode: false = BGM (danh sách), true = CUE (lưới PAD) — luôn hiển thị, không disable
         const juce::String switchLabel = sets[index].isGridMode
-            ? juce::String::fromUTF8 (u8"Chuyển sang dạng danh sách BGM")
-            : juce::String::fromUTF8 (u8"Chuyển sang dạng lưới CUE");
+            ? showcontrol::localization::tr (u8"Chuyển sang dạng danh sách BGM")
+            : showcontrol::localization::tr (u8"Chuyển sang dạng lưới CUE");
         menu.addItem ((int) SidebarMenuId::switchView, switchLabel);
 
         if (! sets[index].isGridMode)
         {
             menu.addItem ((int) SidebarMenuId::toggleListLoop,
-                          juce::String::fromUTF8 (u8"Lặp lại danh sách"),
+                          showcontrol::localization::tr (u8"Lặp lại danh sách"),
                           true,
                           sets[index].isLooping);
         }
 
         menu.addSeparator();
-        menu.addItem ((int) SidebarMenuId::deleteItem, juce::String::fromUTF8 (u8"Xóa"));
+        menu.addItem ((int) SidebarMenuId::deleteItem, showcontrol::localization::tr (u8"Xóa"));
 
         const auto options = juce::PopupMenu::Options()
                                  .withTargetComponent (this)
@@ -726,7 +853,11 @@ private:
 
         renamingListIndex = index;
         selectedIndex = index;
-        listNameEditor.setText (sets[index].name, juce::dontSendNotification);
+        inlineRenameOriginalName = sets[index].name;
+        inlineRenameEscapePressed = false;
+        ShowControlLookAndFeel::applyInlineListNameEditorStyle (listNameEditor, isDarkMode,
+                                                                index == selectedIndex);
+        listNameEditor.setText (inlineRenameOriginalName, juce::dontSendNotification);
         listNameEditor.setVisible (true);
         resized();
         listNameEditor.selectAll();
@@ -752,15 +883,35 @@ private:
         const int index = renamingListIndex;
         renamingListIndex = -1;
         listNameEditor.setVisible (false);
+        listNameEditor.giveAwayKeyboardFocus();
 
         juce::String newName = listNameEditor.getText().trim();
         if (newName.isEmpty())
             newName = sets[index].isGridMode ? juce::String::fromUTF8 (u8"Danh sách Cue") : juce::String::fromUTF8 (u8"Danh sách BGM");
 
+        if (newName == sets[index].name)
+        {
+            repaint();
+            return;
+        }
+
         sets.getReference (index).name = newName;
         if (onRenameList)
             onRenameList (index, newName);
 
+        repaint();
+    }
+
+    void cancelInlineRename()
+    {
+        if (renamingListIndex < 0)
+            return;
+
+        inlineRenameEscapePressed = true;
+        renamingListIndex = -1;
+        listNameEditor.setVisible (false);
+        listNameEditor.setText (inlineRenameOriginalName, juce::dontSendNotification);
+        listNameEditor.giveAwayKeyboardFocus();
         repaint();
     }
 

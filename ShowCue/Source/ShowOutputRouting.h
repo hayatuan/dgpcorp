@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_core/juce_core.h>
+#include "ShowLocalization.h"
 
 /** Ma trận định tuyến stereo bus → cặp kênh hardware (RT-safe helpers). */
 namespace showcontrol::routing
@@ -7,15 +8,60 @@ namespace showcontrol::routing
     /** Số bus hiển thị trên Inspector (Main FOH + 3 AUX). */
     inline constexpr int kInspectorBusCount = 4;
 
-    inline juce::String getBusDisplayName (int busIndex)
+    inline const char* getBusDefaultKey (int busIndex) noexcept
     {
         switch (busIndex)
         {
-            case 0:  return juce::String::fromUTF8 (u8"Main FOH (Ch 1-2)");
-            case 1:  return juce::String::fromUTF8 (u8"AUX 1 (Ch 3-4)");
-            case 2:  return juce::String::fromUTF8 (u8"AUX 2 (Ch 5-6)");
-            case 3:  return juce::String::fromUTF8 (u8"AUX 3 (Ch 7-8)");
-            default: return "Bus " + juce::String (busIndex + 1);
+            case 0:  return u8"Đầu ra FOH Chính";
+            case 1:  return u8"Monitor Sân Khấu";
+            case 2:  return u8"AUX 2 (Ch 5-6)";
+            case 3:  return u8"AUX 3 (Ch 7-8)";
+            default: return nullptr;
+        }
+    }
+
+    inline juce::String getBusDisplayName (int busIndex)
+    {
+        if (const char* key = getBusDefaultKey (busIndex))
+            return showcontrol::localization::tr (key);
+
+        return "Bus " + juce::String (busIndex + 1);
+    }
+
+    /** true nếu tên bus vẫn là mặc định (VI/EN/legacy) — cho phép lật khi đổi ngôn ngữ. */
+    inline bool isDefaultBusName (int busIndex, const juce::String& name) noexcept
+    {
+        const auto trimmed = name.trim();
+        if (trimmed.isEmpty())
+            return true;
+
+        if (const char* key = getBusDefaultKey (busIndex))
+        {
+            if (trimmed == juce::String::fromUTF8 (key))
+                return true;
+        }
+
+        switch (busIndex)
+        {
+            case 0:
+                return trimmed == "Main FOH"
+                    || trimmed == juce::String::fromUTF8 (u8"Main FOH (Ch 1-2)")
+                    || trimmed == juce::String::fromUTF8 (u8"Đầu ra FOH Chính");
+
+            case 1:
+                return trimmed == "Stage Monitor"
+                    || trimmed == "Monitor"
+                    || trimmed == juce::String::fromUTF8 (u8"AUX 1 (Ch 3-4)")
+                    || trimmed == juce::String::fromUTF8 (u8"Monitor Sân Khấu");
+
+            case 2:
+                return trimmed == juce::String::fromUTF8 (u8"AUX 2 (Ch 5-6)");
+
+            case 3:
+                return trimmed == juce::String::fromUTF8 (u8"AUX 3 (Ch 7-8)");
+
+            default:
+                return trimmed == ("AUX " + juce::String (busIndex));
         }
     }
 

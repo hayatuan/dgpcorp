@@ -3,6 +3,7 @@
 #include "ShowGraphicsSafe.h"
 #include "ShowFlatIcons.h"
 #include "HotkeyManager.h"
+#include "ShowLocalization.h"
 
 namespace
 {
@@ -37,6 +38,26 @@ namespace
 }
 
 //==============================================================================
+/** Thanh tiêu đề cột — bounds tách khỏi ListBox, không hardcode Y trong paint panel. */
+class CueListPanel::CueListHeaderComponent : public juce::Component
+{
+public:
+    explicit CueListHeaderComponent (CueListPanel& ownerIn) : owner (ownerIn)
+    {
+        setInterceptsMouseClicks (false, false);
+        setOpaque (false);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        owner.paintHeader (g, getLocalBounds());
+    }
+
+private:
+    CueListPanel& owner;
+};
+
+//==============================================================================
 /** Mirror MainComponent::PadReorderOverlay — vẽ trên listBox, không bị che. */
 class CueListPanel::CueReorderOverlay : public juce::Component,
                                         private juce::Timer
@@ -46,6 +67,11 @@ public:
     {
         setInterceptsMouseClicks (false, false);
         setOpaque (false);
+    }
+
+    ~CueReorderOverlay() override
+    {
+        stopTimer();
     }
 
     void visibilityChanged() override
@@ -262,7 +288,15 @@ public:
         g.setFont (ShowTheme::font (13.5f, highlightRow ? "Bold" : "Plain"));
 
         const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (width, textX);
-        g.drawText (cue.name, textX, 0, nameMaxW, height, juce::Justification::centredLeft, true);
+
+        if (owner.renamingTrackIndex != rowNumber)
+        {
+            const juce::String displayName = cue.name.isNotEmpty()
+                ? cue.name
+                : (pad != nullptr ? pad->getPadName() : juce::String());
+
+            g.drawText (displayName, textX, 0, nameMaxW, height, juce::Justification::centredLeft, true);
+        }
 
         if (cue.autoFollow)
         {
@@ -325,8 +359,19 @@ public:
         // ListBox đã gọi selectRowsBasedOnModifierKeys — đồng bộ state + callback BGM-style.
         owner.applySelectionForRowClick (row, e.mods);
 
-        if (e.getNumberOfClicks() == 2 && owner.onCueTriggered)
-            owner.onCueTriggered (row);
+        if (e.getNumberOfClicks() == 2)
+        {
+            const auto local = owner.listBox.getLocalPoint (e.eventComponent, e.getPosition());
+
+            if (owner.isPointInTrackNameColumn (row, local.x))
+            {
+                owner.beginTrackRename (row);
+                return;
+            }
+
+            if (owner.onCueTriggered)
+                owner.onCueTriggered (row);
+        }
     }
 
     void backgroundClicked (const juce::MouseEvent& e) override
@@ -359,6 +404,10 @@ CueListPanel::CueListPanel()
 {
     setWantsKeyboardFocus (true);
 
+    headerComponent = std::make_unique<CueListHeaderComponent> (*this);
+    addAndMakeVisible (*headerComponent);
+    headerComponent->setVisible (false);
+
     reorderOverlay = std::make_unique<CueReorderOverlay> (*this);
     addChildComponent (*reorderOverlay);
     reorderOverlay->setVisible (false);
@@ -377,15 +426,30 @@ CueListPanel::CueListPanel()
     // Marquee quét chọn nhiều (vùng trống / kéo chéo) — không can thiệp kéo hàng native.
     listBox.addMouseListener (this, true);
 
+    trackNameLabel.setVisible (false);
+    trackNameLabel.addListener (this);
+    addChildComponent (trackNameLabel);
+
+    refreshLocalizedText();
     updateTheme (true);
 }
 
 CueListPanel::~CueListPanel()
 {
-    listBox.removeMouseListener (this);
     stopTimer();
+    haltActiveTimers();
+    trackNameLabel.removeListener (this);
+    listBox.removeMouseListener (this);
     listBox.setModel (nullptr);
     reorderOverlay.reset();
+}
+
+void CueListPanel::haltActiveTimers() noexcept
+{
+    stopTimer();
+
+    if (reorderOverlay != nullptr)
+        reorderOverlay->setVisible (false);
 }
 
 void CueListPanel::lookAndFeelChanged()
@@ -395,12 +459,24 @@ void CueListPanel::lookAndFeelChanged()
     if (auto* showLaf = dynamic_cast<ShowControlLookAndFeel*> (&getLookAndFeel()))
         isDarkMode = showLaf->isDarkMode();
 
+    refreshLocalizedText();
     repaint();
+}
+
+void CueListPanel::refreshLocalizedText()
+{
+    listBox.setTooltip (showcontrol::localization::tr (
+        u8"Rê chuột để kéo thả di chuyển vị trí kịch bản"));
+    repaint();
+    listBox.repaint();
 }
 
 void CueListPanel::updateTheme (bool isDark)
 {
     isDarkMode = isDark;
+    ShowControlLookAndFeel::applyTrackNameLabelStyle (trackNameLabel, isDark,
+                                                      renamingTrackIndex >= 0
+                                                          && listBox.isRowSelected (renamingTrackIndex));
     listBox.repaint();
     repaint();
 }
@@ -408,8 +484,15 @@ void CueListPanel::updateTheme (bool isDark)
 void CueListPanel::refreshListBoxData()
 {
     listBox.updateContent();
+    resetListScrollToTop();
     listBox.repaint();
     repaint();
+}
+
+void CueListPanel::resetListScrollToTop()
+{
+    if (auto* vp = listBox.getViewport())
+        vp->setViewPosition (0, 0);
 }
 
 void CueListPanel::setCues (const juce::Array<CueItem>& newCues)
@@ -546,7 +629,9 @@ int CueListPanel::getPreferredHeight() const
     if (cues.isEmpty())
         return kRowH;
 
-    return cueListHasLoadedContent (cues) ? (kHeaderH + cues.size() * kRowH) : kRowH;
+    return cueListHasLoadedContent (cues)
+               ? (kHeaderH + kHeaderGap + cues.size() * kRowH)
+               : kRowH;
 }
 
 void CueListPanel::paint (juce::Graphics& g)
@@ -558,26 +643,42 @@ void CueListPanel::paint (juce::Graphics& g)
     if (! cueListHasLoadedContent (cues))
     {
         g.setColour (cols.textMuted);
-        g.setFont (ShowTheme::font (15.0f));
-        g.drawFittedText (juce::String::fromUTF8 (u8"Danh sách CUE trống. Hãy kéo thả file âm thanh vào đây để tự động cấu hình các ô PAD biểu diễn."),
-                          getLocalBounds().reduced (32),
+        auto textArea = getLocalBounds().reduced (32);
+        g.setFont (ShowTheme::fontBold (16.0f));
+        g.drawFittedText (showcontrol::localization::tr (u8"DANH SÁCH KỊCH BẢN CUE TRỐNG"),
+                          textArea.removeFromTop (textArea.getHeight() / 2 - 6),
                           juce::Justification::centred,
-                          4);
+                          2);
+        g.setFont (ShowTheme::font (14.0f));
+        g.drawFittedText (showcontrol::localization::tr (u8"Kéo thả file nhạc vào đây để thiết lập show"),
+                          textArea,
+                          juce::Justification::centred,
+                          3);
         return;
     }
-
-    paintHeader (g, { 0, 0, getWidth(), kHeaderH });
 }
 
 void CueListPanel::resized()
 {
     auto area = getLocalBounds();
+    const bool showHeader = cueListHasLoadedContent (cues);
 
-    if (cueListHasLoadedContent (cues))
-        area.removeFromTop (kHeaderH);
+    if (headerComponent != nullptr)
+    {
+        headerComponent->setVisible (showHeader);
+
+        if (showHeader)
+            headerComponent->setBounds (area.removeFromTop (kHeaderH));
+    }
+
+    if (showHeader)
+        area.removeFromTop (kHeaderGap);
 
     listBox.setBounds (area);
     updateCueReorderOverlayBounds();
+
+    if (renamingTrackIndex >= 0)
+        layoutTrackNameLabelForRow (renamingTrackIndex);
 }
 
 void CueListPanel::updateCueReorderOverlayBounds()
@@ -670,6 +771,12 @@ void CueListPanel::timerCallback()
 
 void CueListPanel::syncLiveTimer()
 {
+    if (! isShowing() || ! isVisible())
+    {
+        stopTimer();
+        return;
+    }
+
     if (anyRowTransportActive())
         startTimerHz (20);
     else
@@ -708,28 +815,202 @@ void CueListPanel::paintHeader (juce::Graphics& g, juce::Rectangle<int> bounds) 
     const auto elapsedRect   = showcontrol::bgmList::totalDurationBounds (bounds.getWidth(), bounds.getHeight())
                                    .translated (bounds.getX(), bounds.getY());
 
-    g.drawText (juce::String::fromUTF8 (u8"TÊN CUE KỊCH BẢN"), titleRect, juce::Justification::centredLeft);
-    g.drawText (juce::String::fromUTF8 (u8"CÒN LẠI"), remainingRect, juce::Justification::centred);
-    g.drawText (juce::String::fromUTF8 (u8"ĐÃ CHẠY"), elapsedRect, juce::Justification::centred);
+    g.drawText (showcontrol::localization::tr (u8"TÊN CUE KỊCH BẢN"), titleRect, juce::Justification::centredLeft);
+    g.drawText (showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect, juce::Justification::centred);
+    g.drawText (showcontrol::localization::tr (u8"ĐÃ CHẠY"), elapsedRect, juce::Justification::centred);
 }
 
 void CueListPanel::showTrackContextMenu (int cueIndex)
 {
     juce::PopupMenu menu;
-    menu.addItem ((int) TrackMenuId::replaceFile, juce::String::fromUTF8 (u8"Thay đổi file nhạc..."));
-    menu.addItem ((int) TrackMenuId::duplicate,   juce::String::fromUTF8 (u8"Nhân bản"));
-    menu.addItem ((int) TrackMenuId::trimEditor,  juce::String::fromUTF8 (u8"Chỉnh sửa (Trim Editor)..."));
-    menu.addItem ((int) TrackMenuId::revealFile,  juce::String::fromUTF8 (u8"Mở vị trí tệp..."));
+    menu.addItem ((int) TrackMenuId::renameTrack,  showcontrol::localization::tr (u8"Đổi tên bài hát"));
+    menu.addItem ((int) TrackMenuId::replaceFile, showcontrol::localization::tr (u8"Thay đổi file nhạc..."));
+    menu.addItem ((int) TrackMenuId::duplicate,   showcontrol::localization::tr (u8"Nhân bản"));
+    menu.addItem ((int) TrackMenuId::trimEditor,  showcontrol::localization::tr (u8"Chỉnh sửa (Trim Editor)..."));
+    menu.addItem ((int) TrackMenuId::revealFile,  showcontrol::localization::tr (u8"Mở vị trí tệp..."));
     menu.addSeparator();
-    menu.addItem ((int) TrackMenuId::resetFade,   juce::String::fromUTF8 (u8"Reset Fade về mặc định (0 ms)"));
-    menu.addItem ((int) TrackMenuId::deleteItem,  juce::String::fromUTF8 (u8"Xóa"));
+    menu.addItem ((int) TrackMenuId::resetFade,   showcontrol::localization::tr (u8"Reset Fade về mặc định (0 ms)"));
+    menu.addItem ((int) TrackMenuId::deleteItem,  showcontrol::localization::tr (u8"Xóa"));
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&listBox).withMousePosition(),
                         [this, cueIndex] (int result)
                         {
+                            if (result == (int) TrackMenuId::renameTrack)
+                            {
+                                beginTrackRename (cueIndex);
+                                return;
+                            }
+
                             if (onTrackMenuResult)
                                 onTrackMenuResult (cueIndex, result);
                         });
+}
+
+bool CueListPanel::isPointInTrackNameColumn (int rowIndex, int localXInListBox) const
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return false;
+
+    int textX = showcontrol::bgmList::kNameStartDefault;
+
+    if (padAccessor)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+        {
+            if (pad->isPlaying() || pad->isPaused())
+                textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+        }
+    }
+
+    const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (listBox.getWidth(), textX);
+    return localXInListBox >= textX && localXInListBox < textX + nameMaxW;
+}
+
+void CueListPanel::layoutTrackNameLabelForRow (int rowIndex)
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return;
+
+    auto rowBounds = listBox.getRowPosition (rowIndex, false);
+    rowBounds = rowBounds + listBox.getPosition();
+
+    int textX = showcontrol::bgmList::kNameStartDefault;
+
+    if (padAccessor)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+        {
+            if (pad->isPlaying() || pad->isPaused())
+                textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+        }
+    }
+
+    const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (listBox.getWidth(), textX);
+    trackNameLabel.setBounds (rowBounds.getX() + textX, rowBounds.getY(), nameMaxW, rowBounds.getHeight());
+}
+
+void CueListPanel::beginTrackRename (int rowIndex)
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return;
+
+    renamingTrackIndex = rowIndex;
+    pendingRenameRowIndex = rowIndex;
+    listBox.selectRow (rowIndex, false, true);
+    selectedIndex = rowIndex;
+
+    juce::String initialName = cues.getReference (rowIndex).name;
+
+    if (padAccessor)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+            initialName = pad->getPadName();
+    }
+
+    ShowControlLookAndFeel::applyTrackNameLabelStyle (trackNameLabel, isDarkMode,
+                                                      listBox.isRowSelected (rowIndex));
+    trackNameLabel.setText (initialName, juce::dontSendNotification);
+    layoutTrackNameLabelForRow (rowIndex);
+    trackNameLabel.setVisible (true);
+    trackNameLabel.toFront (false);
+    listBox.repaintRow (rowIndex);
+
+    juce::Component::SafePointer<CueListPanel> safe (this);
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (safe == nullptr || ! safe->trackNameLabel.isVisible())
+            return;
+
+        safe->trackNameLabel.showEditor();
+    });
+}
+
+bool CueListPanel::commitTrackRenameFromLabel (int rowIndex)
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return false;
+
+    const juce::String newName = trackNameLabel.getText().trim();
+
+    if (newName.isEmpty())
+        return false;
+
+    const juce::String previousName = cues.getReference (rowIndex).name;
+
+    if (padAccessor)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+        {
+            if (pad->getPadName() == newName && previousName == newName)
+                return false;
+        }
+    }
+    else if (previousName == newName)
+    {
+        return false;
+    }
+
+    cues.getReference (rowIndex).name = newName;
+
+    if (padAccessor)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+            pad->setCustomName (newName);
+    }
+
+    if (onTrackRenamed)
+        onTrackRenamed (rowIndex, newName);
+
+    refreshListBoxData();
+    pendingRenameRowIndex = -1;
+    return true;
+}
+
+void CueListPanel::labelTextChanged (juce::Label* labelThatHasChanged)
+{
+    if (labelThatHasChanged != &trackNameLabel)
+        return;
+
+    const int rowIndex = pendingRenameRowIndex >= 0 ? pendingRenameRowIndex : renamingTrackIndex;
+
+    if (rowIndex < 0)
+        return;
+
+    commitTrackRenameFromLabel (rowIndex);
+}
+
+void CueListPanel::editorShown (juce::Label* label, juce::TextEditor& editor)
+{
+    if (label != &trackNameLabel || renamingTrackIndex < 0)
+        return;
+
+    ShowControlLookAndFeel::applyInlineListNameEditorStyle (editor, isDarkMode,
+                                                            listBox.isRowSelected (renamingTrackIndex));
+    const auto pal = ShowTheme::get (isDarkMode);
+    editor.setTextToShowWhenEmpty (showcontrol::localization::tr (u8"Nhập tên bài hát mới"),
+                                   pal.textMuted);
+}
+
+void CueListPanel::editorHidden (juce::Label* label, juce::TextEditor& editor)
+{
+    juce::ignoreUnused (editor);
+
+    if (label != &trackNameLabel)
+        return;
+
+    const int rowIndex = pendingRenameRowIndex >= 0 ? pendingRenameRowIndex : renamingTrackIndex;
+
+    // JUCE gọi editorHidden trước labelTextChanged — commit tại đây để Enter không mất tên.
+    if (rowIndex >= 0)
+        commitTrackRenameFromLabel (rowIndex);
+
+    const int prevRow = rowIndex;
+    renamingTrackIndex = -1;
+    pendingRenameRowIndex = -1;
+    trackNameLabel.setVisible (false);
+
+    if (prevRow >= 0)
+        listBox.repaintRow (prevRow);
 }
 
 void CueListPanel::applySelectionForRowClick (int clickedIndex, const juce::ModifierKeys& mods)

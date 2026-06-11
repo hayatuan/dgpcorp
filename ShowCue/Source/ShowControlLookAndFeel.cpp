@@ -180,6 +180,12 @@ void ShowControlLookAndFeel::refreshTypography()
     setDefaultSansSerifTypeface (showcontrol::typography::resolveUiTypeface (false));
 }
 
+void ShowControlLookAndFeel::shutdownTypographyCaches() noexcept
+{
+    showcontrol::typography::clearCaches();
+    juce::Typeface::clearTypefaceCache();
+}
+
 juce::Typeface::Ptr ShowControlLookAndFeel::getTypefaceForFont (const juce::Font& font)
 {
     if (ShowTheme::isTimerFontRequest (font))
@@ -240,6 +246,87 @@ void ShowControlLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleBu
     g.setColour (cols.text.withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.5f));
     g.setFont (ShowTheme::fontBold (11.0f));
     g.drawText (button.getButtonText(), bounds, juce::Justification::centred);
+}
+
+namespace showcontrol::inlineEditor
+{
+    constexpr float kCornerRadius = 4.5f;
+    const juce::Colour kBrandFocusBlue { 0xFF007FFF };
+
+    bool isInlineListNameEditor (const juce::TextEditor& te) noexcept
+    {
+        return te.getComponentID() == "showcue-inline-list-name-editor";
+    }
+}
+
+void ShowControlLookAndFeel::applyTrackNameLabelStyle (juce::Label& label, bool isDark,
+                                                      bool isOnSelectedRow) noexcept
+{
+    const auto pal = ShowTheme::get (isDark);
+    const auto bg = isDark ? (isOnSelectedRow ? pal.rowSelected : pal.panelBg) : pal.panelElevated;
+
+    label.setFont (ShowTheme::font (13.5f));
+    label.setJustificationType (juce::Justification::centredLeft);
+    label.setColour (juce::Label::textColourId, pal.textPrimary);
+    label.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+    label.setColour (juce::Label::backgroundWhenEditingColourId, bg);
+    label.setColour (juce::Label::outlineWhenEditingColourId, showcontrol::inlineEditor::kBrandFocusBlue);
+    label.setColour (juce::Label::textWhenEditingColourId, pal.textPrimary);
+}
+
+void ShowControlLookAndFeel::applyInlineListNameEditorStyle (juce::TextEditor& editor, bool isDark,
+                                                             bool isOnSelectedRow) noexcept
+{
+    const auto pal = ShowTheme::get (isDark);
+    const auto bg = isDark ? (isOnSelectedRow ? pal.rowSelected : pal.panelBg) : pal.panelElevated;
+
+    editor.setColour (juce::TextEditor::backgroundColourId,      bg);
+    editor.setColour (juce::TextEditor::focusedOutlineColourId,  showcontrol::inlineEditor::kBrandFocusBlue);
+    editor.setColour (juce::TextEditor::outlineColourId,         juce::Colours::transparentBlack);
+    editor.setColour (juce::TextEditor::textColourId,             pal.textPrimary);
+    editor.setColour (juce::TextEditor::highlightColourId,       showcontrol::inlineEditor::kBrandFocusBlue.withAlpha (0.4f));
+    editor.setColour (juce::TextEditor::highlightedTextColourId, pal.textPrimary);
+    editor.setColour (juce::CaretComponent::caretColourId,       showcontrol::inlineEditor::kBrandFocusBlue);
+
+    editor.setFont (ShowTheme::font (13.5f));
+    editor.setJustification (juce::Justification::centredLeft);
+    editor.setIndents (6, 0);
+    editor.setBorder (juce::BorderSize<int> (5, 6, 5, 6));
+}
+
+void ShowControlLookAndFeel::fillTextEditorBackground (juce::Graphics& g, int width, int height,
+                                                       juce::TextEditor& textEditor)
+{
+    if (showcontrol::inlineEditor::isInlineListNameEditor (textEditor))
+    {
+        g.setColour (textEditor.findColour (juce::TextEditor::backgroundColourId));
+        g.fillRoundedRectangle (0.0f, 0.0f, (float) width, (float) height,
+                                showcontrol::inlineEditor::kCornerRadius);
+        return;
+    }
+
+    LookAndFeel_V4::fillTextEditorBackground (g, width, height, textEditor);
+}
+
+void ShowControlLookAndFeel::drawTextEditorOutline (juce::Graphics& g, int width, int height,
+                                                    juce::TextEditor& textEditor)
+{
+    if (showcontrol::inlineEditor::isInlineListNameEditor (textEditor))
+    {
+        if (! textEditor.isEnabled())
+            return;
+
+        if (textEditor.hasKeyboardFocus (true) && ! textEditor.isReadOnly())
+        {
+            g.setColour (textEditor.findColour (juce::TextEditor::focusedOutlineColourId));
+            g.drawRoundedRectangle (0.5f, 0.5f, (float) width - 1.0f, (float) height - 1.0f,
+                                    showcontrol::inlineEditor::kCornerRadius, 1.5f);
+        }
+
+        return;
+    }
+
+    LookAndFeel_V4::drawTextEditorOutline (g, width, height, textEditor);
 }
 
 void ShowControlLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
@@ -347,7 +434,7 @@ void ShowControlLookAndFeel::applyPalette (bool dark)
 
     setColour (juce::TextEditor::backgroundColourId,      pal.inputBg);
     setColour (juce::TextEditor::textColourId,            pal.textPrimary);
-    setColour (juce::TextEditor::outlineColourId,         pal.inputOutline);
+    setColour (juce::TextEditor::outlineColourId,         juce::Colours::transparentBlack);
     setColour (juce::TextEditor::focusedOutlineColourId,  pal.accent);
     setColour (juce::TextEditor::highlightColourId,       pal.accentSoft.withAlpha (0.28f));
     setColour (juce::TextEditor::highlightedTextColourId, pal.textPrimary);

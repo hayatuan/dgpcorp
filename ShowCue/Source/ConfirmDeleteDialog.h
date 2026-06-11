@@ -5,6 +5,7 @@
 #include "ShowControlLookAndFeel.h"
 #include "ShowControlMacWindow.h"
 #include "ShowFlatIcons.h"
+#include "ShowLocalization.h"
 
 namespace showcontrol::ui
 {
@@ -63,7 +64,7 @@ public:
     CleanConfirmationDialog (juce::String titleText,
                              juce::String subtextText,
                              juce::String confirmTextIn)
-        : dontAskAgainBox { juce::String::fromUTF8 (u8"Đừng hỏi lại lần này") }
+        : dontAskAgainBox { showcontrol::localization::tr (u8"Đừng hỏi lại lần này") }
     {
         titleLabel.setJustificationType (juce::Justification::topLeft);
         titleLabel.setInterceptsMouseClicks (false, false);
@@ -75,8 +76,8 @@ public:
         subtextLabel.setText (std::move (subtextText), juce::dontSendNotification);
 
         confirmButton.setButtonText (confirmTextIn.isNotEmpty() ? confirmTextIn
-                                                                : juce::String::fromUTF8 (u8"Xóa"));
-        cancelButton.setButtonText (juce::String::fromUTF8 (u8"Hủy"));
+                                                                : showcontrol::localization::tr (u8"Xoá"));
+        cancelButton.setButtonText (showcontrol::localization::tr (u8"Hủy"));
 
         addAndMakeVisible (titleLabel);
         addAndMakeVisible (subtextLabel);

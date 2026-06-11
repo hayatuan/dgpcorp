@@ -1,9 +1,14 @@
 #include "MainComponent.h"
+#include <functional>
+#include <memory>
 #include "GlobalPreferencesDialog.h"
+#include "ShowLocalization.h"
 #include "ShowAboutDialog.h"
 #include "ShowUpdateChecker.h"
 #include "ShowWaveformCache.h"
 #include "ShowControlMacWindow.h"
+#include "ShowAppPreferences.h"
+#include "ShowApplicationState.h"
 
 namespace
 {
@@ -21,7 +26,21 @@ void broadcastLookAndFeelToAllWindows()
             top->sendLookAndFeelChange();
 }
 
+void forceLookAndFeelRefreshRecursively (juce::Component& root)
+{
+    root.lookAndFeelChanged();
+    root.repaint();
+
+    for (int i = 0; i < root.getNumChildComponents(); ++i)
+        if (auto* child = root.getChildComponent (i))
+            forceLookAndFeelRefreshRecursively (*child);
+}
+
+#if JUCE_DEBUG
 constexpr bool kEnableHotkeyTrace = true;
+#else
+constexpr bool kEnableHotkeyTrace = false;
+#endif
 
 void logHotkeyTrace (const juce::String& msg)
 {
@@ -34,6 +53,19 @@ void logHotkeyTrace (const juce::String& msg)
 static std::atomic<juce::uint32> g_lastGlobalSpacebarPressTime { 0 };
 static std::atomic<juce::uint32> g_gateQuietUntilMs { 0 };
 static constexpr juce::uint32 kGlobalSpacebarDebounceMs = 350;
+
+/** JUCE 8 không expose isKeyRepeat — lọc burst KeyDown <45ms cùng keyCode (OS auto-repeat). */
+bool swallowLikelyOsKeyRepeat (const juce::KeyPress& key) noexcept
+{
+    static int lastCode = 0;
+    static juce::uint32 lastMs = 0;
+    const int code = key.getKeyCode();
+    const auto now = juce::Time::getMillisecondCounter();
+    const bool isRepeat = (code != 0 && code == lastCode && lastMs != 0 && (now - lastMs) < 45);
+    lastCode = code;
+    lastMs = now;
+    return isRepeat;
+}
 } // namespace
 #include "ConfirmDeleteDialog.h"
 #include <limits>
@@ -85,6 +117,33 @@ public:
         if (onFire)
             onFire();
     }
+
+    ~PendingCueGoTimer() { stopTimer(); }
+};
+
+//==============================================================================
+/** One-shot timer thuộc MainComponent — hủy an toàn qua shutdownActiveTimers(). */
+class OneShotApplicationTimer final : public juce::Timer
+{
+public:
+    std::function<void()> onFire;
+
+    void startMs (int delayMs)
+    {
+        startTimer (juce::jmax (1, delayMs));
+    }
+
+    void timerCallback() override
+    {
+        stopTimer();
+        if (onFire)
+            onFire();
+    }
+
+    ~OneShotApplicationTimer() override
+    {
+        stopTimer();
+    }
 };
 
 //==============================================================================
@@ -97,6 +156,8 @@ public:
         setInterceptsMouseClicks (false, false);
         setOpaque (false);
     }
+
+    ~PadReorderOverlay() override { stopTimer(); }
 
     void visibilityChanged() override
     {
@@ -185,8 +246,8 @@ public:
         g.setFont (ShowTheme::font (15.0f));
 
         const juce::String message = (emptyListHint == EmptyListHint::cueGrid)
-            ? juce::String::fromUTF8 (u8"Danh sách CUE trống. Hãy kéo thả file âm thanh vào đây để tự động cấu hình các ô PAD biểu diễn.")
-            : juce::String::fromUTF8 (u8"Danh sách BGM trống. Hãy kéo thả file nhạc nền vào phân vùng này để thiết lập danh sách phát.");
+            ? showcontrol::localization::tr (u8"Danh sách CUE trống. Hãy kéo thả file âm thanh vào đây để tự động cấu hình các ô PAD biểu diễn.")
+            : showcontrol::localization::tr (u8"Danh sách BGM trống. Hãy kéo thả file nhạc nền vào phân vùng này để thiết lập danh sách phát.");
 
         g.drawFittedText (message,
                           getLocalBounds().reduced (32),
@@ -250,9 +311,9 @@ public:
         const auto remainingRect = showcontrol::bgmList::timeRemainingBounds (getWidth(), getHeight());
         const auto totalRect     = showcontrol::bgmList::totalDurationBounds (getWidth(), getHeight());
 
-        g.drawText (juce::String::fromUTF8 (u8"TÊN BÀI HÁT KỊCH BẢN BGM"), titleRect, juce::Justification::centredLeft);
-        g.drawText (juce::String::fromUTF8 (u8"THỜI GIAN CÒN LẠI"), remainingRect, juce::Justification::centred);
-        g.drawText (juce::String::fromUTF8 (u8"TỔNG THỜI LƯỢNG"), totalRect, juce::Justification::centred);
+        g.drawText (showcontrol::localization::tr (u8"TÊN BÀI HÁT BGM"), titleRect, juce::Justification::centredLeft);
+        g.drawText (showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect, juce::Justification::centred);
+        g.drawText (showcontrol::localization::tr (u8"THỜI LƯỢNG"), totalRect, juce::Justification::centred);
     }
 
 private:
@@ -566,51 +627,67 @@ private:
 int MainComponent::MultiOutputAudioCallback::findEmptySlot() const noexcept
 {
     for (int i = 0; i < kMaxPadSlots; ++i)
-        if (slots[i] == nullptr) return i;
+        if (slots[(size_t) i].load (std::memory_order_relaxed) == nullptr)
+            return i;
+
     return -1;
 }
 
 int MainComponent::MultiOutputAudioCallback::findSlotOf (const PadRealtimeSource* src) const noexcept
 {
     for (int i = 0; i < kMaxPadSlots; ++i)
-        if (slots[i] == src) return i;
+        if (slots[(size_t) i].load (std::memory_order_relaxed) == src)
+            return i;
+
     return -1;
 }
 
 void MainComponent::MultiOutputAudioCallback::registerSource (PadRealtimeSource* src)
 {
-    if (src == nullptr) return;
+    if (src == nullptr)
+        return;
 
-    // prepareToPlay gọi trước khi vào CS để tránh alloc dưới lock.
     if (isPrepared.load (std::memory_order_relaxed))
         src->prepareToPlay (currentBlockSize, currentSampleRate);
 
-    const juce::ScopedLock sl (padListCS);
-    const int idx = findEmptySlot();
-    if (idx >= 0)
-        slots[idx] = src;
+    for (int i = 0; i < kMaxPadSlots; ++i)
+    {
+        PadRealtimeSource* expected = nullptr;
+
+        if (slots[(size_t) i].compare_exchange_strong (expected, src, std::memory_order_acq_rel))
+            return;
+    }
 }
 
 void MainComponent::MultiOutputAudioCallback::unregisterSource (PadRealtimeSource* src)
 {
-    if (src == nullptr) return;
+    if (src == nullptr)
+        return;
 
-    const juce::ScopedLock sl (padListCS);
-    const int idx = findSlotOf (src);
-    if (idx >= 0)
-        slots[idx] = nullptr;
-    // Sau khi CS được release, audio callback hoặc (a) chưa bắt đầu block này
-    // → source không được xử lý, hoặc (b) đang giữ CS → unregister đã đợi xong.
-    // Trong cả hai trường hợp, caller có thể destroy source ngay sau khi hàm này return.
+    for (int i = 0; i < kMaxPadSlots; ++i)
+    {
+        PadRealtimeSource* expected = src;
+
+        if (slots[(size_t) i].compare_exchange_strong (expected, nullptr, std::memory_order_acq_rel))
+        {
+            src->waitUntilAudioIdle();
+            return;
+        }
+    }
 }
 
 void MainComponent::MultiOutputAudioCallback::removeAllSources()
 {
-    const juce::ScopedLock sl (padListCS);
     if (isPrepared.load (std::memory_order_relaxed))
-        for (auto* src : slots)
-            if (src != nullptr) src->releaseResources();
-    slots.fill (nullptr);
+    {
+        for (auto& slot : slots)
+            if (auto* src = slot.load (std::memory_order_relaxed))
+                src->releaseResources();
+    }
+
+    for (auto& slot : slots)
+        slot.store (nullptr, std::memory_order_release);
+
     isPrepared.store (false, std::memory_order_relaxed);
 }
 
@@ -645,9 +722,8 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceAboutToStart (juce::Aud
     // Pre-alloc render buffer (2ch × blockSize) — an toàn: không trong RT context.
     tempBuffer.setSize (2, blockSize, false, true, false);
 
-    const juce::ScopedLock sl (padListCS);
-    for (auto* src : slots)
-        if (src != nullptr)
+    for (auto& slot : slots)
+        if (auto* src = slot.load (std::memory_order_relaxed))
             src->prepareToPlay (blockSize, sr);
 
     masterDynamics.prepare (sr, blockSize);
@@ -675,9 +751,10 @@ void MainComponent::forceAllPadsIdleAtStartup()
 void MainComponent::MultiOutputAudioCallback::audioDeviceStopped()
 {
     isPrepared.store (false, std::memory_order_relaxed);
-    const juce::ScopedLock sl (padListCS);
-    for (auto* src : slots)
-        if (src != nullptr) src->releaseResources();
+
+    for (auto& slot : slots)
+        if (auto* src = slot.load (std::memory_order_relaxed))
+            src->releaseResources();
 }
 
 void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
@@ -688,9 +765,12 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // CS bảo vệ danh sách pad — cùng pattern juce::MixerAudioSource.
-    // Hiếm khi bị tranh chấp (chỉ khi add/remove pad từ UI) → tác động RT negligible.
-    const juce::ScopedLock sl (padListCS);
+    PadRealtimeSource* activeSources[kMaxPadSlots];
+    int numActiveSources = 0;
+
+    for (int i = 0; i < kMaxPadSlots; ++i)
+        if (auto* src = slots[(size_t) i].load (std::memory_order_acquire))
+            activeSources[numActiveSources++] = src;
 
     // Xóa toàn bộ output channels
     for (int ch = 0; ch < numOutputChannels; ++ch)
@@ -708,9 +788,11 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
     if (tempBuffer.getNumSamples() < numSamples)
         return;
 
-    for (auto* src : slots)
+    for (int i = 0; i < numActiveSources; ++i)
     {
-        if (src == nullptr) continue;
+        auto* src = activeSources[i];
+        if (src == nullptr)
+            continue;
 
         const int busIdx = juce::jlimit (0, kMaxBuses - 1, src->getOutputBus());
 
@@ -802,8 +884,8 @@ void MainComponent::syncSidebarFromAllLists (const juce::Array<juce::String>& na
         {
             const juce::String listName = (i < names.size() && names[i].isNotEmpty())
                                               ? names[i]
-                                              : (list->isGrid ? juce::String::fromUTF8 (u8"Bộ Cue Mới")
-                                                              : juce::String::fromUTF8 (u8"Bộ BGM Mới"));
+                                              : (list->isGrid ? showcontrol::localization::defaultCueListName()
+                                                              : showcontrol::localization::defaultBgmListName());
             sidebarPanel.addSet (listName, list->pads.size(), list->isGrid,
                                  list->useCueListPanel, list->isLocked);
             sidebarPanel.setListLooping (i, list->isLooping);
@@ -927,12 +1009,72 @@ void MainComponent::shutdownAudioAndPads() noexcept
     multiOutputCallback.removeAllSources();
     allLists.clear();
     timeSliceThread.stopThread (500);
+    showcontrol::background::shutdownPool();
     showcontrol::waveform::shutdownSharedCache();
 }
 
-MainComponent::~MainComponent()
+namespace
+{
+    void detachLookAndFeelRecursive (juce::Component& component)
+    {
+        for (int i = 0; i < component.getNumChildComponents(); ++i)
+            if (auto* child = component.getChildComponent (i))
+                detachLookAndFeelRecursive (*child);
+
+        component.setLookAndFeel (nullptr);
+    }
+}
+
+void MainComponent::releaseAllLookAndFeelAttachments() noexcept
+{
+    showSidebarBtn.setLookAndFeel (nullptr);
+    showInspectorBtn.setLookAndFeel (nullptr);
+
+    if (playoutModeBar != nullptr)
+        playoutModeBar->setLookAndFeelPtr (nullptr);
+
+    splitterButtonLaf.reset();
+    playoutModeButtonLaf.reset();
+
+    detachLookAndFeelRecursive (*this);
+}
+
+void MainComponent::shutdownActiveTimers() noexcept
 {
     stopTimer();
+    pendingGoTimer.reset();
+    startupReassertTimer.reset();
+    startupGuardTimer.reset();
+    deferredIdlePadsTimer.reset();
+    panicFadeDispatchScheduled.store (false, std::memory_order_release);
+
+    if (padReorderOverlay != nullptr)
+        padReorderOverlay->setVisible (false);
+
+    if (cueListPanel != nullptr)
+        cueListPanel->haltActiveTimers();
+
+    if (stageMonitorWindow != nullptr)
+        stageMonitorWindow.reset();
+}
+
+void MainComponent::prepareForApplicationShutdown()
+{
+    shutdownActiveTimers();
+    OutputBusNamingOverlay::dismissActive (false);
+
+    if (updateChecker != nullptr)
+        updateChecker.reset();
+
+    saveApplicationState();
+}
+
+
+MainComponent::~MainComponent()
+{
+    shutdownActiveTimers();
+    updateChecker.reset();
+
     juce::Desktop::getInstance().removeDarkModeSettingListener (this);
 
     removeKeyListener (this);
@@ -943,30 +1085,22 @@ MainComponent::~MainComponent()
         topLevelKeyListenerHost = nullptr;
     }
 
-    if (stageMonitorWindow != nullptr)
-    {
-        stageMonitorWindow->removeKeyListener (this);
-        stageMonitorWindow.reset();
-    }
-
-    showSidebarBtn.setLookAndFeel (nullptr);
-    showInspectorBtn.setLookAndFeel (nullptr);
-    splitterButtonLaf.reset();
-    pendingGoTimer.reset();
-
     if (soloPad != nullptr)
         setSoloPad (nullptr, false);
 
     releaseAllPadResources();
+    shutdownAudioAndPads();
 
+    formatManager.clearFormats();
+    showcontrol::audio::unbindActiveFormatManager();
+
+    releaseAllLookAndFeelAttachments();
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
-    saveProject();
+    ShowControlLookAndFeel::shutdownTypographyCaches();
 
     viewScroller.setViewedComponent (nullptr);
     cueListPanel.reset();
     scrollContent.reset();
-
-    shutdownAudioAndPads();
 }
 
 void MainComponent::visibilityChanged()
@@ -978,7 +1112,7 @@ void MainComponent::visibilityChanged()
 
 SoundPad* MainComponent::createSoundPad()
 {
-    auto* pad = new SoundPad();
+    auto* pad = new SoundPad (formatManager);
     pad->setSharedTimeSliceThread (&timeSliceThread);
 
     if (activeListIndex >= 0 && activeListIndex < allLists.size() && allLists[activeListIndex] != nullptr)
@@ -1019,12 +1153,11 @@ void MainComponent::wireSoundPad (SoundPad* pad)
                 if (cueListPanel != nullptr)
                 {
                     cueListPanel->setSelectedIndex (selectedBgmIndex);
-                    refreshCueListPanel();
+                    cueListPanel->repaint();
                 }
             }
         }
 
-        resized();
         if (isShowing())
             grabKeyboardFocus();
     };
@@ -1042,14 +1175,26 @@ void MainComponent::wireSoundPad (SoundPad* pad)
 
     pad->onPlaybackStateChanged = [this, pad]
     {
-        if (pad != nullptr && pad->isTransportActive())
-            syncUiToPlayingPad (pad, false);
+        juce::Component::SafePointer<SoundPad> safePad (pad);
+        const auto refreshUi = [this, safePad]
+        {
+            if (auto* p = safePad.getComponent())
+            {
+                if (p->isTransportActive())
+                    syncUiToPlayingPad (p, false);
+            }
 
-        masterDeckPanel.refreshTransportLabels();
-        masterDeckPanel.repaint();
-        inspectorPanel.refreshTransportUi();
-        refreshSidebarPlayingStatus();
-        updateCuePlaybackIndicators();
+            masterDeckPanel.refreshTransportLabels();
+            masterDeckPanel.repaint();
+            inspectorPanel.refreshTransportUi();
+            refreshSidebarPlayingStatus();
+            updateCuePlaybackIndicators();
+        };
+
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+            refreshUi();
+        else
+            juce::MessageManager::callAsync (refreshUi);
     };
 
     pad->onWillStartPlay = [this] (SoundPad* starter)
@@ -1080,16 +1225,60 @@ void MainComponent::wireSoundPad (SoundPad* pad)
 
     pad->onContextMenuRequested = [this] (SoundPad* p) { showTrackContextMenu (p); };
 
+    pad->onTrackNameChanged = [this] (SoundPad* p)
+    {
+        const int listIdx = findListIndexForPad (allLists, p);
+        if (listIdx < 0 || listIdx >= allLists.size())
+            return;
+
+        auto* list = allLists[listIdx];
+        if (list == nullptr)
+            return;
+
+        const int padIdx = list->pads.indexOf (p);
+        if (padIdx < 0)
+            return;
+
+        if (padIdx < list->cueMeta.size())
+            list->cueMeta.getReference (padIdx).name = p->getPadName();
+
+        if (listIdx == activeListIndex)
+        {
+            if (inspectorPanel.getCurrentPad() == p)
+                inspectorPanel.selectPad (p);
+
+            refreshCueListPanel();
+        }
+
+        saveProject();
+    };
+
     pad->onPadReorderBegin = [this] (SoundPad* p) { beginPadReorder (p); };
     pad->onPadReorderMove = [this] (SoundPad* p, juce::Point<int> pos) { juce::ignoreUnused (p); updatePadReorder (pos); };
     pad->onPadReorderEnd = [this] (SoundPad* p) { juce::ignoreUnused (p); endPadReorder(); };
 
-    pad->onTrackFinished = [this] (SoundPad* finished) { handleTrackFinished (finished); };
+    pad->onTrackFinished = [this] (SoundPad* finished)
+    {
+        juce::Component::SafePointer<SoundPad> safeFinished (finished);
+        const auto run = [this, safeFinished]
+        {
+            if (auto* p = safeFinished.getComponent())
+                handleTrackFinished (p);
+        };
+
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+            run();
+        else
+            juce::MessageManager::callAsync (run);
+    };
 
     pad->onAudioFileLoaded = [this] (SoundPad* loadedPad)
     {
         if (loadedPad != nullptr)
         {
+            if (isInitialLoading.load (std::memory_order_relaxed))
+                reloadPadWaveformFromConfig (loadedPad);
+
             const int listIdx = findListIndexForPad (allLists, loadedPad);
             if (listIdx >= 0)
             {
@@ -1286,9 +1475,10 @@ void MainComponent::timerCallback()
         {
             if (! bgmList->isGrid)
             {
-                const bool isPlaying = (findPlayingPadInActiveBgmList() != nullptr);
+                auto* bgmPlaying = findPlayingPadInActiveBgmList();
+                const bool isPlaying = (bgmPlaying != nullptr);
                 const int curIdx = isPlaying
-                                       ? bgmList->pads.indexOf (findPlayingPadInActiveBgmList())
+                                       ? bgmList->pads.indexOf (bgmPlaying)
                                        : selectedBgmIndex;
                 const bool hasPrev = (findPrevBgmTrackIndex (*bgmList, curIdx) >= 0);
                 const bool hasNext = (findNextBgmTrackIndex (*bgmList, curIdx) >= 0);
@@ -1761,8 +1951,8 @@ void MainComponent::importListsFromDroppedFolders (const juce::StringArray& fold
 
         juce::String folderName = folder.getFileName();
         if (folderName.isEmpty())
-            folderName = targetIsBgm ? juce::String::fromUTF8 (u8"Bộ BGM Mới")
-                                   : juce::String::fromUTF8 (u8"Bộ Cue Mới");
+            folderName = targetIsBgm ? showcontrol::localization::defaultBgmListName()
+                                   : showcontrol::localization::defaultCueListName();
 
         const int idx = allLists.size();
         allLists.add (new ListData());
@@ -2301,11 +2491,9 @@ void MainComponent::promptDeleteSelectedPadsConfirmation()
 
         if (auto* pad = list->pads[idx])
         {
-            title = juce::String::fromUTF8 (u8"Xóa bài hát");
-            subtext = juce::String::fromUTF8 (u8"Bài \"")
-                    + pad->getPadName()
-                    + juce::String::fromUTF8 (
-                          u8"\" sẽ bị xóa khỏi danh sách. Hành động này không thể hoàn tác.");
+            title = showcontrol::localization::tr (u8"Xác nhận xóa bài hát khỏi kịch bản?");
+            subtext = juce::String::fromUTF8 (u8"\"") + pad->getPadName() + juce::String::fromUTF8 (u8"\" — ")
+                    + showcontrol::localization::tr (u8"Hành động này không thể hoàn tác.");
         }
         else
         {
@@ -2314,20 +2502,18 @@ void MainComponent::promptDeleteSelectedPadsConfirmation()
     }
     else
     {
-        title = juce::String::fromUTF8 (u8"Xóa ")
-              + juce::String (indices.size())
-              + juce::String::fromUTF8 (u8" bài hát được chọn?");
-        subtext = juce::String::fromUTF8 (u8"Có ")
-                + juce::String (indices.size())
-                + juce::String::fromUTF8 (
-                      u8" mục đang được chọn sẽ bị xóa hoàn toàn khỏi kịch bản. Hành động này không thể hoàn tác.");
+        title = showcontrol::localization::tr (u8"Xóa nhiều bài hát")
+              + juce::String::fromUTF8 (u8" (") + juce::String (indices.size()) + juce::String::fromUTF8 (u8")");
+        subtext = showcontrol::localization::tr (u8"Bạn có chắc chắn muốn xóa mục này khỏi kịch bản?")
+                + juce::String::fromUTF8 (u8" ")
+                + showcontrol::localization::tr (u8"Hành động này không thể hoàn tác.");
     }
 
     juce::Component::SafePointer<MainComponent> safeThis (this);
     showcontrol::ui::showConfirmDeleteDialog (this,
                                               title,
                                               subtext,
-                                              juce::String::fromUTF8 (u8"Xóa"),
+                                              showcontrol::localization::tr (u8"Xoá"),
                                               [safeThis] (bool confirmed)
                                               {
                                                   if (confirmed && safeThis != nullptr)
@@ -2637,13 +2823,14 @@ void MainComponent::layoutActiveListPads()
         syncCueMetadataFromPads (*current);
         cueListPanel->setCues (current->cueMeta);
         cueListPanel->setSelectedIndex (selectedBgmIndex);
-        cueListPanel->setBounds (0, 0, mainViewWidth, viewScroller.getHeight());
-        cueListPanel->setVisible (true);
+        cueListPanel->resetListScrollToTop();
         updateCuePlaybackIndicators();
 
-        const int contentH = juce::jmax (viewScroller.getHeight(), cueListPanel->getPreferredHeight());
-        scrollContent->setSize (mainViewWidth, contentH);
-        viewScroller.setScrollBarsShown (hasLoadedAudio, false, hasLoadedAudio, false);
+        if (scrollContent != nullptr)
+            scrollContent->setSize (mainViewWidth, viewH);
+
+        viewScroller.setViewPosition (0, 0);
+        viewScroller.setScrollBarsShown (false, false, false, false);
         return;
     }
 
@@ -2678,11 +2865,21 @@ void MainComponent::layoutActiveListPads()
 
             p->setRenderMode (true);
             p->setIsSelectedRow (isPadSelectedInActiveList (i));
-            p->setBounds (grid.cellBounds (i));
+            const auto cellBounds = grid.cellBounds (i);
+            p->setBounds (cellBounds);
             p->setVisible (true);
             p->setAlpha (isDragSource ? 0.34f : 1.0f);
-            p->setThumbnailLoadAllowed (true);
-            p->setNormalizationLoadAllowed (true);
+
+            const bool inPrefetchRange = (cellBounds.getBottom() >= scrollY - kPrefetchMarginPx)
+                                           && (cellBounds.getY() <= scrollY + viewH + kPrefetchMarginPx);
+            const bool selectedOrActive = isPadSelectedInActiveList (i)
+                                              || (p->isPlaying() || p->isTransportActive());
+            const bool allowThumb = selectedOrActive || inPrefetchRange;
+            p->setThumbnailLoadAllowed (allowThumb);
+            p->setNormalizationLoadAllowed (allowThumb);
+
+            if (allowThumb && p->getFilePath().isNotEmpty())
+                p->reloadWaveformThumbnail();
             totalHeightOfContent = std::max (totalHeightOfContent, p->getBottom() + 12);
         }
     }
@@ -2726,6 +2923,9 @@ void MainComponent::layoutActiveListPads()
             const bool selectedOrPrefetch = isPadSelectedInActiveList (i) || inPrefetchRange;
             p->setThumbnailLoadAllowed (selectedOrPrefetch);
             p->setNormalizationLoadAllowed (selectedOrPrefetch);
+
+            if (selectedOrPrefetch && p->getFilePath().isNotEmpty())
+                p->reloadWaveformThumbnail();
 
             y += rowHeight;
             totalHeightOfContent = y;
@@ -3690,21 +3890,34 @@ void MainComponent::applySelectionForPadClick (int clickedIndex, const juce::Mod
     selectedBgmIndex = clickedIndex;
     applyPadSelectionVisualState();
 
-    // Khi user chọn, ưu tiên load waveform + normalize ngay cho các PAD được chọn.
-    // (Giảm cảm giác “thiếu ổn định” mức gain/waveform khi chuẩn bị play/drag.)
-    for (auto idx : selectedPadIndices)
-    {
-        if (idx < 0 || idx >= list->pads.size())
-            continue;
-        if (auto* p = list->pads[idx])
-        {
-            p->setThumbnailLoadAllowed (true);
-            p->setNormalizationLoadAllowed (true);
-        }
-    }
+    const auto deferredIndices = selectedPadIndices;
+    const int deferredBgmIndex = selectedBgmIndex;
+    const int deferredListIndex = activeListIndex;
+    const bool prefetchBgm = ! list->isGrid;
+    juce::Component::SafePointer<MainComponent> safeThis (this);
 
-    if (! list->isGrid)
-        prefetchBgmPadAtIndex (selectedBgmIndex);
+    juce::MessageManager::callAsync ([safeThis, deferredListIndex, deferredIndices, deferredBgmIndex, prefetchBgm]()
+    {
+        if (safeThis == nullptr || deferredListIndex < 0 || deferredListIndex >= safeThis->allLists.size())
+            return;
+
+        auto* deferredList = safeThis->allLists[deferredListIndex];
+
+        if (deferredList == nullptr)
+            return;
+
+        for (auto idx : deferredIndices)
+        {
+            if (idx < 0 || idx >= deferredList->pads.size())
+                continue;
+
+            if (auto* p = deferredList->pads[idx])
+                p->scheduleDeferredInspectorLoads();
+        }
+
+        if (prefetchBgm)
+            safeThis->prefetchBgmPadAtIndex (deferredBgmIndex);
+    });
 
     if (isShowing())
         grabKeyboardFocus();
@@ -3865,7 +4078,8 @@ namespace
         trimEditor  = 3,
         revealFile  = 4,
         deleteItem  = 5,
-        resetFade   = 6
+        resetFade   = 6,
+        renameTrack = 7
     };
 }
 
@@ -3916,13 +4130,14 @@ void MainComponent::showTrackContextMenu (SoundPad* pad)
     syncContextMenuTargetSelection (listIdx, padIdx);
 
     juce::PopupMenu menu;
-    menu.addItem ((int) TrackMenuId::replaceFile, juce::String::fromUTF8 (u8"Thay đổi file nhạc..."), ! list->isLocked);
-    menu.addItem ((int) TrackMenuId::duplicate,   juce::String::fromUTF8 (u8"Nhân bản"));
-    menu.addItem ((int) TrackMenuId::trimEditor,  juce::String::fromUTF8 (u8"Chỉnh sửa (Trim Editor)..."));
-    menu.addItem ((int) TrackMenuId::revealFile,  juce::String::fromUTF8 (u8"Mở vị trí tệp..."));
+    menu.addItem ((int) TrackMenuId::renameTrack,  showcontrol::localization::tr (u8"Đổi tên bài hát"));
+    menu.addItem ((int) TrackMenuId::replaceFile, showcontrol::localization::tr (u8"Thay đổi file nhạc..."), ! list->isLocked);
+    menu.addItem ((int) TrackMenuId::duplicate,   showcontrol::localization::tr (u8"Nhân bản"));
+    menu.addItem ((int) TrackMenuId::trimEditor,  showcontrol::localization::tr (u8"Chỉnh sửa (Trim Editor)..."));
+    menu.addItem ((int) TrackMenuId::revealFile,  showcontrol::localization::tr (u8"Mở vị trí tệp..."));
     menu.addSeparator();
-    menu.addItem ((int) TrackMenuId::resetFade,   juce::String::fromUTF8 (u8"Reset Fade về mặc định (0 ms)"));
-    menu.addItem ((int) TrackMenuId::deleteItem,  juce::String::fromUTF8 (u8"Xóa"));
+    menu.addItem ((int) TrackMenuId::resetFade,   showcontrol::localization::tr (u8"Reset Fade về mặc định (0 ms)"));
+    menu.addItem ((int) TrackMenuId::deleteItem,  showcontrol::localization::tr (u8"Xóa"));
 
     juce::Component::SafePointer<SoundPad> safePad (pad);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (pad).withMousePosition(),
@@ -3954,6 +4169,10 @@ void MainComponent::handleTrackMenuResult (SoundPad* pad, int result)
 
     switch ((TrackMenuId) result)
     {
+        case TrackMenuId::renameTrack:
+            pad->beginTrackNameEdit();
+            break;
+
         case TrackMenuId::replaceFile:
             if (! list->isLocked)
                 promptReplaceTrackAudioFile (pad);
@@ -4255,6 +4474,10 @@ void MainComponent::advanceBgmPlaylistOnNaturalEnd (SoundPad* finishedPad)
 //==============================================================================
 MainComponent::MainComponent()
 {
+    formatManager.registerBasicFormats();
+    showcontrol::audio::bindActiveFormatManager (formatManager);
+    updateChecker = std::make_unique<showcontrol::update::ShowUpdateChecker>();
+
     // Áp dụng Global LookAndFeel ngay đầu, trước khi thêm bất kỳ widget nào
     juce::LookAndFeel::setDefaultLookAndFeel (&appLookAndFeel);
     tooltipWindow.setMillisecondsBeforeTipAppears (1000);
@@ -4367,8 +4590,8 @@ MainComponent::MainComponent()
         setInspectorVisible (! inspectorVisible);
         saveProject();
     };
-    showSidebarBtn.setTooltip (juce::String::fromUTF8 (u8"Ẩn/Hiện Sidebar"));
-    showInspectorBtn.setTooltip (juce::String::fromUTF8 (u8"Ẩn/Hiện Inspector"));
+    showSidebarBtn.setTooltip (showcontrol::localization::tr (u8"Ẩn/Hiện Sidebar"));
+    showInspectorBtn.setTooltip (showcontrol::localization::tr (u8"Ẩn/Hiện Inspector"));
 
     listHeaderComponent = std::make_unique<ListHeaderComponent>();
     addAndMakeVisible (*listHeaderComponent);
@@ -4439,7 +4662,7 @@ MainComponent::MainComponent()
     playoutModeBar->setVisible (false);
 
     cueListPanel = std::make_unique<CueListPanel>();
-    scrollContent->addAndMakeVisible (*cueListPanel);
+    addAndMakeVisible (*cueListPanel);
     cueListPanel->setVisible (false);
 
     cueListPanel->onCueSelected = [this] (int idx)
@@ -4454,19 +4677,39 @@ MainComponent::MainComponent()
         selectedBgmIndex = idx;
         selectedPadIndices.clear();
         selectedPadIndices.add (idx);
-        prefetchBgmPadAtIndex (idx);
 
         if (auto* pad = list->pads[idx])
         {
             if (list->autoArmOnSelect)
                 armPad (pad);
-            else
-                pad->prepareForInstantPlay();
 
             inspectorPanel.selectPad (pad);
         }
 
         applyPadSelectionVisualState();
+
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        juce::MessageManager::callAsync ([safeThis, idx]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->prefetchBgmPadAtIndex (idx);
+
+            if (safeThis->activeListIndex < 0 || safeThis->activeListIndex >= safeThis->allLists.size())
+                return;
+
+            auto* activeList = safeThis->allLists[safeThis->activeListIndex];
+
+            if (activeList == nullptr || idx < 0 || idx >= activeList->pads.size())
+                return;
+
+            if (auto* deferredPad = activeList->pads[idx])
+            {
+                if (! activeList->autoArmOnSelect)
+                    deferredPad->prepareForInstantPlay();
+            }
+        });
     };
 
     cueListPanel->onDeleteKeyPressed = [this] { handleDeleteKeyForActiveSelection(); };
@@ -4549,6 +4792,29 @@ MainComponent::MainComponent()
 
         if (auto* pad = list->pads[cueIndex])
             handleTrackMenuResult (pad, result);
+    };
+
+    cueListPanel->onTrackRenamed = [this] (int cueIndex, const juce::String& newName)
+    {
+        if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            return;
+
+        auto* list = allLists[activeListIndex];
+        if (list == nullptr || cueIndex < 0 || cueIndex >= list->pads.size())
+            return;
+
+        if (cueIndex < list->cueMeta.size())
+            list->cueMeta.getReference (cueIndex).name = newName;
+
+        if (auto* pad = list->pads[cueIndex])
+        {
+            pad->repaint();
+
+            if (inspectorPanel.getCurrentPad() == pad)
+                inspectorPanel.selectPad (pad);
+        }
+
+        saveApplicationState();
     };
 
     sidebarPanel.onListSelected = [this] (int idx, int count, bool /*isGridHint*/)
@@ -4768,6 +5034,36 @@ MainComponent::MainComponent()
     masterDeckPanel.onAudioSettingsRequested = [this] { showPreferencesDialog (0); };
     masterDeckPanel.onStageMonitorToggleRequested = [this] { toggleStageMonitorWindow(); };
 
+    inspectorPanel.setDefaultNormalizeMode (projectDefaultNormalizeLufs);
+    inspectorPanel.setHotkeyScopeSelectionId (static_cast<int> (hotkeyScopeMode));
+    juce::Desktop::getInstance().addDarkModeSettingListener (this);
+
+    setWantsKeyboardFocus (true);
+    addKeyListener (this);
+
+    setSize (1280, 800);
+    setSidebarVisible (true);
+    setInspectorVisible (true);
+    resized();
+
+    loadApplicationState();
+    setAppLanguage (languagePreferenceIndex);
+    applyThemePreference (themePreferenceId);
+    resized();
+    repaint();
+
+    juce::MessageManager::callAsync ([safeThis = juce::Component::SafePointer<MainComponent> (this)]
+    {
+        if (safeThis != nullptr)
+            safeThis->finishDeferredStartup();
+    });
+}
+
+void MainComponent::finishDeferredStartup()
+{
+    if (deferredStartupComplete)
+        return;
+
     timeSliceThread.startThread (juce::Thread::Priority::high);
     showcontrol::waveform::waveformCacheDirectory().createDirectory();
 
@@ -4777,26 +5073,31 @@ MainComponent::MainComponent()
         deviceManager.getAudioDeviceSetup (setup);
 
         bool changed = false;
+
         if (setup.bufferSize > 256)
         {
             setup.bufferSize = 256;
             changed = true;
         }
-        // Yêu cầu tối đa 16 kênh output để hỗ trợ multi-bus routing.
-        // Nếu thiết bị không có đủ kênh, JUCE tự giới hạn numOutputChannels
-        // trong callback — code vẫn hoạt động bình thường với stereo.
-        setup.outputChannels.setRange (0, 16, true);
-        changed = true;
+
+        juce::BigInteger desiredOutputs;
+        desiredOutputs.setRange (0, 16, true);
+
+        if (setup.outputChannels != desiredOutputs)
+        {
+            setup.outputChannels = desiredOutputs;
+            changed = true;
+        }
 
         if (changed)
         {
             const auto err = deviceManager.setAudioDeviceSetup (setup, true);
+
             if (err.isNotEmpty())
                 ErrorHandler::log ("Audio setup info: " + err, ErrorHandler::Severity::Warning);
         }
     }
 
-    // Đặt tên mặc định cho các bus đầu ra (4 bus Inspector + dự phòng mixer)
     for (int b = 0; b < showcontrol::routing::kInspectorBusCount; ++b)
         multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
 
@@ -4804,39 +5105,42 @@ MainComponent::MainComponent()
         multiOutputCallback.setBusName (b, "AUX " + juce::String (b));
 
     deviceManager.addAudioCallback (&multiOutputCallback);
-    setWantsKeyboardFocus (true);
 
-    addKeyListener (this);
+    registerAllPadsWithMixer();
+    forceAllPadsIdleAtStartup();
 
-    if (auto* top = getTopLevelComponent())
-    {
-        topLevelKeyListenerHost = top;
-        top->addKeyListener (this);
-    }
-
-    loadProject();
-
-    // Audio callback có thể prepare toàn bộ pad sau loadProject — chốt idle thêm một lần.
-    juce::Component::SafePointer<MainComponent> safeThis (this);
-    juce::Timer::callAfterDelay (150, [safeThis]
+    deferredIdlePadsTimer = std::make_unique<OneShotApplicationTimer>();
+    deferredIdlePadsTimer->onFire = [safeThis = juce::Component::SafePointer<MainComponent> (this)]
     {
         if (safeThis != nullptr)
             safeThis->forceAllPadsIdleAtStartup();
-    });
+    };
+    deferredIdlePadsTimer->startMs (150);
 
-    // Sau loadProject: bus names có thể đã được nạp từ XML — cập nhật InspectorPanel
     inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
     attachReadAheadToAllPads();
-    inspectorPanel.setDefaultNormalizeMode (projectDefaultNormalizeLufs);
-    inspectorPanel.setHotkeyScopeSelectionId (static_cast<int> (hotkeyScopeMode));
-    juce::Desktop::getInstance().addDarkModeSettingListener (this);
-    applyThemePreference (themePreferenceId);
     refreshSidebarPlayingStatus();
     resized();
-    setSize (1280, 800);
-    setSidebarVisible (true);
-    setInspectorVisible (true);
+    repaint();
     startTimer (100);
+    deferredStartupComplete = true;
+
+    if (updateChecker != nullptr)
+        updateChecker->checkForUpdatesAsync (false);
+}
+
+void MainComponent::parentHierarchyChanged()
+{
+    juce::Component::parentHierarchyChanged();
+
+    if (topLevelKeyListenerHost == nullptr)
+    {
+        if (auto* top = getTopLevelComponent())
+        {
+            topLevelKeyListenerHost = top;
+            top->addKeyListener (this);
+        }
+    }
 }
 
 void MainComponent::triggerManualMusicIngestion()
@@ -4934,7 +5238,7 @@ void MainComponent::finalizeAfterFileDropIngest()
     if (emptyStatePanel != nullptr)
         emptyStatePanel->setVisible (false);
 
-    saveProject();
+    saveApplicationState();
     refreshCueListPanel();
     rebuildDefaultHotkeysForList (activeListIndex);
     resized();
@@ -5111,20 +5415,26 @@ void MainComponent::filesDropped (const juce::StringArray& files, int x, int y)
     const int localX = x - viewScroller.getX() + viewScroller.getViewPositionX();
     const int localY = y - viewScroller.getY() + viewScroller.getViewPositionY();
 
+    const bool cueListViewActive = isCueListViewActive();
+    const bool inCueDropZone = current->isGrid
+        && ((cueListViewActive && cueListPanel != nullptr && cueListPanel->getBounds().contains (dropPoint))
+            || viewScroller.getBounds().contains (dropPoint));
+
     // ── VÙNG 2: BGM LIST — quét thư mục/file, nối tiếp vào danh sách BGM ──
     if (! current->isGrid && viewScroller.getBounds().contains (dropPoint))
     {
         ingestDroppedFilesToActiveBgmList (*current, validAudioFiles, validVideoFiles, localX, localY);
         finalizeAfterFileDropIngest();
+        saveApplicationState();
         return;
     }
 
     // ── VÙNG 3: CUE (PAD grid hoặc Cue List) — đổ nhạc theo view đang hiển thị ──
-    if (current->isGrid && viewScroller.getBounds().contains (dropPoint))
+    if (inCueDropZone)
     {
-        const bool cueListViewActive = (cueListPanel != nullptr && cueListPanel->isVisible());
         ingestDroppedFilesToActiveCuePads (*current, validAudioFiles, validVideoFiles);
         finalizeAfterFileDropIngest();
+        saveApplicationState();
 
         if (cueListViewActive && cueListPanel != nullptr)
             cueListPanel->grabKeyboardFocus();
@@ -5450,24 +5760,41 @@ void MainComponent::resized()
 
         addMusicFloatingBtn.setBounds ({});
 
-        if (isListMode)
-        {
-            listHeaderComponent->setVisible (hasLoadedAudio);
-            if (hasLoadedAudio)
-                listHeaderComponent->setBounds (innerBounds.removeFromTop (28));
+        const bool cueListViewActive = current->isGrid && current->useCueListPanel && cueListPanel != nullptr;
 
-            viewScroller.setBounds (innerBounds);
-            viewScroller.setScrollBarsShown (hasLoadedAudio, false, hasLoadedAudio, false);
+        if (cueListViewActive)
+        {
+            listHeaderComponent->setVisible (false);
+            viewScroller.setBounds ({});
+            viewScroller.setVisible (false);
+            viewScroller.setScrollBarsShown (false, false, false, false);
+            cueListPanel->setBounds (innerBounds);
+            cueListPanel->setVisible (true);
+            cueListPanel->toFront (false);
         }
         else
         {
-            listHeaderComponent->setVisible (false);
-            viewScroller.setBounds (innerBounds);
+            if (cueListPanel != nullptr)
+                cueListPanel->setVisible (false);
 
-            if (current->useCueListPanel)
+            viewScroller.setVisible (true);
+
+            if (isListMode)
+            {
+                listHeaderComponent->setVisible (hasLoadedAudio);
+
+                if (hasLoadedAudio)
+                    listHeaderComponent->setBounds (innerBounds.removeFromTop (28));
+
+                viewScroller.setBounds (innerBounds);
                 viewScroller.setScrollBarsShown (hasLoadedAudio, false, hasLoadedAudio, false);
+            }
             else
+            {
+                listHeaderComponent->setVisible (false);
+                viewScroller.setBounds (innerBounds);
                 viewScroller.setScrollBarsShown (false, false, false, false);
+            }
         }
 
         layoutActiveListPads();
@@ -5624,7 +5951,6 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
         selectedPadIndices.clear();
         selectedPadIndices.add (selectedBgmIndex);
         applyPadSelectionVisualState();
-        resized();
 
         if (! currentList->isGrid)
         {
@@ -5645,12 +5971,33 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
             }
         }
 
-        prefetchBgmPadAtIndex (selectedBgmIndex);
+        const int deferredIdx = selectedBgmIndex;
+        const bool autoArm = currentList->autoArmOnSelect;
+        juce::Component::SafePointer<MainComponent> safeThis (this);
 
-        if (currentList->autoArmOnSelect)
-            armPad (targetPad);
-        else
-            targetPad->prepareForInstantPlay();
+        juce::MessageManager::callAsync ([safeThis, deferredIdx, autoArm]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->prefetchBgmPadAtIndex (deferredIdx);
+
+            if (safeThis->activeListIndex < 0 || safeThis->activeListIndex >= safeThis->allLists.size())
+                return;
+
+            auto* list = safeThis->allLists[safeThis->activeListIndex];
+
+            if (list == nullptr || deferredIdx < 0 || deferredIdx >= list->pads.size())
+                return;
+
+            if (auto* pad = list->pads[deferredIdx])
+            {
+                if (autoArm)
+                    safeThis->armPad (pad);
+                else
+                    pad->prepareForInstantPlay();
+            }
+        });
 
         if (cueListPanel != nullptr)
             cueListPanel->setSelectedIndex (selectedBgmIndex);
@@ -5659,34 +6006,241 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
     return true;
 }
 
-bool MainComponent::keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent)
+bool MainComponent::isSpacebarKey (const juce::KeyPress& key) noexcept
 {
-    if (juce::Component::getCurrentlyModalComponent() != nullptr)
+    const int code = key.getKeyCode();
+    return code == juce::KeyPress::spaceKey || code == 32;
+}
+
+bool MainComponent::executeSpacebarTransportKey (const juce::KeyPress& key)
+{
+    if (! isSpacebarKey (key))
         return false;
 
-    if (key == juce::KeyPress::escapeKey)
+    if (swallowLikelyOsKeyRepeat (key))
+        return true;
+
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+
+    const juce::uint32 quietUntil = g_gateQuietUntilMs.load (std::memory_order_acquire);
+    if (quietUntil != 0 && nowMs < quietUntil)
     {
-        triggerGlobalPanicFadeAll();
+        logHotkeyTrace ("swallow duplicate keyCode=32 (GLOBAL)");
         return true;
     }
 
-    // Cue list transport — không lọc originatingComponent (focus có thể ở MainComponent/viewScroller).
+    const juce::uint32 previousMs = g_lastGlobalSpacebarPressTime.exchange (nowMs, std::memory_order_acq_rel);
+    if (previousMs != 0)
+    {
+        const juce::uint32 delta = nowMs - previousMs;
+        if (delta < kGlobalSpacebarDebounceMs)
+        {
+            g_gateQuietUntilMs.store (nowMs + kGlobalSpacebarDebounceMs, std::memory_order_release);
+            logHotkeyTrace ("swallow duplicate keyCode=32 (GLOBAL)");
+            return true;
+        }
+    }
+
+    g_gateQuietUntilMs.store (nowMs + kGlobalSpacebarDebounceMs, std::memory_order_release);
+
+    if (isPlaybackCommandBlocked() || nowMs < startupInputGuardUntilMs)
+    {
+        logHotkeyTrace ("ignore startup keyCode=32");
+        return true;
+    }
+
+    if (allLists.isEmpty())
+        return true;
+
     if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isVisible())
     {
         if (cueListPanel->handleTransportKey (key))
-            return true;
+        {
+            lastHotkeyKeyCode   = key.getKeyCode();
+            lastHotkeyTriggerMs = nowMs;
+        }
+
+        return true;
     }
 
-    if (tryHandleDeleteOrBackspaceKey (key))
-        return true;
+    logHotkeyTrace ("keyCode=" + juce::String (key.getKeyCode())
+                    + " listIdx=" + juce::String (activeListIndex)
+                    + " route=" + juce::String (activeList));
 
-    return false;
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (auto* list = getActiveListSafe())
+        {
+            if (list->isGrid)
+            {
+                if (selectedBgmIndex >= 0 && selectedBgmIndex < list->pads.size())
+                    triggerCueGo (selectedBgmIndex);
+            }
+            else
+            {
+                triggerBgmPlayPause();
+            }
+        }
+    }
+
+    lastHotkeyKeyCode   = key.getKeyCode();
+    lastHotkeyTriggerMs = nowMs;
+    return true;
+}
+
+bool MainComponent::keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent)
+{
+    juce::ignoreUnused (originatingComponent);
+    return handleApplicationHotkey (key);
 }
 
 void MainComponent::triggerGlobalPanicFadeAll()
 {
+    if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->triggerGlobalPanicFadeAll();
+        });
+        return;
+    }
+
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+
+    if (nowMs - lastPanicFadeRequestMs < 120)
+        return;
+
+    lastPanicFadeRequestMs = nowMs;
+
+    if (panicFadeDispatchScheduled.exchange (true, std::memory_order_acq_rel))
+        return;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::MessageManager::callAsync ([safeThis]
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->panicFadeDispatchScheduled.store (false, std::memory_order_release);
+        safeThis->executePanicFadeAllLocked();
+    });
+}
+
+void MainComponent::executePanicFadeAllLocked()
+{
     static constexpr double kPanicFadeMs = 1500.0;
+
+    if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (safeThis != nullptr)
+                safeThis->executePanicFadeAllLocked();
+        });
+        return;
+    }
+
+    juce::Array<juce::Component::SafePointer<SoundPad>> fadeTargets;
+    fadeTargets.ensureStorageAllocated (32);
+
+    {
+        const juce::ScopedLock audioDeviceLock (deviceManager.getAudioCallbackLock());
+
+        for (auto* list : allLists)
+        {
+            if (list == nullptr)
+                continue;
+
+            for (auto* pad : list->pads)
+            {
+                if (pad == nullptr)
+                    continue;
+
+                if (! pad->isTransportActive())
+                    continue;
+
+                if (pad->isFadeOutInProgress())
+                    continue;
+
+                fadeTargets.add (pad);
+            }
+        }
+    }
+
     int fadedCount = 0;
+
+    for (auto& safePad : fadeTargets)
+    {
+        if (auto* pad = safePad.getComponent())
+        {
+            pad->startFadeOut (kPanicFadeMs, true);
+            ++fadedCount;
+        }
+    }
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::MessageManager::callAsync ([safeThis, fadedCount]
+    {
+        if (safeThis != nullptr)
+            safeThis->applyPanicFadeUiAftermath (fadedCount);
+    });
+}
+
+void MainComponent::applyPanicFadeUiAftermath (int fadedCount)
+{
+    if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
+        return;
+
+    refreshSidebarPlayingStatus();
+    updateCuePlaybackIndicators();
+    pushStageMonitorUpdate();
+    logHotkeyTrace ("panic fade all pads=" + juce::String (fadedCount));
+
+    if (! isInitialLoading.load (std::memory_order_relaxed))
+        saveApplicationState();
+
+    repaint();
+}
+
+void MainComponent::reloadPadWaveformFromConfig (SoundPad* pad)
+{
+    if (pad == nullptr)
+        return;
+
+    const auto path = pad->getFilePath();
+
+    if (path.isEmpty())
+        return;
+
+    const juce::File trackFile (path);
+
+    if (! trackFile.existsAsFile())
+        return;
+
+    pad->setThumbnailLoadAllowed (true);
+    pad->reloadWaveformThumbnail();
+    pad->repaint();
+}
+
+void MainComponent::reloadAllPadWaveformsFromConfig()
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+            reloadPadWaveformFromConfig (pad);
+    }
+}
+
+void MainComponent::reloadAllPadWaveformsStaggered (int batchSize, int batchDelayMs)
+{
+    juce::Array<SoundPad*> pads;
+    pads.ensureStorageAllocated (64);
 
     for (auto* list : allLists)
     {
@@ -5694,28 +6248,242 @@ void MainComponent::triggerGlobalPanicFadeAll()
             continue;
 
         for (auto* pad : list->pads)
-        {
-            if (pad == nullptr || ! pad->isTransportActive())
-                continue;
-
-            if (pad->isFadeOutInProgress())
-                continue;
-
-            pad->startFadeOut (kPanicFadeMs, true);
-            ++fadedCount;
-        }
+            if (pad != nullptr)
+                pads.add (pad);
     }
 
-    if (fadedCount > 0)
+    if (pads.isEmpty())
+        return;
+
+    batchSize  = juce::jmax (1, batchSize);
+    batchDelayMs = juce::jmax (0, batchDelayMs);
+
+    struct BatchState
     {
-        refreshSidebarPlayingStatus();
-        pushStageMonitorUpdate();
+        juce::Component::SafePointer<MainComponent> owner;
+        juce::Array<SoundPad*> pads;
+        int nextIndex = 0;
+        int batchSize = 6;
+        int batchDelayMs = 16;
+    };
+
+    auto state = std::make_shared<BatchState>();
+    state->owner = this;
+    state->pads = std::move (pads);
+    state->batchSize = batchSize;
+    state->batchDelayMs = batchDelayMs;
+
+    std::function<void()> processBatch;
+    processBatch = [state, processBatch]()
+    {
+        if (state->owner == nullptr)
+            return;
+
+        const int end = juce::jmin (state->nextIndex + state->batchSize, state->pads.size());
+
+        for (int i = state->nextIndex; i < end; ++i)
+            state->owner->reloadPadWaveformFromConfig (state->pads.getReference (i));
+
+        state->nextIndex = end;
+
+        if (state->nextIndex < state->pads.size())
+            juce::Timer::callAfterDelay (state->batchDelayMs, processBatch);
+    };
+
+    processBatch();
+}
+
+void MainComponent::refreshStartupPlaylistDisplay()
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        if (list->isGrid)
+            syncCueMetadataFromPads (*list);
+
+        for (auto* pad : list->pads)
+            if (pad != nullptr)
+                pad->repaint();
     }
 
-    logHotkeyTrace ("panic fade all pads=" + juce::String (fadedCount));
+    refreshCueListPanel();
+
+    if (cueListPanel != nullptr)
+    {
+        cueListPanel->refreshListBoxData();
+        cueListPanel->resetListScrollToTop();
+        cueListPanel->repaint();
+    }
+
+    layoutActiveListPads();
+    sidebarPanel.repaint();
+    repaint();
+}
+
+void MainComponent::finalizeStartupPlaylistUi()
+{
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        auto* list = allLists[activeListIndex];
+        if (list != nullptr)
+            loadList (activeListIndex, list->pads.size(), list->isGrid);
+    }
+    else
+    {
+        loadList (-1, 0, true);
+    }
+
+    reloadAllPadWaveformsStaggered();
+    layoutActiveListPads();
+    refreshSidebarPlayingStatus();
+    updateCuePlaybackIndicators();
+
+    if (cueListPanel != nullptr)
+    {
+        cueListPanel->refreshListBoxData();
+        cueListPanel->repaint();
+    }
+
+    sidebarPanel.repaint();
+    resized();
+    repaint();
+}
+
+bool MainComponent::loadPlaylistFromJson (const juce::var& playlistVar)
+{
+    if (! playlistVar.isArray())
+        return false;
+
+    const auto* playlistArray = playlistVar.getArray();
+    if (playlistArray == nullptr || playlistArray->isEmpty())
+        return false;
+
+    allLists.clear();
+    sidebarPanel.clearAllLists();
+
+    for (const auto& listVar : *playlistArray)
+    {
+        if (! listVar.isObject())
+            continue;
+
+        auto* newList = new ListData();
+        newList->isGrid = static_cast<bool> (listVar.getProperty ("isGrid", true));
+        const auto listName = listVar.getProperty ("name",
+            newList->isGrid ? showcontrol::localization::defaultCueListName()
+                            : showcontrol::localization::defaultBgmListName()).toString();
+        const auto tracks   = listVar.getProperty ("tracks", juce::var());
+
+        if (tracks.isArray())
+        {
+            int padIdx = 0;
+
+            for (const auto& trackVar : *tracks.getArray())
+            {
+                juce::String filePath;
+                juce::String displayTitle;
+                juce::String displayFormat;
+
+                if (trackVar.isObject())
+                {
+                    filePath      = trackVar.getProperty ("file", {}).toString().trim();
+                    displayTitle  = trackVar.getProperty ("title", {}).toString().trim();
+                    displayFormat = trackVar.getProperty ("format", {}).toString().trim();
+                }
+                else
+                {
+                    filePath = trackVar.toString().trim();
+                }
+
+                if (filePath.isEmpty())
+                    continue;
+
+                auto* p = createSoundPad();
+                scrollContent->addChildComponent (p);
+                p->setPadIndex (padIdx);
+
+                if (displayTitle.isNotEmpty())
+                    p->applyInstantDisplayTitle (displayTitle);
+
+                if (displayFormat.isNotEmpty())
+                    p->applyInstantDisplayFormat (displayFormat);
+
+                p->configurePad (filePath, 1.0f, newList->isGrid ? newList->isLooping : false);
+                p->updateTheme (isDarkMode);
+                p->setRenderMode (newList->isGrid);
+
+                if (newList->isGrid)
+                    p->setLooping (newList->isLooping);
+
+                newList->pads.add (p);
+                ++padIdx;
+            }
+        }
+
+        allLists.add (newList);
+        sidebarPanel.addSet (listName, newList->pads.size(), newList->isGrid,
+                             newList->useCueListPanel, newList->isLocked);
+        sidebarPanel.setListLooping (allLists.size() - 1, newList->isLooping);
+    }
+
+    return ! allLists.isEmpty();
+}
+
+juce::var MainComponent::buildPlaylistJson() const
+{
+    juce::Array<juce::var> playlistLists;
+
+    for (int i = 0; i < allLists.size(); ++i)
+    {
+        auto* list = allLists[i];
+        if (list == nullptr)
+            continue;
+
+        juce::Array<juce::var> tracks;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad == nullptr)
+                continue;
+
+            const auto path = pad->getConfiguredFilePath();
+
+            if (path.isEmpty())
+                continue;
+
+            const auto title = pad->getPadName();
+
+            juce::DynamicObject::Ptr trackObj (new juce::DynamicObject());
+            trackObj->setProperty ("file", path);
+
+            if (title.isNotEmpty() && title != juce::String::fromUTF8 (u8"Trống"))
+                trackObj->setProperty ("title", title);
+
+            const auto formatInfo = pad->getCachedFormatInfoString();
+
+            if (formatInfo.isNotEmpty())
+                trackObj->setProperty ("format", formatInfo);
+
+            tracks.add (juce::var (trackObj.get()));
+        }
+
+        juce::DynamicObject::Ptr listObj (new juce::DynamicObject());
+        listObj->setProperty ("name", sidebarPanel.getListName (i));
+        listObj->setProperty ("isGrid", list->isGrid);
+        listObj->setProperty ("tracks", tracks);
+        playlistLists.add (juce::var (listObj.get()));
+    }
+
+    return playlistLists;
 }
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
+{
+    return handleApplicationHotkey (key);
+}
+
+bool MainComponent::handleApplicationHotkey (const juce::KeyPress& key)
 {
     if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
         return false;
@@ -5723,38 +6491,16 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (juce::Component::getCurrentlyModalComponent() != nullptr)
         return false;
 
+    if (isSpacebarKey (key))
+        return executeSpacebarTransportKey (key);
+
     if (key == juce::KeyPress::escapeKey)
     {
+        if (swallowLikelyOsKeyRepeat (key))
+            return true;
+
         triggerGlobalPanicFadeAll();
         return true;
-    }
-
-    // Spacebar global strict gate: 350ms, không phụ thuộc activeList/focus.
-    if (key.getKeyCode() == 32)
-    {
-        const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
-
-        const juce::uint32 quietUntil = g_gateQuietUntilMs.load (std::memory_order_acquire);
-        if (quietUntil != 0 && nowMs < quietUntil)
-        {
-            logHotkeyTrace ("swallow duplicate keyCode=32 (GLOBAL)");
-            return true;
-        }
-
-        const juce::uint32 previousMs = g_lastGlobalSpacebarPressTime.exchange (nowMs, std::memory_order_acq_rel);
-        if (previousMs != 0)
-        {
-            const juce::uint32 delta = nowMs - previousMs;
-            if (delta < kGlobalSpacebarDebounceMs)
-            {
-                g_gateQuietUntilMs.store (nowMs + kGlobalSpacebarDebounceMs, std::memory_order_release);
-                logHotkeyTrace ("swallow duplicate keyCode=32 (GLOBAL)");
-                return true;
-            }
-        }
-
-        // Cho phép lần này, nhưng khóa thêm cửa sổ để chặn burst KeyDown.
-        g_gateQuietUntilMs.store (nowMs + kGlobalSpacebarDebounceMs, std::memory_order_release);
     }
 
     const int pressedKeyCode = key.getKeyCode();
@@ -5813,41 +6559,6 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         }
     }
 
-    // Space — cổng GLOBAL đã lọc ở dòng đầu keyPressed (trước activeList / matrix).
-    if (pressedKeyCode == 32 || pressedKeyCode == juce::KeyPress::spaceKey)
-    {
-        if (activeList == 1)
-        {
-            lastHotkeyKeyCode   = pressedKeyCode;
-            lastHotkeyTriggerMs = nowMs;
-            return true;
-        }
-
-        logHotkeyTrace ("keyCode=" + juce::String (pressedKeyCode)
-                        + " listIdx=" + juce::String (activeListIndex)
-                        + " route=" + juce::String (activeList));
-
-        if (activeListIndex >= 0 && activeListIndex < allLists.size())
-        {
-            if (auto* list = getActiveListSafe())
-            {
-                if (list->isGrid)
-                {
-                    if (selectedBgmIndex >= 0 && selectedBgmIndex < list->pads.size())
-                        triggerCueGo (selectedBgmIndex);
-                }
-                else
-                {
-                    triggerBgmPlayPause();
-                }
-            }
-        }
-
-        lastHotkeyKeyCode   = pressedKeyCode;
-        lastHotkeyTriggerMs = nowMs;
-        return true;
-    }
-
     if (managedHotkey)
     {
         const auto gate = hotkeyManager.evaluateKeyPressGate (pressedKeyCode, nowMs);
@@ -5864,13 +6575,6 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 
     logHotkeyTrace ("keyCode=" + juce::String (pressedKeyCode)
                     + " activeList=" + juce::String (activeListIndex));
-
-    // Chặn keyboard auto-repeat cho phím gán hotkey pad (matrix).
-    if (pressedKeyCode == lastHotkeyKeyCode && nowMs - lastHotkeyTriggerMs < 450)
-    {
-        logHotkeyTrace ("drop auto-repeat keyCode=" + juce::String (pressedKeyCode));
-        return true;
-    }
 
     if (trySwitchListByShortcut (key))
         return true;
@@ -6190,6 +6894,7 @@ void MainComponent::refreshCueListPanel()
     syncCueMetadataFromPads (*list);
     cueListPanel->setCues (list->cueMeta);
     cueListPanel->setSelectedIndex (selectedBgmIndex);
+    cueListPanel->resetListScrollToTop();
     updateCuePlaybackIndicators();
     cueListPanel->notifyPlaybackActivity();
 }
@@ -6649,8 +7354,14 @@ void MainComponent::ensureDefaultHotkeysForList (int listIndex)
 
 juce::File MainComponent::getProjectFile()
 {
-    return juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-        .getChildFile ("Show_Control_Project.dat");
+    const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    const auto newFile    = home.getChildFile ("ShowCue_Project.dat");
+    const auto legacyFile = home.getChildFile ("Show_Control_Project.dat");
+
+    if (legacyFile.existsAsFile() && ! newFile.existsAsFile())
+        return legacyFile;
+
+    return newFile;
 }
 
 SoundPad* MainComponent::ensurePadSlotAtIndex (ListData& list, int index)
@@ -6715,16 +7426,23 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
         saveProject();
     };
 
+    callbacks.onLanguageChanged = [this] (int languageIndex)
+    {
+        setAppLanguage (languageIndex);
+        saveProject();
+    };
+
     auto* dialog = new GlobalPreferencesDialog (deviceManager,
                                                 isDarkMode,
                                                 multiOutputCallback.getAllBusNames(),
                                                 themePreferenceId,
+                                                languagePreferenceIndex,
                                                 std::move (callbacks));
     dialog->setInitialTabIndex (initialTabIndex);
 
     juce::DialogWindow::LaunchOptions opts;
     opts.content.setOwned (dialog);
-    opts.dialogTitle             = juce::String::fromUTF8 (u8"Cài đặt");
+    opts.dialogTitle             = showcontrol::localization::tr (u8"Cài đặt");
     opts.dialogBackgroundColour  = appLookAndFeel.findColour (juce::ResizableWindow::backgroundColourId);
     opts.escapeKeyTriggersCloseButton = true;
     opts.useNativeTitleBar       = true;
@@ -6768,23 +7486,23 @@ void MainComponent::getCommandInfo (juce::CommandID commandID, juce::Application
     switch (commandID)
     {
         case ShowControlCommandIDs::showAboutDialog:
-            result.setInfo (juce::String::fromUTF8 (u8"About Show Control"),
-                            juce::String::fromUTF8 (u8"Giới thiệu ứng dụng"),
-                            juce::String::fromUTF8 (u8"Application"),
+            result.setInfo (showcontrol::localization::tr (u8"About ShowCue"),
+                            showcontrol::localization::tr (u8"Giới thiệu ứng dụng"),
+                            showcontrol::localization::tr (u8"Application"),
                             0);
             break;
 
         case ShowControlCommandIDs::checkForUpdates:
-            result.setInfo (juce::String::fromUTF8 (u8"Kiểm tra cập nhật..."),
-                            juce::String::fromUTF8 (u8"Kiểm tra phiên bản mới trên máy chủ"),
-                            juce::String::fromUTF8 (u8"Application"),
+            result.setInfo (showcontrol::localization::tr (u8"Kiểm tra cập nhật..."),
+                            showcontrol::localization::tr (u8"Kiểm tra phiên bản mới trên máy chủ"),
+                            showcontrol::localization::tr (u8"Application"),
                             0);
             break;
 
         case ShowControlCommandIDs::openPreferences:
-            result.setInfo (juce::String::fromUTF8 (u8"Cài đặt..."),
-                            juce::String::fromUTF8 (u8"Mở hộp thoại cấu hình hệ thống"),
-                            juce::String::fromUTF8 (u8"General"),
+            result.setInfo (showcontrol::localization::tr (u8"Cài đặt..."),
+                            showcontrol::localization::tr (u8"Mở hộp thoại cấu hình hệ thống"),
+                            showcontrol::localization::tr (u8"General"),
                             0);
             result.addDefaultKeypress (',', juce::ModifierKeys::commandModifier);
             break;
@@ -6824,7 +7542,8 @@ void MainComponent::showAboutDialog()
 
 void MainComponent::checkForUpdates()
 {
-    showcontrol::update::checkForUpdatesAsync();
+    if (updateChecker != nullptr)
+        updateChecker->checkForUpdatesAsync (true);
 }
 
 void MainComponent::darkModeSettingChanged()
@@ -6915,6 +7634,64 @@ void MainComponent::refreshAllPanelThemes (bool shouldBeDark)
         cueListPanel->repaint();
 }
 
+void MainComponent::setAppLanguage (int languageIndex)
+{
+    languagePreferenceIndex = juce::jlimit (0, 2, languageIndex);
+    showcontrol::localization::setAppLanguage (languagePreferenceIndex);
+    broadcastLookAndFeelToAllWindows();
+    refreshLocalizedUi();
+
+    if (! isInitialLoading.load (std::memory_order_relaxed))
+        saveApplicationState();
+
+    if (auto* top = getTopLevelComponent())
+        top->repaint();
+
+    repaint();
+}
+
+void MainComponent::refreshLocalizedUi()
+{
+    refreshLocalizedBusNames();
+    sidebarPanel.refreshLocalizedText();
+    masterDeckPanel.refreshLocalizedText();
+    inspectorPanel.refreshLocalizedText();
+
+    if (cueListPanel != nullptr)
+        cueListPanel->refreshLocalizedText();
+
+    if (stageMonitorWindow != nullptr)
+        if (auto* monitor = stageMonitorWindow->getMonitorComponent())
+            monitor->repaint();
+
+    showSidebarBtn.setTooltip (showcontrol::localization::tr (u8"Ẩn/Hiện Sidebar"));
+    showInspectorBtn.setTooltip (showcontrol::localization::tr (u8"Ẩn/Hiện Inspector"));
+    busMixerPanel.repaint();
+
+    if (listHeaderComponent != nullptr)
+        listHeaderComponent->repaint();
+
+    if (emptyStatePanel != nullptr)
+        emptyStatePanel->repaint();
+
+   #if JUCE_MAC
+    showcontrol::mac::refreshNativeMenuBar();
+   #endif
+}
+
+void MainComponent::refreshLocalizedBusNames()
+{
+    for (int b = 0; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+    {
+        const auto current = multiOutputCallback.getBusName (b).trim();
+
+        if (showcontrol::routing::isDefaultBusName (b, current))
+            multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
+    }
+
+    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+}
+
 void MainComponent::applyThemePreference (int themeId)
 {
     themePreferenceId = themeId;
@@ -6926,6 +7703,12 @@ void MainComponent::applyThemePreference (int themeId)
 
     // Ép TẤT CẢ windows trên màn hình (kể cả hộp thoại Cài đặt modal) cập nhật đồng loạt.
     broadcastLookAndFeelToAllWindows();
+
+    lookAndFeelChanged();
+
+    for (int i = 0; i < getNumChildComponents(); ++i)
+        if (auto* child = getChildComponent (i))
+            forceLookAndFeelRefreshRecursively (*child);
 
     refreshAllPanelThemes (shouldBeDark);
 
@@ -6941,6 +7724,9 @@ void MainComponent::applyThemePreference (int themeId)
             top->repaint();
         }
     }
+
+    if (! isInitialLoading.load (std::memory_order_relaxed))
+        saveApplicationState();
 
     repaint();
 }
@@ -6986,6 +7772,16 @@ static SoundPad::PadProjectState readPadProjectState (const juce::XmlElement& pa
     state.cachedMeta.album  = padElem.getStringAttribute ("metaAlbum", "");
     const juce::String bpmStr = padElem.getStringAttribute ("metaBpm", "");
     if (bpmStr.isNotEmpty()) state.cachedMeta.bpm = bpmStr.getDoubleValue();
+    state.cachedMeta.formatInfoString = padElem.getStringAttribute ("metaFormat", "");
+    state.cachedMeta.sampleRate   = padElem.getIntAttribute ("metaSampleRate", 0);
+    state.cachedMeta.bitDepth     = padElem.getIntAttribute ("metaBitDepth", 0);
+    state.cachedMeta.numChannels  = padElem.getIntAttribute ("metaChannels", 0);
+
+    if (state.cachedMeta.formatInfoString.isEmpty()
+        && (state.cachedMeta.sampleRate > 0 || state.cachedMeta.bitDepth > 0 || state.cachedMeta.numChannels > 0))
+    {
+        state.cachedMeta.formatInfoString = state.cachedMeta.buildFormatInfoUncached();
+    }
 
     state.fadeInMs  = padElem.getDoubleAttribute ("fadeInMs", 0.0);
     state.fadeOutMs = padElem.getDoubleAttribute ("fadeOutMs", 0.0);
@@ -7066,12 +7862,29 @@ static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad
     if (pad.getOutputBus() != 0)
         padElem.setAttribute ("outputBus", pad.getOutputBus());
 
-    // Cache metadata để load project nhanh (hiển thị trước khi re-read file)
+    // Cache title hiển thị — load project vẽ tên ngay, không đợi async file I/O
+    const auto displayTitle = pad.getPadName();
+
+    if (displayTitle.isNotEmpty()
+        && displayTitle != juce::String::fromUTF8 (u8"Trống"))
+    {
+        padElem.setAttribute ("metaTitle", displayTitle);
+    }
+
     const auto& meta = pad.getMetadata();
-    if (meta.title.isNotEmpty())  padElem.setAttribute ("metaTitle",  meta.title);
+
     if (meta.artist.isNotEmpty()) padElem.setAttribute ("metaArtist", meta.artist);
     if (meta.album.isNotEmpty())  padElem.setAttribute ("metaAlbum",  meta.album);
     if (meta.bpm > 0.0)          padElem.setAttribute ("metaBpm",    meta.bpm);
+
+    if (meta.formatInfoString.isNotEmpty())
+        padElem.setAttribute ("metaFormat", meta.formatInfoString);
+    else if (meta.sampleRate > 0 || meta.bitDepth > 0 || meta.numChannels > 0)
+    {
+        if (meta.sampleRate > 0)  padElem.setAttribute ("metaSampleRate", meta.sampleRate);
+        if (meta.bitDepth > 0)    padElem.setAttribute ("metaBitDepth", meta.bitDepth);
+        if (meta.numChannels > 0) padElem.setAttribute ("metaChannels", meta.numChannels);
+    }
 
     // Per-pad fade duration
     if (pad.getFadeInMs() > 0.0)
@@ -7091,22 +7904,319 @@ static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad
     }
 }
 
-void MainComponent::loadProject()
+namespace
 {
-    isInitialLoading.store (true, std::memory_order_relaxed);
+constexpr auto kMissingAudioFormatFallback = u8"-- kHz / -- bit";
 
-    juce::File projectFile = getProjectFile();
+juce::String probeAudioFormatOnBackgroundThread (const juce::File& file,
+                                                 int& outSampleRate,
+                                                 int& outBitDepth,
+                                                 int& outNumChannels)
+{
+    outSampleRate  = 0;
+    outBitDepth    = 0;
+    outNumChannels = 0;
 
-    if (projectFile.exists())
+    if (! file.existsAsFile())
+        return juce::String::fromUTF8 (kMissingAudioFormatFallback);
+
+    juce::AudioFormatManager localFormatManager;
+    localFormatManager.registerBasicFormats();
+
+    if (auto reader = std::unique_ptr<juce::AudioFormatReader> (localFormatManager.createReaderFor (file)))
     {
-        auto xml = juce::parseXML (projectFile);
+        outSampleRate  = (int) reader->sampleRate;
+        outBitDepth    = (int) reader->bitsPerSample;
+        outNumChannels = (int) reader->numChannels;
 
-        if (xml != nullptr && xml->hasTagName ("ShowControlProject"))
+        AudioMetadata meta;
+        meta.sampleRate  = outSampleRate;
+        meta.bitDepth    = outBitDepth;
+        meta.numChannels = outNumChannels;
+        return meta.buildFormatInfoUncached();
+    }
+
+    return juce::String::fromUTF8 (kMissingAudioFormatFallback);
+}
+} // namespace
+
+bool MainComponent::collectPadsNeedingFormatMigration (juce::Array<AudioFormatMigrationEntry>& out) const
+{
+    out.clear();
+    bool needsMigration = false;
+
+    for (int listIndex = 0; listIndex < allLists.size(); ++listIndex)
+    {
+        auto* list = allLists[listIndex];
+
+        if (list == nullptr)
+            continue;
+
+        for (int padIndex = 0; padIndex < list->pads.size(); ++padIndex)
         {
+            auto* pad = list->pads[padIndex];
+
+            if (pad == nullptr)
+                continue;
+
+            const auto path = pad->getConfiguredFilePath();
+
+            if (path.isEmpty())
+                continue;
+
+            if (pad->getCachedFormatInfoString().isNotEmpty())
+                continue;
+
+            AudioFormatMigrationEntry entry;
+            entry.listIndex = listIndex;
+            entry.padIndex  = padIndex;
+            entry.filePath  = path;
+            out.add (entry);
+            needsMigration = true;
+        }
+    }
+
+    return needsMigration;
+}
+
+void MainComponent::applyAudioFormatMigrationResults (const juce::Array<AudioFormatMigrationResult>& results)
+{
+    for (const auto& result : results)
+    {
+        if (result.listIndex < 0 || result.listIndex >= allLists.size())
+            continue;
+
+        auto* list = allLists[result.listIndex];
+
+        if (list == nullptr || result.padIndex < 0 || result.padIndex >= list->pads.size())
+            continue;
+
+        if (auto* pad = list->pads[result.padIndex])
+        {
+            pad->applyMigratedAudioFormat (result.formatString,
+                                           result.sampleRate,
+                                           result.bitDepth,
+                                           result.numChannels);
+        }
+    }
+}
+
+void MainComponent::refreshUiAfterFormatMigration()
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+            if (pad != nullptr)
+                pad->repaint();
+    }
+
+    refreshCueListPanel();
+
+    if (cueListPanel != nullptr)
+    {
+        cueListPanel->refreshListBoxData();
+        cueListPanel->repaint();
+    }
+
+    if (auto* selectedPad = inspectorPanel.getCurrentPad())
+        inspectorPanel.refreshMetadata();
+
+    sidebarPanel.repaint();
+    repaint();
+}
+
+void MainComponent::startBackgroundAudioFormatMigration (const juce::Array<AudioFormatMigrationEntry>& entries)
+{
+    if (entries.isEmpty())
+        return;
+
+    bool expected = false;
+
+    if (! audioFormatMigrationRunning.compare_exchange_strong (expected, true, std::memory_order_acq_rel))
+        return;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    const auto entriesCopy = entries;
+
+    showcontrol::background::enqueue ([safeThis, entriesCopy]()
+    {
+        juce::Array<AudioFormatMigrationResult> results;
+        results.ensureStorageAllocated (entriesCopy.size());
+
+        for (const auto& entry : entriesCopy)
+        {
+            AudioFormatMigrationResult result;
+            result.listIndex = entry.listIndex;
+            result.padIndex  = entry.padIndex;
+
+            const juce::File trackFile (entry.filePath);
+            result.formatString = probeAudioFormatOnBackgroundThread (trackFile,
+                                                                      result.sampleRate,
+                                                                      result.bitDepth,
+                                                                      result.numChannels);
+            results.add (result);
+        }
+
+        juce::MessageManager::callAsync ([safeThis, results]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->applyAudioFormatMigrationResults (results);
+            safeThis->saveApplicationState();
+            safeThis->refreshUiAfterFormatMigration();
+            safeThis->audioFormatMigrationRunning.store (false, std::memory_order_release);
+        });
+    });
+}
+
+namespace
+{
+    bool jsonConfigHasPersistedProject (const juce::var& jsonRoot) noexcept
+    {
+        if (auto* obj = jsonRoot.getDynamicObject())
+        {
+            const auto embeddedXml = obj->getProperty ("projectXml").toString().trim();
+
+            if (embeddedXml.isNotEmpty())
+            {
+                if (auto parsed = juce::parseXML (embeddedXml))
+                    if (parsed->hasTagName ("ShowControlProject"))
+                        return true;
+            }
+
+            const auto playlist = obj->getProperty ("playlist");
+
+            if (playlist.isArray())
+                if (const auto* arr = playlist.getArray())
+                    if (! arr->isEmpty())
+                        return true;
+        }
+
+        return false;
+    }
+}
+
+void MainComponent::applyFactoryDefaultApplicationState()
+{
+    themePreferenceId       = 1; // Dark
+    languagePreferenceIndex = 1; // Tiếng Việt
+
+    projectDefaultNormalizeLufs = false;
+    hotkeyScopeMode             = HotkeyScopeMode::activeList;
+    gridSizeSlider.setValue (180.0, juce::dontSendNotification);
+    sidebarWidth   = 250;
+    inspectorWidth = 360;
+    sidebarVisible   = true;
+    inspectorVisible = true;
+
+    inspectorPanel.selectPad (nullptr);
+    masterDeckPanel.setActivePad (nullptr);
+    lastUiSyncedPlayingPad = nullptr;
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad == nullptr)
+                continue;
+
+            safelyPreparePadForDeletion (pad);
+
+            if (scrollContent != nullptr)
+                scrollContent->removeChildComponent (pad);
+        }
+    }
+
+    allLists.clear();
+    sidebarPanel.clearAllLists();
+
+    activeListIndex = -1;
+    selectedPadIndices.clear();
+    selectedBgmIndex = 0;
+
+    for (int b = 0; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+    {
+        multiOutputCallback.setBusGain (b, 1.0f);
+        busMixerPanel.setBusGain (b, 1.0f, juce::dontSendNotification);
+    }
+
+    masterDeckPanel.setMasterVolumeValue (1.0f, juce::dontSendNotification);
+    multiOutputCallback.setMasterLimiterEnabled (true);
+    multiOutputCallback.setMasterLimiterThresholdDb (-1.0f);
+    multiOutputCallback.setMasterLimiterReleaseMs (80.0f);
+
+    for (int b = 0; b < showcontrol::routing::kInspectorBusCount; ++b)
+        multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
+
+    for (int b = showcontrol::routing::kInspectorBusCount; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+        multiOutputCallback.setBusName (b, "AUX " + juce::String (b));
+
+    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+    sidebarPanel.setSelectedIndex (-1);
+}
+
+void MainComponent::loadApplicationState()
+{
+    const auto configPath = showcontrol::state::getCanonicalConfigFile().getFullPathName();
+    std::cout << "[CONFIG] loadApplicationState() — target: " << configPath.toStdString() << std::endl;
+
+    isInitialLoading.store (true, std::memory_order_relaxed);
+    startupReassertTimer.reset();
+    startupGuardTimer.reset();
+
+    showcontrol::state::ensureDefaultConfigExists();
+
+    std::unique_ptr<juce::XmlElement> xml;
+
+    const auto jsonRoot    = showcontrol::state::readJsonConfig();
+    const bool configIsFresh = ! jsonConfigHasPersistedProject (jsonRoot);
+
+    if (! configIsFresh)
+    {
+        if (auto* jsonObj = jsonRoot.getDynamicObject())
+        {
+            const int jsonTheme = static_cast<int> (jsonObj->getProperty ("appTheme"));
+            const int jsonLang  = static_cast<int> (jsonObj->getProperty ("appLanguage"));
+
+            if (jsonTheme >= 1 && jsonTheme <= 3)
+                themePreferenceId = jsonTheme;
+
+            if (jsonLang >= 0 && jsonLang <= 2)
+                languagePreferenceIndex = jsonLang;
+
+            const auto embeddedXml = jsonObj->getProperty ("projectXml").toString();
+
+            if (embeddedXml.isNotEmpty())
+                xml = juce::parseXML (embeddedXml);
+        }
+
+        if (xml == nullptr || ! xml->hasTagName ("ShowControlProject"))
+        {
+            const auto projectFile = getProjectFile();
+
+            if (projectFile.existsAsFile())
+                xml = juce::parseXML (projectFile);
+        }
+    }
+    else
+    {
+        std::cout << "[CONFIG] [INFO] Fresh install — factory defaults (no persisted project)." << std::endl;
+    }
+
+    bool projectLoaded = false;
+
+    if (xml != nullptr && xml->hasTagName ("ShowControlProject"))
+    {
             const auto version = xml->getStringAttribute ("version", "1.0");
             const bool isV2    = (version == "2.0");
 
-            themePreferenceId = xml->getIntAttribute ("themeId", 1);
             projectDefaultNormalizeLufs = xml->getBoolAttribute ("defaultNormalizeLufs", false);
             hotkeyScopeMode = (xml->getIntAttribute ("hotkeyScopeMode", 1) == 2)
                 ? HotkeyScopeMode::global
@@ -7161,7 +8271,9 @@ void MainComponent::loadProject()
                 newList->useCueListPanel   = listElem->getBoolAttribute ("useCueListPanel", false);
                 newList->clickPadToTrigger = listElem->getBoolAttribute ("clickPadToTrigger", false);
                 newList->autoArmOnSelect   = listElem->getBoolAttribute ("autoArmOnSelect", true);
-                const juce::String listName = listElem->getStringAttribute ("name", juce::String::fromUTF8 (u8"Bộ Cue"));
+                const juce::String listName = listElem->getStringAttribute ("name",
+                    newList->isGrid ? showcontrol::localization::defaultCueListName()
+                                    : showcontrol::localization::defaultBgmListName());
 
                 for (auto* padElem : listElem->getChildIterator())
                 {
@@ -7210,7 +8322,11 @@ void MainComponent::loadProject()
                             cueMeta.cueNumber = index + 1;
 
                             if (cueMeta.name.isEmpty() && p != nullptr)
-                                cueMeta.name = p->getPadName();
+                            {
+                                const auto displayName = p->getPadName();
+                                if (displayName != juce::String::fromUTF8 (u8"Trống"))
+                                    cueMeta.name = displayName;
+                            }
 
                             newList->cueMeta.add (cueMeta);
                         }
@@ -7225,6 +8341,8 @@ void MainComponent::loadProject()
                         p->setPadIndex (padIdx);
 
                         const bool loopTrack = padElem->getBoolAttribute ("loopTrack", false);
+                        const auto state = readPadProjectState (*padElem);
+                        p->setPendingProjectState (state);
                         p->configurePad (filePath, 1.0f, newList->isGrid ? newList->isLooping : loopTrack);
                         p->updateTheme (isDarkMode);
                         p->setRenderMode (newList->isGrid);
@@ -7245,7 +8363,23 @@ void MainComponent::loadProject()
             }
 
             hotkeyManager.loadFromXml (*xml);
-        }
+            projectLoaded = true;
+    }
+    else if (! configIsFresh)
+    {
+        if (auto* jsonObj = jsonRoot.getDynamicObject())
+            projectLoaded = loadPlaylistFromJson (jsonObj->getProperty ("playlist"));
+    }
+
+    if (! projectLoaded)
+    {
+        applyFactoryDefaultApplicationState();
+        loadList (-1, 0, true);
+        refreshStartupPlaylistDisplay();
+        isInitialLoading.store (false, std::memory_order_relaxed);
+        saveApplicationState();
+        std::cout << "[CONFIG] [INFO] Factory default state saved to disk." << std::endl;
+        return;
     }
 
     for (int i = 0; i < allLists.size(); ++i)
@@ -7253,9 +8387,6 @@ void MainComponent::loadProject()
         if (auto* list = allLists[i]; list != nullptr && list->isGrid)
             compactCueListPads (*list);
     }
-
-    for (int i = 0; i < allLists.size(); ++i)
-        rebuildDefaultHotkeysForList (i);
 
     int initialListIndex = -1;
 
@@ -7280,6 +8411,13 @@ void MainComponent::loadProject()
         loadList (-1, 0, true);
     }
 
+    refreshStartupPlaylistDisplay();
+
+    juce::Array<AudioFormatMigrationEntry> formatMigrationEntries;
+
+    if (collectPadsNeedingFormatMigration (formatMigrationEntries))
+        startBackgroundAudioFormatMigration (formatMigrationEntries);
+
     pendingGoTimer.reset();
     pendingGoPadIndex = -1;
 
@@ -7298,13 +8436,11 @@ void MainComponent::loadProject()
     startupInputGuardUntilMs = juce::Time::getMillisecondCounter() + kStartupPlaybackGuardMs;
 
     // Async load callback có thể ghi đè selection muộn; chốt lại sau startup (không phát nhạc).
-    juce::Component::SafePointer<MainComponent> safeThis (this);
-    juce::Timer::callAfterDelay (kStartupReassertDelayMs, [safeThis, initialListIndex]
+    startupReassertTimer = std::make_unique<OneShotApplicationTimer>();
+    startupReassertTimer->onFire = [safeThis = juce::Component::SafePointer<MainComponent> (this), initialListIndex]
     {
         if (safeThis == nullptr)
             return;
-
-        safeThis->isInitialLoading.store (true, std::memory_order_relaxed);
 
         if (initialListIndex < 0 || initialListIndex >= safeThis->allLists.size())
             return;
@@ -7325,9 +8461,11 @@ void MainComponent::loadProject()
 
         safeThis->resized();
         logHotkeyTrace ("startup reassert selection list=" + juce::String (initialListIndex) + " pad=0");
-    });
+    };
+    startupReassertTimer->startMs (kStartupReassertDelayMs);
 
-    juce::Timer::callAfterDelay (kStartupPlaybackGuardMs, [safeThis]
+    startupGuardTimer = std::make_unique<OneShotApplicationTimer>();
+    startupGuardTimer->onFire = [safeThis = juce::Component::SafePointer<MainComponent> (this)]
     {
         if (safeThis == nullptr)
             return;
@@ -7335,17 +8473,24 @@ void MainComponent::loadProject()
         safeThis->isInitialLoading.store (false, std::memory_order_relaxed);
         safeThis->startupInputGuardUntilMs = 0;
         logHotkeyTrace ("startup playback guard ended");
-    });
-
-    registerAllPadsWithMixer();
-    forceAllPadsIdleAtStartup();
+        safeThis->finalizeStartupPlaylistUi();
+        safeThis->saveApplicationState();
+    };
+    startupGuardTimer->startMs (kStartupPlaybackGuardMs);
 }
 
-void MainComponent::saveProject()
+void MainComponent::loadProject()
+{
+    loadApplicationState();
+}
+
+std::unique_ptr<juce::XmlElement> MainComponent::buildProjectXml()
 {
     auto xml = std::make_unique<juce::XmlElement> ("ShowControlProject");
     xml->setAttribute ("version", "2.0");
     xml->setAttribute ("themeId", themePreferenceId);
+    xml->setAttribute ("languageId", languagePreferenceIndex);
+    xml->setAttribute ("languageScheme", "3way");
     xml->setAttribute ("hotkeyScopeMode", static_cast<int> (hotkeyScopeMode));
     if (projectDefaultNormalizeLufs)
         xml->setAttribute ("defaultNormalizeLufs", true);
@@ -7430,5 +8575,54 @@ void MainComponent::saveProject()
     }
 
     hotkeyManager.saveToXml (*xml);
+    return xml;
+}
+
+void MainComponent::saveApplicationState()
+{
+    const auto configFile = showcontrol::state::getCanonicalConfigFile();
+    std::cout << "[CONFIG] saveApplicationState() — target: "
+              << configFile.getFullPathName().toStdString() << std::endl;
+
+    if (! showcontrol::state::ensureConfigParentDirectory (configFile))
+        return;
+
+    auto xml = buildProjectXml();
+
+    if (xml == nullptr)
+    {
+        std::cout << "[CONFIG] [ERROR] buildProjectXml() returned null" << std::endl;
+        return;
+    }
+
     xml->writeTo (getProjectFile());
+
+    juce::DynamicObject::Ptr root (new juce::DynamicObject());
+    root->setProperty ("appTheme", themePreferenceId);
+    root->setProperty ("appLanguage", languagePreferenceIndex);
+    root->setProperty ("projectXml", xml->toString());
+    root->setProperty ("savedAtMs", juce::Time::getMillisecondCounterHiRes());
+    root->setProperty ("configPath", configFile.getFullPathName());
+
+    const auto playlist = buildPlaylistJson();
+    root->setProperty ("playlist", playlist);
+    int trackCount = 0;
+
+    if (playlist.isArray())
+        for (const auto& listVar : *playlist.getArray())
+            if (const auto tracks = listVar.getProperty ("tracks", juce::var()); tracks.isArray())
+                trackCount += tracks.getArray()->size();
+
+    std::cout << "[CONFIG] Saving theme=" << themePreferenceId
+              << " lang=" << languagePreferenceIndex
+              << " lists=" << (playlist.isArray() ? playlist.getArray()->size() : 0)
+              << " tracks=" << trackCount << std::endl;
+
+    if (! showcontrol::state::hardFlushJsonConfig (juce::var (root.get())))
+        std::cout << "[CONFIG] [ERROR] hardFlushJsonConfig failed" << std::endl;
+}
+
+void MainComponent::saveProject()
+{
+    saveApplicationState();
 }

@@ -5,7 +5,7 @@
 #include "MasterDeckComponent.h"
 
 /**
- * Global LookAndFeel cho toàn bộ ứng dụng Show Control.
+ * Global LookAndFeel cho toàn bộ ứng dụng ShowCue.
  *
  * Real-time safe: class này chỉ chạy trên Message Thread (UI), không bao giờ được
  * gọi từ audio callback. Tất cả setColour() đều là UI-side, an toàn.
@@ -47,6 +47,9 @@ public:
     /** Xóa cache typeface và broadcast sau khi đổi theme / nạp font mới. */
     void refreshTypography();
 
+    /** Gọi trước khi hủy LAF / thoát app — tránh leak Typeface + mutex invalid. */
+    static void shutdownTypographyCaches() noexcept;
+
     /** Slider ngang/dọc: track 3px accent-tint, thumb tròn 10px. */
     void drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPos, float minSliderPos, float maxSliderPos,
@@ -60,6 +63,21 @@ public:
 
     void drawToggleButton (juce::Graphics& g, juce::ToggleButton& button,
                            bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+    /** TextEditor phẳng bo góc — nền chìm, viền xanh thương hiệu khi focus. */
+    void fillTextEditorBackground (juce::Graphics& g, int width, int height,
+                                   juce::TextEditor& textEditor) override;
+
+    void drawTextEditorOutline (juce::Graphics& g, int width, int height,
+                                juce::TextEditor& textEditor) override;
+
+    /** Cấu hình màu + padding cho ô sửa tên danh sách BGM/CUE trong Sidebar. */
+    static void applyInlineListNameEditorStyle (juce::TextEditor& editor, bool isDark,
+                                                bool isOnSelectedRow = false) noexcept;
+
+    /** Nhãn tên track — double-click / showEditor(), đồng bộ LookAndFeel inline. */
+    static void applyTrackNameLabelStyle (juce::Label& label, bool isDark,
+                                          bool isOnSelectedRow = false) noexcept;
 
     //==============================================================================
     /** Scrollbar mỏng kiểu macOS — chỉ vẽ thumb, không vẽ track để blend với nền. */
@@ -197,6 +215,30 @@ private:
     void applyPalette (bool dark);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShowControlLookAndFeel)
+};
+
+/** Label inline sửa tên track — message thread only. */
+class TrackNameEditLabel : public juce::Label
+{
+public:
+    TrackNameEditLabel()
+    {
+        setEditable (true, true, false);
+        setMinimumHorizontalScale (1.0f);
+        setJustificationType (juce::Justification::centredLeft);
+    }
+
+protected:
+    juce::TextEditor* createEditorComponent() override
+    {
+        auto* ed = juce::Label::createEditorComponent();
+        ed->setComponentID ("showcue-inline-list-name-editor");
+        ed->setReturnKeyStartsNewLine (false);
+        ed->setMultiLine (false);
+        ed->setScrollbarsShown (false);
+        ed->setPopupMenuEnabled (false);
+        return ed;
+    }
 };
 
 /** Màu vẽ paint() — đọc động từ LookAndFeel, không hardcode hex trong panel. */

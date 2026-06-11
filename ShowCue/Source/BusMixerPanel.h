@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "ShowTheme.h"
 #include "ShowGraphicsSafe.h"
+#include "ShowLocalization.h"
 
 //==============================================================================
 /** 8 stereo bus — gain + VU (đọc peak atomics từ MultiOutputAudioCallback). */
@@ -48,6 +49,12 @@ public:
             gainSliders[bus].setValue (gain, notify);
     }
 
+    void lookAndFeelChanged() override
+    {
+        juce::Component::lookAndFeelChanged();
+        repaint();
+    }
+
     void updateTheme (bool isDark)
     {
         isDarkMode = isDark;
@@ -78,6 +85,10 @@ public:
     {
         const auto pal = ShowTheme::get (isDarkMode);
         g.fillAll (pal.panelBg);
+        g.setColour (pal.textMuted);
+        g.setFont (ShowTheme::fontBold (10.0f));
+        g.drawText (showcontrol::localization::tr (u8"Tín hiệu đầu ra"),
+                    0, 2, getWidth(), 14, juce::Justification::centred);
         g.setColour (pal.borderSubtle);
         if (getWidth() > 0)
             g.drawHorizontalLine (0, 0.0f, (float) getWidth());

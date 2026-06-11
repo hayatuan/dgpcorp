@@ -72,6 +72,7 @@ inline DiskBackedThumbnailCache& sharedCache()
 inline void shutdownSharedCache() noexcept
 {
     sharedCache().clear();
+    sharedCache().getSharedTimeSliceThread().stopThread (500);
 }
 
 } // namespace showcontrol::waveform

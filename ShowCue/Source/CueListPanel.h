@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "SoundPad.h"
 #include "ShowTheme.h"
+#include "ShowControlLookAndFeel.h"
 
 class CueListPanel;
 
@@ -39,14 +40,18 @@ struct CueItem
 //==============================================================================
 /** Danh sách CUE QLab-style — multi-select + kéo thả đồng bộ BGM list. */
 class CueListPanel : public juce::Component,
-                     private juce::Timer
+                     private juce::Timer,
+                     private juce::Label::Listener
 {
 public:
-    static constexpr int kHeaderH = 28;
-    static constexpr int kRowH    = 44;
+    static constexpr int kHeaderH  = 28;
+    static constexpr int kHeaderGap = 4;
+    static constexpr int kRowH     = 44;
 
     CueListPanel();
     ~CueListPanel() override;
+
+    void haltActiveTimers() noexcept;
 
     std::function<void(int)>                         onCueSelected;
     std::function<void(int)>                         onCueTriggered;
@@ -60,6 +65,7 @@ public:
     std::function<void(int)>                         onCueListPlay;
     std::function<void(int)>                         onCueListPause;
     std::function<void(int)>                         onCueListStop;
+    std::function<void(int, const juce::String&)>    onTrackRenamed;
 
     enum class TrackMenuId : int
     {
@@ -68,10 +74,12 @@ public:
         trimEditor  = 3,
         revealFile  = 4,
         deleteItem  = 5,
-        resetFade   = 6
+        resetFade   = 6,
+        renameTrack = 7
     };
 
     void lookAndFeelChanged() override;
+    void refreshLocalizedText();
     void updateTheme (bool isDark);
     void setCues (const juce::Array<CueItem>& newCues);
     void addCue (const CueItem& item);
@@ -94,6 +102,9 @@ public:
     /** Ép ListBox đọc lại mảng cues và vẽ lại tức thì (live rename). */
     void refreshListBoxData();
 
+    /** Khóa thanh cuộn nội bộ ListBox về dòng 0 — sau load/migration. */
+    void resetListScrollToTop();
+
     void paint (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
@@ -104,12 +115,21 @@ private:
 
     class CueListBoxModel;
     class CueReorderOverlay;
+    class CueListHeaderComponent;
 
     void timerCallback() override;
+    void labelTextChanged (juce::Label* labelThatHasChanged) override;
+    void editorShown (juce::Label* label, juce::TextEditor& editor) override;
+    void editorHidden (juce::Label* label, juce::TextEditor& editor) override;
     void syncLiveTimer();
     bool anyRowTransportActive() const;
     void paintHeader (juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void showTrackContextMenu (int cueIndex);
+    void beginTrackRename (int rowIndex);
+    /** Ghi tên mới vào cues + pad; refresh list — idempotent. */
+    bool commitTrackRenameFromLabel (int rowIndex);
+    bool isPointInTrackNameColumn (int rowIndex, int localXInListBox) const;
+    void layoutTrackNameLabelForRow (int rowIndex);
     void fireSelectionFromListBox();
     void applySelectionForRowClick (int clickedIndex, const juce::ModifierKeys& mods);
     void applyListBoxSelectedRows (const juce::SparseSet<int>& newRows);
@@ -150,8 +170,13 @@ private:
 
     std::unique_ptr<CueListBoxModel> model;
     std::unique_ptr<CueReorderOverlay> reorderOverlay;
+    std::unique_ptr<CueListHeaderComponent> headerComponent;
     CueListBox listBox;
+    TrackNameEditLabel trackNameLabel;
     juce::Array<CueItem> cues;
+    int renamingTrackIndex = -1;
+    /** Giữ row đang sửa qua editorHidden → labelTextChanged (JUCE gọi hidden trước). */
+    int pendingRenameRowIndex = -1;
     std::function<SoundPad* (int index)> padAccessor;
     int  selectedIndex = -1;
     int  playingIndex  = -1;

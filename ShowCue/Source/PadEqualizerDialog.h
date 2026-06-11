@@ -8,6 +8,7 @@
 #include "ShowDsp.h"
 #include "ShowTheme.h"
 #include "ShowControlMacWindow.h"
+#include "ShowLocalization.h"
 #include "SoundPad.h"
 
 namespace showcontrol::ui
@@ -381,13 +382,14 @@ public:
         setSize (560, 420);
 
         addAndMakeVisible (enableToggle);
-        enableToggle.setButtonText (juce::String::fromUTF8 (u8"Bật EQ"));
+        enableToggle.setButtonText (showcontrol::localization::tr (u8"Bật EQ"));
+        enableToggle.setTooltip (showcontrol::localization::tr (u8"Bỏ qua (Bypass)"));
         enableToggle.setToggleState (currentPad != nullptr && currentPad->getDspEqEnabled(),
                                    juce::dontSendNotification);
         enableToggle.onClick = [this] { applyEnableFromUi(); };
 
         addAndMakeVisible (resetBtn);
-        resetBtn.setButtonText (juce::String::fromUTF8 (u8"Reset mặc định"));
+        resetBtn.setButtonText (showcontrol::localization::tr (u8"Reset mặc định"));
         resetBtn.onClick = [this]
         {
             if (currentPad == nullptr)
@@ -415,7 +417,8 @@ public:
         };
 
         addAndMakeVisible (hintLabel);
-        hintLabel.setText (juce::String::fromUTF8 (u8"Kéo nút + theo chiều dọc · thấp → cao: HP → LS → P1 → P2 → HS → LP"),
+        hintLabel.setText (showcontrol::localization::tr (
+                               u8"Kéo nút + theo chiều dọc · thấp → cao: HP → LS → P1 → P2 → HS → LP"),
                            juce::dontSendNotification);
         hintLabel.setFont (ShowTheme::font (10.5f));
         hintLabel.setJustificationType (juce::Justification::centredLeft);
@@ -428,7 +431,7 @@ public:
         }
 
         addAndMakeVisible (closeBtn);
-        closeBtn.setButtonText (juce::String::fromUTF8 (u8"Đóng"));
+        closeBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
         closeBtn.onClick = [this]
         {
             if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
@@ -610,7 +613,7 @@ inline void showPadEqualizerDialog (juce::Component* parent,
 
     juce::DialogWindow::LaunchOptions opt;
     opt.content.setOwned (content);
-    opt.dialogTitle = {};
+    opt.dialogTitle = showcontrol::localization::tr (u8"Bộ cân bằng tần số (Equalizer)");
     opt.dialogBackgroundColour = parent->getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId);
     opt.escapeKeyTriggersCloseButton = true;
     opt.useNativeTitleBar = true;

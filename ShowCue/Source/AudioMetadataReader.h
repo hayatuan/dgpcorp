@@ -31,6 +31,8 @@ struct AudioMetadata
     int          bitDepth     = 0;
     int64_t      fileSizeBytes = 0;
     bool         hasArtwork   = false;
+    /** Chuỗi hiển thị định dạng cache — load từ JSON/XML, không đọc file khi chọn bài. */
+    juce::String formatInfoString;
 
     // Trả về chuỗi hiển thị đầy đủ
     juce::String getDisplayTitle() const
@@ -45,18 +47,30 @@ struct AudioMetadata
         return juce::String::fromUTF8 (u8"(Không rõ nghệ sĩ)");
     }
 
-    juce::String getFormatInfo() const
+    juce::String buildFormatInfoUncached() const
     {
         juce::String info;
+
         if (sampleRate > 0)
             info += juce::String (sampleRate / 1000) + "kHz";
+
         if (bitDepth > 0)
             info += " / " + juce::String (bitDepth) + "bit";
+
         if (numChannels == 1)
             info += " / Mono";
         else if (numChannels == 2)
             info += " / Stereo";
+
         return info;
+    }
+
+    juce::String getFormatInfo() const
+    {
+        if (formatInfoString.isNotEmpty())
+            return formatInfoString;
+
+        return buildFormatInfoUncached();
     }
 
     juce::String getDurationString() const

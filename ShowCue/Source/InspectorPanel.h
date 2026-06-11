@@ -9,6 +9,7 @@
 #include "PadEqualizerDialog.h"
 #include "ShowControlMacWindow.h"
 #include "ShowOutputRouting.h"
+#include "ShowLocalization.h"
 
 //==============================================================================
 class InspectorWaveform : public juce::Component,
@@ -169,6 +170,14 @@ public:
             g.setColour (pal.trimMarkerStart);
             showcontrol::gfx::safeDrawVerticalLine (g, startX, (float) waveArea.getY(), (float) waveArea.getBottom());
             g.fillRect (showcontrol::gfx::sanitise (juce::Rectangle<float> ((float) startX - 4.0f, (float) waveArea.getY(), 8.0f, 8.0f)));
+
+            if (showTimeRuler)
+            {
+                g.setFont (ShowTheme::fontBold (8.5f));
+                g.drawText (showcontrol::localization::tr (u8"Điểm đầu"),
+                            startX + 6, waveArea.getY() + 10, 72, 12,
+                            juce::Justification::centredLeft);
+            }
         }
 
         if (endX >= waveArea.getX() && endX <= waveArea.getRight())
@@ -176,6 +185,14 @@ public:
             g.setColour (pal.trimMarkerEnd);
             showcontrol::gfx::safeDrawVerticalLine (g, endX, (float) waveArea.getY(), (float) waveArea.getBottom());
             g.fillRect (showcontrol::gfx::sanitise (juce::Rectangle<float> ((float) endX - 4.0f, (float) waveArea.getY(), 8.0f, 8.0f)));
+
+            if (showTimeRuler)
+            {
+                g.setFont (ShowTheme::fontBold (8.5f));
+                g.drawText (showcontrol::localization::tr (u8"Điểm cuối"),
+                            endX - 78, waveArea.getY() + 10, 72, 12,
+                            juce::Justification::centredRight);
+            }
         }
 
         if (currentPos >= viewStart && currentPos <= viewEnd)
@@ -658,18 +675,21 @@ public:
         largeWaveform.setShowTimeRuler (true);
 
         addAndMakeVisible (infoLabel);
-        infoLabel.setText (juce::String::fromUTF8 (u8"Kéo 2 marker vàng/đỏ để chọn điểm IN/OUT. Lăn chuột để zoom."), juce::dontSendNotification);
+        infoLabel.setText (showcontrol::localization::tr (
+                               u8"Kéo 2 marker vàng/đỏ để chọn điểm IN/OUT. Lăn chuột để zoom."),
+                           juce::dontSendNotification);
         infoLabel.setFont (ShowTheme::fontBold (12.0f));
         const auto pal = ShowTheme::get (isDark);
         infoLabel.setColour (juce::Label::textColourId, pal.textSecondary);
 
         addAndMakeVisible (resetButton);
-        resetButton.setButtonText (juce::String::fromUTF8 (u8"ĐẶT LẠI"));
+        resetButton.setButtonText (showcontrol::localization::tr (u8"ĐẶT LẠI"));
         resetButton.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
         resetButton.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
         resetButton.onClick = [this] { performTrimReset(); };
 
-        addAndMakeVisible (closeBtn); closeBtn.setButtonText (juce::String::fromUTF8 (u8"XÁC NHẬN & ĐÓNG BẢNG"));
+        addAndMakeVisible (closeBtn);
+        closeBtn.setButtonText (showcontrol::localization::tr (u8"XÁC NHẬN & ĐÓNG BẢNG"));
         closeBtn.setColour (juce::TextButton::buttonColourId, pal.accentSoft); closeBtn.setColour (juce::TextButton::textColourOffId, isDark ? juce::Colours::white : pal.panelElevated);
         closeBtn.onClick = [this] { if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) dw->exitModalState (0); };
 
@@ -761,6 +781,29 @@ private:
     juce::TextButton resetButton, closeBtn;
     juce::ComponentDragger windowDragger;
     bool windowDragActive = false;
+};
+
+//==============================================================================
+class InspectorSectionDivider : public juce::Component
+{
+public:
+    void setDarkMode (bool dark) noexcept
+    {
+        if (isDarkMode == dark)
+            return;
+
+        isDarkMode = dark;
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (ShowTheme::get (isDarkMode).border.withAlpha (0.55f));
+        g.fillRect (0, getHeight() / 2, getWidth(), 1);
+    }
+
+private:
+    bool isDarkMode = true;
 };
 
 //==============================================================================
@@ -945,11 +988,11 @@ public:
 
         equalizerBtn.setLookAndFeel (&inspectorStyle);
         inspectorContent.addAndMakeVisible (equalizerBtn);
-        equalizerBtn.setButtonText (juce::String::fromUTF8 (u8"Equalizer"));
+        equalizerBtn.setButtonText (showcontrol::localization::tr (u8"Equalizer"));
         equalizerBtn.onClick = [this] { openEqualizerDialog(); };
 
         inspectorContent.addAndMakeVisible (timeLabel); timeLabel.setText ("00:00.0", juce::dontSendNotification);
-        timeLabel.setFont (ShowTheme::timerFont (38.0f, true)); timeLabel.setJustificationType (juce::Justification::centred);
+        timeLabel.setFont (ShowTheme::timerFont (32.0f, true)); timeLabel.setJustificationType (juce::Justification::centred);
 
         inspectorContent.addAndMakeVisible (metaFormatLabel);
         metaFormatLabel.setFont (ShowTheme::font (11.0f));
@@ -967,8 +1010,10 @@ public:
             }
         };
 
-        inspectorContent.addAndMakeVisible (volumeLabel); volumeLabel.setText (juce::String::fromUTF8 (u8"Volume"), juce::dontSendNotification);
-        volumeLabel.setFont (ShowTheme::fontBold (11.0f));
+        inspectorContent.addAndMakeVisible (volumeLabel);
+        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng (Volume):"), juce::dontSendNotification);
+        volumeLabel.setFont (ShowTheme::font (10.5f));
+        volumeLabel.setJustificationType (juce::Justification::centredLeft);
 
         volumeSlider.setLookAndFeel (&inspectorStyle);
         inspectorContent.addAndMakeVisible (volumeSlider); volumeSlider.setSliderStyle (juce::Slider::LinearHorizontal); volumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -983,7 +1028,7 @@ public:
 
         // Auto Normalize Toggle với 3 chế độ AI
         inspectorContent.addAndMakeVisible (normalizeToggle);
-        normalizeToggle.setButtonText (juce::String::fromUTF8 (u8"Đồng bộ âm lượng"));
+        normalizeToggle.setButtonText (showcontrol::localization::tr (u8"Đồng bộ âm lượng"));
         normalizeToggle.setToggleState (true, juce::dontSendNotification);
         normalizeToggle.setLookAndFeel (&inspectorStyle);
         normalizeToggle.onClick = [this] {
@@ -1038,15 +1083,20 @@ public:
         };
 
         inspectorContent.addAndMakeVisible (normalizeListBtn);
-        normalizeListBtn.setButtonText (juce::String::fromUTF8 (u8"Đồng bộ cả list"));
+        normalizeListBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cả list"));
         normalizeListBtn.onClick = [this]
         {
             if (onNormalizeActiveListRequested)
                 onNormalizeActiveListRequested (normalizeModeIsLufs);
         };
 
-        inspectorContent.addAndMakeVisible (rmsLabel); rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
+        inspectorContent.addAndMakeVisible (rmsLabel);
+        rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
         rmsLabel.setFont (ShowTheme::font (10.5f));
+        rmsLabel.setJustificationType (juce::Justification::centredLeft);
+        rmsLabel.setVisible (false);
+
+        inspectorContent.addAndMakeVisible (sectionDivider);
 
         metaBpmLabel.setVisible (false);
 
@@ -1069,9 +1119,9 @@ public:
 
         // Output Bus selector — điều hướng tín hiệu pad ra cổng output riêng
         inspectorContent.addAndMakeVisible (outputBusLabel);
-        outputBusLabel.setText ("Bus:", juce::dontSendNotification);
-        outputBusLabel.setFont (ShowTheme::fontBold (10.5f));
-        outputBusLabel.setJustificationType (juce::Justification::centredRight);
+        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
+        outputBusLabel.setFont (ShowTheme::font (10.5f));
+        outputBusLabel.setJustificationType (juce::Justification::centredLeft);
 
         outputBusCombo.setLookAndFeel (&inspectorStyle);
         inspectorContent.addAndMakeVisible (outputBusCombo);
@@ -1099,6 +1149,7 @@ public:
 
     ~InspectorPanel() override
     {
+        stopTimer();
         detachFromPadResources();
         loopToggle.setLookAndFeel (nullptr);
         normalizeToggle.setLookAndFeel (nullptr);
@@ -1114,7 +1165,6 @@ public:
         backBtn.setLookAndFeel (nullptr);
         playBtn.setLookAndFeel (nullptr);
         fadeOutBtn.setLookAndFeel (nullptr);
-        stopTimer();
     }
 
     std::function<void(int)> onHotkeyScopeChanged;
@@ -1168,6 +1218,19 @@ public:
         rebuildOutputBusCombo();
     }
 
+    void refreshLocalizedText()
+    {
+        equalizerBtn.setButtonText (showcontrol::localization::tr (u8"Equalizer"));
+        normalizeToggle.setButtonText (showcontrol::localization::tr (u8"Đồng bộ âm lượng"));
+        normalizeListBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cả list"));
+        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng (Volume):"), juce::dontSendNotification);
+        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
+        loopToggle.setButtonText (getLoopToggleLabel());
+        assignInspectorTooltips();
+        rebuildOutputBusCombo();
+        repaint();
+    }
+
     int getHotkeyScopeSelectionId() const
     {
         return hotkeyScopeGlobalBtn.getToggleState() ? 2 : 1;
@@ -1189,6 +1252,8 @@ public:
 
         if (auto* showLaf = dynamic_cast<ShowControlLookAndFeel*> (&getLookAndFeel()))
             updateThemeColors (showLaf->isDarkMode());
+
+        refreshLocalizedText();
     }
 
     void updateThemeColors (bool isDark)
@@ -1233,8 +1298,9 @@ public:
         volumeSlider.setColour (juce::Slider::trackColourId, sliderTr);
         volumeSlider.setColour (juce::Slider::thumbColourId, pal.sliderThumb);
         normalizeToggle.setColour (juce::ToggleButton::textColourId, textCol);
-        rmsLabel.setColour (juce::Label::textColourId, pal.success);
         outputBusLabel.setColour (juce::Label::textColourId, mutedCol);
+        sectionDivider.setDarkMode (isDark);
+        updateRmsLabelAppearance();
 
         const auto comboBg = editorBg;
         const auto comboText = textCol;
@@ -1277,30 +1343,36 @@ public:
 
     void selectPad (SoundPad* newPad)
     {
+        if (newPad == currentPad)
+        {
+            if (currentPad != nullptr)
+                refreshTransportUi();
+
+            return;
+        }
+
         if (newPad != currentPad)
             waveformDisplay.setThumbnail (nullptr);
 
         currentPad = newPad;
+
         if (currentPad != nullptr)
         {
-            currentPad->setThumbnailLoadAllowed (true);
-            currentPad->setNormalizationLoadAllowed (true);
             nameEditor.setText (currentPad->getPadName(), juce::dontSendNotification);
             volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
             outputBusCombo.setSelectedItemIndex (
                 juce::jlimit (0, showcontrol::routing::kInspectorBusCount - 1, currentPad->getOutputBus()),
                 juce::dontSendNotification);
-            loopToggle.setButtonText (currentPad->usesCuePauseResume()
-                                          ? juce::String::fromUTF8 (u8"Loop cue")
-                                          : juce::String::fromUTF8 (u8"Loop bài"));
+            loopToggle.setButtonText (getLoopToggleLabel());
             loopToggle.setToggleState (currentPad->isLooping(), juce::dontSendNotification);
             normalizeToggle.setToggleState (currentPad->getAutoNormalize(), juce::dontSendNotification);
             normalizeModeIsLufs = currentPad->getNormalizeUseLufs();
             normalizeRmsBtn.setToggleState (! normalizeModeIsLufs, juce::dontSendNotification);
             normalizeLufsBtn.setToggleState (normalizeModeIsLufs, juce::dontSendNotification);
-            updateNormalizeModeVisibility();
+            syncNormalizeRowsLayout();
             refreshLoudnessLabel();
-            waveformDisplay.setThumbnail (&currentPad->getThumbnail()); waveformDisplay.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
+            waveformDisplay.setThumbnail (&currentPad->getThumbnail());
+            waveformDisplay.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
             trimStartLabel.setText (currentPad->formatTimeString (currentPad->getTrimStart()), juce::dontSendNotification);
             double len = currentPad->getPlaybackLength(); double te = currentPad->getTrimEnd();
             trimEndLabel.setText (currentPad->formatTimeString (te > 0.0 ? te : len), juce::dontSendNotification);
@@ -1311,13 +1383,16 @@ public:
             fadeOutSlider.setValue (currentPad->getFadeOutMs(), juce::dontSendNotification);
             waveformDisplay.setFadeRegions (currentPad->getFadeInMs(), currentPad->getFadeOutMs(), currentPad->getEffectiveLength());
             syncDspControlsFromPad();
+            currentPad->scheduleDeferredInspectorLoads();
         }
         else
         {
             nameEditor.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
             timeLabel.setText ("00:00.0", juce::dontSendNotification);
             trimStartLabel.setText ("00:00.0", juce::dontSendNotification); trimEndLabel.setText ("00:00.0", juce::dontSendNotification);
-            rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification); waveformDisplay.setThumbnail (nullptr);
+            rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
+            waveformDisplay.setThumbnail (nullptr);
+            updateRmsLabelAppearance();
             updateFileInfoLabels ({});
         }
     }
@@ -1339,12 +1414,14 @@ public:
         if (currentPad == nullptr)
         {
             rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
+            updateRmsLabelAppearance();
             return;
         }
 
         if (currentPad->isNormalizationInProgress())
         {
             rmsLabel.setText (juce::String::fromUTF8 (u8"Đang đo…"), juce::dontSendNotification);
+            updateRmsLabelAppearance();
             return;
         }
 
@@ -1356,6 +1433,19 @@ public:
         }
         rmsLabel.setText (text.isNotEmpty() ? text : juce::String::fromUTF8 (u8"—"),
                           juce::dontSendNotification);
+        updateRmsLabelAppearance();
+    }
+
+    void updateRmsLabelAppearance()
+    {
+        const auto pal = ShowTheme::get (isDarkTheme);
+        const auto placeholder = juce::String::fromUTF8 (u8"—");
+        const bool hasReading = rmsLabel.getText().isNotEmpty()
+                                 && rmsLabel.getText() != placeholder;
+        const bool show = normalizeToggle.getToggleState() && hasReading;
+
+        rmsLabel.setVisible (show);
+        rmsLabel.setColour (juce::Label::textColourId, pal.success);
     }
 
     void syncDspControlsFromPad()
@@ -1401,7 +1491,7 @@ public:
 
         juce::DialogWindow::LaunchOptions options;
         options.content.setOwned (trimComp);
-        options.dialogTitle = {};
+        options.dialogTitle = showcontrol::localization::tr (u8"Cắt gọt âm thanh");
         options.dialogBackgroundColour = ShowTheme::get (isDarkTheme).panelElevated;
         options.escapeKeyTriggersCloseButton = true;
         options.useNativeTitleBar = true;
@@ -1455,9 +1545,7 @@ public:
     void timerCallback() override
     {
         if (currentPad != nullptr) {
-            loopToggle.setButtonText (currentPad->usesCuePauseResume()
-                                          ? juce::String::fromUTF8 (u8"Loop cue")
-                                          : juce::String::fromUTF8 (u8"Loop bài"));
+            loopToggle.setButtonText (getLoopToggleLabel());
             refreshTransportUi();
 
             if (currentPad->isTransportActive())
@@ -1475,138 +1563,204 @@ public:
         layoutScrollContent();
     }
 
+    static int measureInspectorLabelWidth (const juce::Label& label, int maxWidth) noexcept
+    {
+        if (maxWidth <= 0)
+            return 0;
+
+        const auto text = label.getText();
+        if (text.isEmpty())
+            return juce::jmin (maxWidth, 40);
+
+        const int measured = juce::GlyphArrangement::getStringWidthInt (label.getFont(), text) + 12;
+        return juce::jlimit (40, maxWidth, measured);
+    }
+
     void layoutScrollContent()
     {
-        const int contentW = juce::jmax (280, inspectorViewport.getViewWidth());
-        auto bounds = juce::Rectangle<int> (0, 0, contentW, 3200).reduced (14, 10);
+        static constexpr int marginH = 16;
+        static constexpr int marginV = 12;
+        static constexpr int marginBottom = 10;
+        static constexpr int gap = 8;
+        static constexpr int pairGap = 8;
+        static constexpr int rowHName = 28;
+        static constexpr int rowHWave = 72;
+        static constexpr int rowHTrim = 16;
+        static constexpr int rowHTransport = 28;
+        static constexpr int rowHTime = 30;
+        static constexpr int rowHMeta = 12;
+        static constexpr int rowHLoopEq = 28;
+        static constexpr int rowHBus = 28;
+        static constexpr int rowHBusLabel = 110;
+        static constexpr int rowHVolume = 28;
+        static constexpr int rowHBtn = 28;
+        static constexpr int rowHFade = 26;
+        static constexpr int rowHLoudness = 14;
 
-        auto nameRow = showcontrol::gfx::safeRemoveFromTop (bounds, 24);
-        showcontrol::gfx::safeSetBounds (nameLabel, showcontrol::gfx::safeRemoveFromLeft (nameRow, 46));
-        showcontrol::gfx::safeSetBounds (nameEditor, nameRow);
-        bounds.removeFromTop (4);
-        waveformDisplay.setBounds (bounds.removeFromTop (72));
-        bounds.removeFromTop (2);
-        auto trimRow = bounds.removeFromTop (18);
-        trimStartLabel.setBounds (trimRow.removeFromLeft (70));
+        const int viewW = inspectorViewport.getMaximumVisibleWidth();
+        const int contentW = juce::jmax (280, viewW > 0 ? viewW : getWidth());
+        const int componentWidth = juce::jmax (0, contentW - marginH * 2);
+
+        auto area = juce::Rectangle<int> (marginH, marginV, componentWidth, 10000);
+
+        const auto skipGap = [&] { area.removeFromTop (gap); };
+
+        const auto placeFullWidth = [&] (juce::Component& comp, int height)
         {
-            auto rightArea = trimRow.removeFromRight (90);
-            trimResetBtn.setBounds (rightArea.removeFromLeft (50));
-            trimEndLabel.setBounds (rightArea);
-        }
-        bounds.removeFromTop (4);
+            comp.setBounds (area.removeFromTop (height));
+        };
 
-        // Transport: |◀  [▶ / ⏹]  ▶| (nút Play thu hẹp chiều ngang)
-        auto transportRow = bounds.removeFromTop (34);
-        const int btnW = 34;
-        backBtn.setBounds (transportRow.removeFromLeft (btnW));
-        transportRow.removeFromLeft (3);
-        fadeOutBtn.setBounds (transportRow.removeFromRight (btnW));
-        transportRow.removeFromRight (3);
+        const auto placeLabelControlRow = [&] (juce::Label& label, juce::Component& control, int height)
         {
-            if (transportRow.getWidth() > 0 && transportRow.getHeight() > 0)
-            {
-                const int playW = juce::jmin (40, transportRow.getWidth());
-                const int cx = transportRow.getCentreX();
-                showcontrol::gfx::safeSetBounds (playBtn, { cx - playW / 2, transportRow.getY(), playW, transportRow.getHeight() });
-            }
-            else
-            {
-                showcontrol::gfx::safeSetBounds (playBtn, {});
-            }
-        }
+            auto row = area.removeFromTop (height);
+            const int labelW = measureInspectorLabelWidth (label, row.getWidth() / 2);
+            label.setBounds (row.removeFromLeft (labelW));
+            control.setBounds (row);
+        };
 
-        bounds.removeFromTop (2);
-        timeLabel.setBounds (bounds.removeFromTop (40));
-        bounds.removeFromTop (2);
-        metaFormatLabel.setBounds (bounds.removeFromTop (14));
-        bounds.removeFromTop (6);
-
-        auto loopEqRow = bounds.removeFromTop (32);
-        const int loopEqGap = 6;
-        const int halfW = juce::jmax (0, (loopEqRow.getWidth() - loopEqGap) / 2);
-        loopToggle.setBounds (loopEqRow.removeFromLeft (halfW));
-        loopEqRow.removeFromLeft (loopEqGap);
-        equalizerBtn.setBounds (loopEqRow);
-
-        bounds.removeFromTop (6);
+        // --- Tên file ---
         {
-            auto volHeaderRow = bounds.removeFromTop (18);
-            volumeLabel.setBounds (volHeaderRow.removeFromLeft (58));
-            outputBusLabel.setBounds (volHeaderRow.removeFromLeft (36));
-            outputBusCombo.setBounds (volHeaderRow);
+            auto nameRow = area.removeFromTop (rowHName);
+            const int nameLabelW = measureInspectorLabelWidth (nameLabel, nameRow.getWidth() / 3);
+            nameLabel.setBounds (nameRow.removeFromLeft (nameLabelW));
+            nameEditor.setBounds (nameRow);
         }
-        volumeSlider.setBounds (bounds.removeFromTop (22));
-        bounds.removeFromTop (10);
 
-        // Cụm đồng bộ âm lượng — lưới 3 hàng, gap đồng nhất
-        const int buttonGap = 8;
-        const int btnHeight = 32;
+        skipGap();
+        waveformDisplay.setBounds (area.removeFromTop (rowHWave));
+        skipGap();
+
+        // --- Trim ---
+        {
+            auto trimRow = area.removeFromTop (rowHTrim);
+            const int endW = juce::jmin (trimRow.getWidth() / 3, measureInspectorLabelWidth (trimEndLabel, trimRow.getWidth() / 3));
+            const int resetMeasured = juce::GlyphArrangement::getStringWidthInt (ShowTheme::font (11.0f),
+                                                                                 trimResetBtn.getButtonText()) + 16;
+            const int resetW = juce::jmin (trimRow.getWidth() / 4, juce::jlimit (40, trimRow.getWidth() / 4, resetMeasured));
+            const int rightClusterW = endW + pairGap + resetW;
+            trimEndLabel.setBounds (trimRow.removeFromRight (endW));
+            trimRow.removeFromRight (pairGap);
+            trimResetBtn.setBounds (trimRow.removeFromRight (resetW));
+            trimStartLabel.setBounds (trimRow);
+        }
+
+        skipGap();
+
+        // --- Transport ---
+        {
+            auto transportRow = area.removeFromTop (rowHTransport);
+            const int iconBtnW = juce::jmin (rowHTransport, transportRow.getWidth() / 5);
+            backBtn.setBounds (transportRow.removeFromLeft (iconBtnW));
+            fadeOutBtn.setBounds (transportRow.removeFromRight (iconBtnW));
+
+            const int playW = juce::jmin (iconBtnW + 8, juce::jmax (0, transportRow.getWidth()));
+            const int playX = transportRow.getX() + (transportRow.getWidth() - playW) / 2;
+            showcontrol::gfx::safeSetBounds (playBtn, { playX, transportRow.getY(), playW, transportRow.getHeight() });
+        }
+
+        skipGap();
+        timeLabel.setBounds (area.removeFromTop (rowHTime));
+        skipGap();
+        metaFormatLabel.setBounds (area.removeFromTop (rowHMeta));
+        skipGap();
+
+        // --- Loop / Equalizer ---
+        {
+            auto loopEqRow = area.removeFromTop (rowHLoopEq);
+            const int halfW = juce::jmax (0, (loopEqRow.getWidth() - pairGap) / 2);
+            loopToggle.setBounds (loopEqRow.removeFromLeft (halfW));
+            loopEqRow.removeFromLeft (pairGap);
+            equalizerBtn.setBounds (loopEqRow);
+        }
+
+        skipGap();
+
+        // --- Bus: nhãn + ComboBox cùng một hàng ngang ---
+        {
+            auto busRow = area.removeFromTop (rowHBus);
+            const int busLabelW = juce::jmin (busRow.getWidth() - 60,
+                                              juce::jmax (rowHBusLabel,
+                                                          measureInspectorLabelWidth (outputBusLabel, busRow.getWidth() / 2)));
+            outputBusLabel.setBounds (busRow.removeFromLeft (busLabelW));
+            outputBusCombo.setBounds (busRow);
+        }
+
+        skipGap();
+        placeLabelControlRow (volumeLabel, volumeSlider, rowHVolume);
+        skipGap();
+
+        // --- Đồng bộ âm lượng ---
         const bool normOn = normalizeToggle.getToggleState();
-        auto cluster = bounds;
-
-        normalizeToggle.setBounds (cluster.removeFromTop (btnHeight));
-        cluster.removeFromTop (buttonGap);
+        placeFullWidth (normalizeToggle, rowHBtn);
 
         if (normOn)
         {
-            auto row2Area = cluster.removeFromTop (btnHeight);
-            const int halfWidth = (row2Area.getWidth() - buttonGap) / 2;
-            auto rmsBounds = row2Area.removeFromLeft (halfWidth);
-            row2Area.removeFromLeft (buttonGap);
-            auto lufsBounds = row2Area.removeFromLeft (halfWidth);
-            normalizeRmsBtn.setBounds (rmsBounds);
-            normalizeLufsBtn.setBounds (lufsBounds);
+            skipGap();
+
+            auto modeRow = area.removeFromTop (rowHBtn);
+            const int halfWidth = juce::jmax (0, (modeRow.getWidth() - pairGap) / 2);
+            normalizeRmsBtn.setBounds (modeRow.removeFromLeft (halfWidth));
+            modeRow.removeFromLeft (pairGap);
+            normalizeLufsBtn.setBounds (modeRow);
             normalizeRmsBtn.setVisible (true);
             normalizeLufsBtn.setVisible (true);
 
-            cluster.removeFromTop (buttonGap);
-
-            normalizeListBtn.setBounds (cluster.removeFromTop (btnHeight));
+            skipGap();
+            placeFullWidth (normalizeListBtn, rowHBtn);
             normalizeListBtn.setVisible (true);
 
-            cluster.removeFromTop (11);
+            if (rmsLabel.isVisible())
+            {
+                skipGap();
+                placeFullWidth (rmsLabel, rowHLoudness);
+            }
+            else
+            {
+                rmsLabel.setBounds ({});
+            }
         }
         else
         {
             normalizeRmsBtn.setBounds ({});
             normalizeLufsBtn.setBounds ({});
             normalizeListBtn.setBounds ({});
+            rmsLabel.setBounds ({});
             normalizeRmsBtn.setVisible (false);
             normalizeLufsBtn.setVisible (false);
             normalizeListBtn.setVisible (false);
-            cluster.removeFromTop (buttonGap);
+            rmsLabel.setVisible (false);
         }
 
-        const int clusterUsed = cluster.getY() - bounds.getY();
-        bounds.removeFromTop (clusterUsed);
-        rmsLabel.setBounds (bounds.removeFromTop (16));
-        bounds.removeFromTop (10);
+        skipGap();
+        placeFullWidth (sectionDivider, 1);
+        sectionDivider.setVisible (true);
+        skipGap();
 
-        // Fade In / Fade Out (ô nhập ms rộng, số nguyên)
+        // --- Fade In / Fade Out ---
         {
-            const int labelW = 52;
-            auto fiRow = bounds.removeFromTop (24);
-            fadeInLabel.setBounds (fiRow.removeFromLeft (labelW));
+            const int fadeTextBoxW = juce::jlimit (52, componentWidth / 3, componentWidth / 4);
+            fadeInSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, fadeTextBoxW, rowHFade);
+            fadeOutSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, fadeTextBoxW, rowHFade);
+
+            const int fadeLabelW = juce::jmax (measureInspectorLabelWidth (fadeInLabel, componentWidth / 2),
+                                             measureInspectorLabelWidth (fadeOutLabel, componentWidth / 2));
+
+            auto fiRow = area.removeFromTop (rowHFade);
+            fadeInLabel.setBounds (fiRow.removeFromLeft (fadeLabelW));
             fadeInSlider.setBounds (fiRow);
 
-            bounds.removeFromTop (4);
-            auto foRow = bounds.removeFromTop (24);
-            fadeOutLabel.setBounds (foRow.removeFromLeft (labelW));
+            skipGap();
+
+            auto foRow = area.removeFromTop (rowHFade);
+            fadeOutLabel.setBounds (foRow.removeFromLeft (fadeLabelW));
             fadeOutSlider.setBounds (foRow);
         }
 
-        int contentBottom = fadeOutSlider.getBottom();
-        for (auto* child : inspectorContent.getChildren())
-            if (child->isVisible())
-                contentBottom = juce::jmax (contentBottom, child->getBottom());
+        const int contentBottom = area.getY() + marginBottom;
+        inspectorContent.setSize (contentW, showcontrol::gfx::clampDimension (contentBottom));
 
-        inspectorContent.setSize (contentW, showcontrol::gfx::clampDimension (contentBottom + 24));
-
-        for (int i = 0; i < inspectorContent.getNumChildComponents(); ++i)
-        {
-            if (auto* child = inspectorContent.getChildComponent (i))
-                showcontrol::gfx::safeSetBounds (*child, child->getBounds());
-        }
+        const int viewH = inspectorViewport.getMaximumVisibleHeight();
+        inspectorViewport.setScrollBarsShown (contentBottom > viewH && viewH > 0, false);
     }
 
     void paint (juce::Graphics& g) override {
@@ -1620,7 +1774,21 @@ public:
 
     void updateNormalizeModeVisibility()
     {
-        resized();
+        syncNormalizeRowsLayout();
+    }
+
+    /** Chỉ layout lại khi hàng RMS/LUFS thực sự đổi trạng thái — không resized() toàn Inspector. */
+    void syncNormalizeRowsLayout()
+    {
+        updateRmsLabelAppearance();
+        const bool normOn = normalizeToggle.getToggleState();
+
+        if (normOn != normModeRowsVisible)
+        {
+            normModeRowsVisible = normOn;
+            layoutScrollContent();
+        }
+
         repaint();
     }
 
@@ -1661,31 +1829,40 @@ public:
 
     void assignInspectorTooltips()
     {
-        normalizeToggle.setTooltip (juce::String::fromUTF8 (
+        normalizeToggle.setTooltip (showcontrol::localization::tr (
             u8"Đồng bộ mức Gain chuẩn hóa dựa trên cấu hình phân tích RMS hoặc LUFS."));
-        normalizeListBtn.setTooltip (juce::String::fromUTF8 (
-            u8"Áp dụng cấu hình cân bằng âm lượng hiện tại cho toàn bộ các track trong danh sách kịch bản."));
-        normalizeRmsBtn.setTooltip (juce::String::fromUTF8 (
+        normalizeListBtn.setTooltip (showcontrol::localization::tr (
+            u8"Đồng bộ mức âm lượng chuẩn LUFS toàn danh sách"));
+        normalizeRmsBtn.setTooltip (showcontrol::localization::tr (
             u8"Chuyển chế độ đo âm lượng theo công suất trung bình tín hiệu điện toán RMS."));
-        normalizeLufsBtn.setTooltip (juce::String::fromUTF8 (
+        normalizeLufsBtn.setTooltip (showcontrol::localization::tr (
             u8"Chuyển chế độ đo âm lượng theo thuật toán cảm nhận tai người chuẩn phát thanh LUFS."));
-        loopToggle.setTooltip (juce::String::fromUTF8 (
+        loopToggle.setTooltip (showcontrol::localization::tr (
             u8"Bật/Tắt chế độ phát lặp lại tuần hoàn cho riêng track nhạc hoặc ô PAD này."));
-        equalizerBtn.setTooltip (juce::String::fromUTF8 (
+        equalizerBtn.setTooltip (showcontrol::localization::tr (
             u8"Mở bảng cấu hình bộ lọc tần số và cân bằng âm sắc cho track."));
-        fadeInSlider.setTooltip (juce::String::fromUTF8 (
+        fadeInSlider.setTooltip (showcontrol::localization::tr (
             u8"Thời gian lịm tiếng nhỏ đến to khi bắt đầu phát nhạc (tính bằng mili-giây)."));
-        fadeOutSlider.setTooltip (juce::String::fromUTF8 (
+        fadeOutSlider.setTooltip (showcontrol::localization::tr (
             u8"Thời gian lịm tiếng to đến nhỏ khi chủ động dừng phát nhạc (tính bằng mili-giây)."));
-        outputBusCombo.setTooltip (juce::String::fromUTF8 (
+        outputBusCombo.setTooltip (showcontrol::localization::tr (
             u8"Định tuyến đầu ra stereo của pad/track ra Main FOH hoặc AUX trên soundcard/Dante. "
             u8"Nếu thiết bị không đủ kênh, tự động fallback về Main FOH (Ch 1-2)."));
+    }
+
+    juce::String getLoopToggleLabel() const
+    {
+        if (currentPad != nullptr && currentPad->usesCuePauseResume())
+            return showcontrol::localization::tr (u8"Loop cue");
+
+        return showcontrol::localization::tr (u8"Loop bài");
     }
 
 private:
     SoundPad* currentPad = nullptr;
     bool isDarkTheme = true;
     bool normalizeModeIsLufs = false;
+    bool normModeRowsVisible = false;
     juce::StringArray cachedInspectorBusNames;
     InspectorStyle inspectorStyle;
     juce::Label nameLabel, trimStartLabel, trimEndLabel, timeLabel, volumeLabel, rmsLabel, hotkeyScopeLabel;
@@ -1704,6 +1881,7 @@ private:
     juce::Slider fadeInSlider, fadeOutSlider;
     juce::Viewport inspectorViewport;
     juce::Component inspectorContent;
+    InspectorSectionDivider sectionDivider;
     juce::ToggleButton equalizerBtn;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (InspectorPanel)
 };

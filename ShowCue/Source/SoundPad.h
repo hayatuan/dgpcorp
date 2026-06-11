@@ -11,7 +11,45 @@
 #include "ShowGraphicsSafe.h"
 #include "ShowFlatIcons.h"
 #include "ShowTheme.h"
+#include "ShowControlLookAndFeel.h"
+#include "ShowLocalization.h"
 #include "ShowWaveformCache.h"
+
+namespace showcontrol::audio
+{
+inline juce::AudioFormatManager*& activeFormatManagerPtr() noexcept
+{
+    static juce::AudioFormatManager* ptr = nullptr;
+    return ptr;
+}
+
+inline void bindActiveFormatManager (juce::AudioFormatManager& manager) noexcept
+{
+    activeFormatManagerPtr() = &manager;
+}
+
+inline void unbindActiveFormatManager() noexcept
+{
+    activeFormatManagerPtr() = nullptr;
+}
+
+inline juce::AudioFormatManager& sharedFormatManager()
+{
+    if (activeFormatManagerPtr() != nullptr)
+        return *activeFormatManagerPtr();
+
+    static juce::AudioFormatManager fallbackManager;
+    static bool formatsRegistered = false;
+
+    if (! formatsRegistered)
+    {
+        fallbackManager.registerBasicFormats();
+        formatsRegistered = true;
+    }
+
+    return fallbackManager;
+}
+} // namespace showcontrol::audio
 
 namespace showcontrol::background
 {
@@ -42,6 +80,11 @@ inline void enqueue (std::function<void()> fn)
 {
     pool().addJob (new LambdaJob (std::move (fn)), true);
 }
+
+inline void shutdownPool() noexcept
+{
+    pool().removeAllJobs (true, 5000);
+}
 } // namespace showcontrol::background
 
 //==============================================================================
@@ -60,8 +103,7 @@ public:
 
         showcontrol::background::enqueue ([file, useLufs, cb = std::move (onComplete)]() mutable
         {
-            juce::AudioFormatManager localFormatManager;
-            localFormatManager.registerBasicFormats();
+            auto& localFormatManager = showcontrol::audio::sharedFormatManager();
 
             const double measured = useLufs ? AudioAnalyzer::calculateFileLUFS (file, localFormatManager)
                                             : AudioAnalyzer::calculateFileRMS (file, localFormatManager);
@@ -81,23 +123,34 @@ private:
 };
 
 //==============================================================================
-class SoundPad : public juce::Component, public juce::Timer 
+class SoundPad : public juce::Component,
+                 public juce::Timer,
+                 private juce::ChangeListener,
+                 private juce::Label::Listener
 {
 public:
     /** ~0.74s @ 44.1kHz — đọc đĩa trên TimeSliceThread, không trong audio callback. */
     static constexpr int kReadAheadBufferSamples = 32768;
 
-    SoundPad() : thumbnail (512, formatManager, showcontrol::waveform::sharedCache()),
-                 realtimeSource (transportSource)
+    explicit SoundPad (juce::AudioFormatManager& formatManagerIn)
+        : formatManager (formatManagerIn),
+          thumbnail (512, formatManager, showcontrol::waveform::sharedCache()),
+          realtimeSource (transportSource)
     {
-        formatManager.registerBasicFormats();
+        thumbnail.addChangeListener (this);
         setWantsKeyboardFocus (false);
+        rebuildPaintResources();
+
+        addChildComponent (trackNameLabel);
+        trackNameLabel.setVisible (false);
+        trackNameLabel.addListener (this);
     }
     
     ~SoundPad() override
     {
-        cancelPendingAsyncWork();
+        trackNameLabel.removeListener (this);
         stopTimer();
+        cancelPendingAsyncWork();
         releaseThumbnailResources();
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
@@ -117,6 +170,7 @@ public:
     /** UI shutdown: gỡ listener/cache trước khi hủy SoundPad — tránh dangling + leak cache. */
     void releaseThumbnailResources() noexcept
     {
+        thumbnail.removeChangeListener (this);
         thumbnail.setSource (nullptr);
         thumbnail.clear();
 
@@ -185,7 +239,7 @@ public:
     /** Đọc trước buffer trên message thread — gọi trước GO để giảm trễ. */
     void prepareForInstantPlay()
     {
-        ensureReadAheadBuffer();
+        warmReadAheadPipeline();
     }
 
     /**
@@ -215,21 +269,43 @@ public:
     // Lazy resources for faster startup:
     // - Thumbnail (waveform) chỉ setSource khi được phép.
     // - Auto-normalize (RMS) có thể trì hoãn cho PAD ngoài viewport.
-    void setThumbnailLoadAllowed (bool allow) noexcept
+    void setThumbnailLoadAllowed (bool allow, bool loadImmediately = true) noexcept
     {
         thumbnailLoadAllowedNow = allow;
-        if (allow)
+
+        if (allow && loadImmediately)
             ensureThumbnailLoaded();
     }
 
-    void setNormalizationLoadAllowed (bool allow)
+    void setNormalizationLoadAllowed (bool allow, bool analyzeImmediately = true)
     {
         normalizationAllowedNow = allow;
-        if (allow)
+
+        if (allow && analyzeImmediately)
             maybeStartNormalization();
     }
 
     bool isThumbnailLoaded() const noexcept { return thumbnailLoaded; }
+
+    /** Ép nạp lại FileInputSource vào AudioThumbnail (sau load config / drop file). */
+    void reloadWaveformThumbnail()
+    {
+        const juce::File file = musicFile.existsAsFile() ? musicFile : thumbnailPendingFile;
+
+        if (! file.existsAsFile())
+            return;
+
+        thumbnailPendingFile = file;
+
+        if (thumbnailLoaded)
+        {
+            thumbnail.setSource (nullptr);
+            thumbnail.clear();
+            thumbnailLoaded = false;
+        }
+
+        ensureThumbnailLoaded();
+    }
 
     /** UI đọc cueState (cập nhật ngay khi bấm); audio thread đồng bộ sau. */
     bool isPlaying() const { return getCueState() == PadCueState::playing; }
@@ -291,10 +367,17 @@ public:
     }
     juce::String getFilePath() const { return hasFile ? musicFile.getFullPathName() : ""; }
 
+    /** Đường dẫn đã gán (kể cả khi file đang load async) — dùng migration / save JSON. */
+    juce::String getConfiguredFilePath() const noexcept { return musicFile.getFullPathName(); }
+
     juce::String getPadName() const
     {
-        if (customName.isNotEmpty()) return customName;
-        if (hasFile && cachedMeta.title.isNotEmpty()) return cachedMeta.title;
+        if (customName.isNotEmpty())
+            return customName;
+
+        if (cachedMeta.title.isNotEmpty())
+            return cachedMeta.title;
+
         return hasFile ? cachedFileName : juce::String::fromUTF8 (u8"Trống");
     }
 
@@ -303,6 +386,52 @@ public:
         customName = name.trim();
         repaint();
     }
+
+    /** List row hoặc ô PAD grid — double-click tên / menu chuột phải. Message thread only. */
+    void beginTrackNameEdit()
+    {
+        if (isLoading())
+            return;
+
+        trackNameEditing = true;
+        ShowControlLookAndFeel::applyTrackNameLabelStyle (trackNameLabel, isDarkMode, isSelectedRowState);
+        trackNameLabel.setText (getPadName(), juce::dontSendNotification);
+        layoutTrackNameLabel();
+        trackNameLabel.setVisible (true);
+        trackNameLabel.toFront (false);
+        repaint();
+
+        juce::Component::SafePointer<SoundPad> safe (this);
+        juce::MessageManager::callAsync ([safe]
+        {
+            if (safe == nullptr || ! safe->trackNameLabel.isVisible())
+                return;
+
+            safe->trackNameLabel.showEditor();
+        });
+    }
+
+    bool isPointInTrackNameArea (int localX, int localY) const noexcept
+    {
+        if (isRenderAsGridMode)
+        {
+            constexpr int kTitlePadLeft  = 12;
+            constexpr int kTitlePadRight = 10;
+            const int titleWidth = juce::jmax (0, getWidth() - kTitlePadLeft - kTitlePadRight);
+            return localX >= kTitlePadLeft && localX < kTitlePadLeft + titleWidth
+                && localY >= 6 && localY < 28;
+        }
+
+        int textX = showcontrol::bgmList::kNameStartDefault;
+
+        if (isPlaying() || (isCueListPlayback && isPaused()))
+            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+
+        const int nameW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX);
+        return localX >= textX && localX < textX + nameW;
+    }
+
+    std::function<void (SoundPad*)> onTrackNameChanged;
 
     juce::String getSearchableTokens() const
     {
@@ -366,9 +495,22 @@ public:
         return std::max (0.0, end - trimStart);
     }
 
-    void updateTheme (bool isDark) { isDarkMode = isDark; setOpaque (true); repaint(); }
+    void updateTheme (bool isDark)
+    {
+        isDarkMode = isDark;
+        setOpaque (true);
+        rebuildPaintResources();
+        repaint();
+    }
+
     void setIsSelectedRow (bool select) { isSelectedRowState = select; repaint(); }
-    void setRenderMode (bool asGrid) { isRenderAsGridMode = asGrid; repaint(); }
+
+    void setRenderMode (bool asGrid)
+    {
+        isRenderAsGridMode = asGrid;
+        rebuildPaintResources();
+        repaint();
+    }
 
     void configurePad (const juce::String& path, float gain, bool loop)
     {
@@ -747,6 +889,120 @@ public:
     {
         pendingProjectState = state;
         hasPendingProjectState = true;
+        applyStartupDisplayFromProjectState (state);
+    }
+
+    /** Gán title hiển thị tức thì khi load JSON — không đọc file, không I/O. */
+    void applyInstantDisplayTitle (const juce::String& title)
+    {
+        const auto trimmed = title.trim();
+
+        if (trimmed.isEmpty())
+            return;
+
+        cachedMeta.title = trimmed;
+        repaint();
+    }
+
+    /** Gán chuỗi định dạng âm thanh cache — Inspector đọc RAM, không mở file. */
+    void applyInstantDisplayFormat (const juce::String& formatInfo)
+    {
+        const auto trimmed = formatInfo.trim();
+
+        if (trimmed.isEmpty())
+            return;
+
+        cachedMeta.formatInfoString = trimmed;
+        repaint();
+    }
+
+    /** Kết quả migration ngầm — cập nhật RAM + pending project state. */
+    void applyMigratedAudioFormat (const juce::String& formatInfo,
+                                   int sampleRate,
+                                   int bitDepth,
+                                   int numChannels)
+    {
+        cachedMeta.formatInfoString = formatInfo;
+
+        if (sampleRate > 0)
+            cachedMeta.sampleRate = sampleRate;
+
+        if (bitDepth > 0)
+            cachedMeta.bitDepth = bitDepth;
+
+        if (numChannels > 0)
+            cachedMeta.numChannels = numChannels;
+
+        if (hasPendingProjectState)
+        {
+            pendingProjectState.cachedMeta.formatInfoString = cachedMeta.formatInfoString;
+            pendingProjectState.cachedMeta.sampleRate       = cachedMeta.sampleRate;
+            pendingProjectState.cachedMeta.bitDepth         = cachedMeta.bitDepth;
+            pendingProjectState.cachedMeta.numChannels      = cachedMeta.numChannels;
+        }
+
+        repaint();
+    }
+
+    juce::String getCachedFormatInfoString() const
+    {
+        return cachedMeta.getFormatInfo();
+    }
+
+    void rebuildCachedFormatInfoFromMetadata() noexcept
+    {
+        if (cachedMeta.sampleRate > 0 || cachedMeta.bitDepth > 0 || cachedMeta.numChannels > 0)
+            cachedMeta.formatInfoString = cachedMeta.buildFormatInfoUncached();
+    }
+
+    /** Waveform + normalize — message thread kế tiếp, không chặn click chọn. */
+    void scheduleDeferredInspectorLoads()
+    {
+        juce::Component::SafePointer<SoundPad> safe (this);
+        juce::MessageManager::callAsync ([safe]
+        {
+            if (safe == nullptr)
+                return;
+
+            safe->setThumbnailLoadAllowed (true, false);
+            safe->setNormalizationLoadAllowed (true, false);
+            safe->ensureThumbnailLoaded();
+            safe->maybeStartNormalization();
+        });
+    }
+
+    void applyStartupDisplayFromProjectState (const PadProjectState& state)
+    {
+        if (state.customName.isNotEmpty())
+            customName = state.customName;
+
+        if (state.cachedMeta.title.isNotEmpty())
+            cachedMeta.title = state.cachedMeta.title;
+
+        if (state.cachedMeta.artist.isNotEmpty())
+            cachedMeta.artist = state.cachedMeta.artist;
+
+        if (state.cachedMeta.album.isNotEmpty())
+            cachedMeta.album = state.cachedMeta.album;
+
+        if (state.cachedMeta.bpm > 0.0)
+            cachedMeta.bpm = state.cachedMeta.bpm;
+
+        if (state.cachedMeta.sampleRate > 0)
+            cachedMeta.sampleRate = state.cachedMeta.sampleRate;
+
+        if (state.cachedMeta.bitDepth > 0)
+            cachedMeta.bitDepth = state.cachedMeta.bitDepth;
+
+        if (state.cachedMeta.numChannels > 0)
+            cachedMeta.numChannels = state.cachedMeta.numChannels;
+
+        if (state.cachedMeta.formatInfoString.isNotEmpty())
+            cachedMeta.formatInfoString = state.cachedMeta.formatInfoString;
+        else
+            rebuildCachedFormatInfoFromMetadata();
+
+        repaint();
     }
     double getDetectedRMS() const { return measuredLoudness; }
 
@@ -884,6 +1140,17 @@ public:
             onRequestGo (this);
     }
 
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (isPointInTrackNameArea (e.x, e.y))
+        {
+            beginTrackNameEdit();
+            return;
+        }
+
+        juce::Component::mouseDoubleClick (e);
+    }
+
     void mouseDrag (const juce::MouseEvent& e) override
     {
         if (e.mods.isPopupMenu())
@@ -944,78 +1211,87 @@ public:
         g.setColour (pal.borderSubtle);
         g.drawHorizontalLine (getHeight() - 1, 0.0f, bounds.getWidth());
 
-        int textX = showcontrol::bgmList::kNameStartDefault;
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::fontBold (11.0f));
+        g.setFont (paintResources.listIndex);
         g.drawText (juce::String (myIndex + 1),
                     showcontrol::bgmList::kIndexX, 0,
                     showcontrol::bgmList::kIndexWidth, getHeight(),
                     juce::Justification::centred);
 
         const bool highlightRow = isPlaying() || isPaused();
-        if (isPlaying()) {
-            const auto iconBounds = showcontrol::bgmList::statusIconBounds (getHeight());
-            showcontrol::icons::paintSpeakerIcon (g, iconBounds,
+        if (isPlaying())
+        {
+            showcontrol::icons::paintSpeakerIcon (g, paintResources.listStatusIconBounds,
                                                   showcontrol::icons::speakerPlayingColour (isSelectedRowState),
                                                   isSelectedRowState);
-            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
         }
-        else if (isCueListPlayback && isPaused()) {
-            const auto iconBounds = showcontrol::bgmList::statusIconBounds (getHeight());
+        else if (isCueListPlayback && isPaused())
+        {
             const auto iconCol = showcontrol::icons::iconColourForListState (isSelectedRowState, isDarkMode);
-            showcontrol::icons::paintPauseIcon (g, iconBounds, iconCol);
-            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+            showcontrol::icons::paintPauseIcon (g, paintResources.listStatusIconBounds, iconCol);
         }
 
         g.setColour (highlightRow ? ((isCueListPlayback && isPaused()) ? pal.warning : pal.success)
                                  : pal.textPrimary);
-        g.setFont (ShowTheme::font (13.5f, highlightRow || isSelectedRowState ? "Bold" : "Plain"));
+        g.setFont (highlightRow || isSelectedRowState ? paintResources.listTitleBold : paintResources.listTitle);
+
         if (isLoading())
         {
             g.setColour (pal.warning);
-            g.setFont (ShowTheme::fontBold (13.5f));
-            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), textX, 0,
-                        showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX), getHeight(),
-                        juce::Justification::centredLeft, true);
+            g.setFont (paintResources.listTitleBold);
+            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), paintResources.listNameTextX, 0,
+                        showcontrol::bgmList::nameColumnMaxWidth (getWidth(), paintResources.listNameTextX),
+                        getHeight(), juce::Justification::centredLeft, true);
             return;
         }
 
-        // Tên bài — nếu có artist, thu hẹp để chừa chỗ cho artist
-        const bool showArtist = cachedMeta.artist.isNotEmpty() && getHeight() >= 30;
-        const int availW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX);
-        const int nameWidth = showArtist ? juce::jmax (0, availW / 2 - 4) : availW;
-        g.drawText (getPadName(), textX, 0, nameWidth, getHeight(), juce::Justification::centredLeft, true);
+        if (! trackNameEditing)
+            g.drawText (getPadName(), paintResources.listNameTextX, 0, paintResources.listNameWidth,
+                        getHeight(), juce::Justification::centredLeft, false);
 
-        if (showArtist)
+        if (paintResources.listShowArtist)
         {
             g.setColour (pal.textMuted);
-            g.setFont (ShowTheme::font (11.5f));
-            g.drawText (cachedMeta.artist, textX + nameWidth + 4, 0, availW - nameWidth - 4, getHeight(), juce::Justification::centredLeft, true);
+            g.setFont (paintResources.listArtist);
+            g.drawText (cachedMeta.artist,
+                        paintResources.listNameTextX + paintResources.listNameWidth + 4, 0,
+                        paintResources.listArtistWidth, getHeight(),
+                        juce::Justification::centredLeft, true);
         }
 
-        if (! isCueListPlayback && isLooping() && hasFile) {
-            showcontrol::icons::paintLoopIcon (g,
-                                               showcontrol::bgmList::loopIconBounds (getWidth(), getHeight()),
-                                               pal.accent, true);
-        }
+        if (! isCueListPlayback && isLooping() && hasFile)
+            showcontrol::icons::paintLoopIcon (g, paintResources.listLoopIconBounds, pal.accent, true);
 
-        if (hasFile) {
+        if (hasFile)
+        {
             const double remainingTime = isTransportActive() ? getRemainingSeconds() : 0.0;
-            if ((isPlaying() || isPaused()) && remainingTime <= 5.0 && isPlaying()) {
+            if ((isPlaying() || isPaused()) && remainingTime <= 5.0 && isPlaying())
+            {
                 if ((juce::Time::getMillisecondCounter() % 400) < 200) g.setColour (pal.danger);
                 else g.setColour (pal.textSecondary);
-            } else { g.setColour (pal.textSecondary); }
-            const auto remainingRect = showcontrol::bgmList::timeRemainingBounds (getWidth(), getHeight());
-            const auto totalRect     = showcontrol::bgmList::totalDurationBounds (getWidth(), getHeight());
+            }
+            else
+            {
+                g.setColour (pal.textSecondary);
+            }
 
-            g.setFont (ShowTheme::timerFont (12.5f, true));
-            g.drawText (formatTimeString (remainingTime), remainingRect, juce::Justification::centred);
+            g.setFont (paintResources.listTimerBold);
+            g.drawText (formatTimeString (remainingTime), paintResources.listRemainingRect,
+                        juce::Justification::centred);
 
             g.setColour (pal.textMuted);
-            g.setFont (ShowTheme::timerFont (12.5f));
-            const double displayTotal = getEffectiveLength();
-            g.drawText (formatTimeString (displayTotal), totalRect, juce::Justification::centred);
+            g.setFont (paintResources.listTimer);
+            g.drawText (formatTimeString (getEffectiveLength()), paintResources.listTotalRect,
+                        juce::Justification::centred);
         }
+    }
+
+    void resized() override
+    {
+        rebuildPaintResources();
+
+        if (trackNameEditing)
+            layoutTrackNameLabel();
     }
 
     void paint (juce::Graphics& g) override
@@ -1065,7 +1341,7 @@ private:
         AudioMetadata meta;
     };
 
-    juce::AudioFormatManager formatManager;
+    juce::AudioFormatManager& formatManager;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
     juce::AudioTransportSource transportSource;
     PadRealtimeSource realtimeSource;
@@ -1090,6 +1366,8 @@ private:
     bool clickToTriggerOnClick = false;
     bool isArmedState = false;
     bool reorderDragActive = false;
+    bool trackNameEditing = false;
+    TrackNameEditLabel trackNameLabel;
     bool mixerRegisteredWithMaster = false;
     juce::TimeSliceThread* sharedTimeSliceThread = nullptr;
     double sourceSampleRate = 44100.0;
@@ -1102,9 +1380,75 @@ private:
     std::atomic<uint32_t> audioLoadGeneration { 0 };
     std::atomic<bool> playbackPreloadRequested { false };
 
+    struct PaintResources
+    {
+        juce::Font gridTitle { juce::FontOptions() };
+        juce::Font gridArtist { juce::FontOptions() };
+        juce::Font gridTimerBold { juce::FontOptions() };
+        juce::Font gridTimer { juce::FontOptions() };
+        juce::Font gridBadge { juce::FontOptions() };
+        juce::Font listIndex { juce::FontOptions() };
+        juce::Font listTitle { juce::FontOptions() };
+        juce::Font listTitleBold { juce::FontOptions() };
+        juce::Font listArtist { juce::FontOptions() };
+        juce::Font listTimerBold { juce::FontOptions() };
+        juce::Font listTimer { juce::FontOptions() };
+        juce::Rectangle<int> waveformBounds;
+        juce::Rectangle<int> listRemainingRect;
+        juce::Rectangle<int> listTotalRect;
+        juce::Rectangle<float> listLoopIconBounds;
+        juce::Rectangle<float> listStatusIconBounds;
+        juce::Rectangle<float> gridBadgeRect;
+        int listNameTextX = showcontrol::bgmList::kNameStartDefault;
+        int listNameWidth = 0;
+        int listArtistWidth = 0;
+        bool listShowArtist = false;
+    };
+
+    PaintResources paintResources;
+
+    void rebuildPaintResources()
+    {
+        paintResources.gridTitle     = ShowTheme::fontBold (13.0f);
+        paintResources.gridArtist    = ShowTheme::font (10.5f);
+        paintResources.gridTimerBold = ShowTheme::timerFont (11.5f, true);
+        paintResources.gridTimer     = ShowTheme::timerFont (11.0f);
+        paintResources.gridBadge     = ShowTheme::fontBold (10.0f);
+        paintResources.listIndex     = ShowTheme::fontBold (11.0f);
+        paintResources.listTitle     = ShowTheme::font (13.5f);
+        paintResources.listTitleBold = ShowTheme::font (13.5f, "Bold");
+        paintResources.listArtist    = ShowTheme::font (11.5f);
+        paintResources.listTimerBold = ShowTheme::timerFont (12.5f, true);
+        paintResources.listTimer     = ShowTheme::timerFont (12.5f);
+
+        paintResources.waveformBounds = showcontrol::gfx::sanitise (
+            getLocalBounds().withTrimmedTop (32).withTrimmedBottom (28).reduced (8, 0));
+        paintResources.listRemainingRect = showcontrol::bgmList::timeRemainingBounds (getWidth(), getHeight());
+        paintResources.listTotalRect     = showcontrol::bgmList::totalDurationBounds (getWidth(), getHeight());
+        paintResources.listLoopIconBounds = showcontrol::bgmList::loopIconBounds (getWidth(), getHeight());
+        paintResources.listStatusIconBounds = showcontrol::bgmList::statusIconBounds (getHeight());
+
+        const bool highlightRow = isPlaying() || isPaused();
+        paintResources.listNameTextX = (isPlaying() || (isCueListPlayback && isPaused()))
+            ? showcontrol::bgmList::kNameStartWithStatusIcon
+            : showcontrol::bgmList::kNameStartDefault;
+
+        const int availW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), paintResources.listNameTextX);
+        paintResources.listShowArtist = cachedMeta.artist.isNotEmpty() && getHeight() >= 30;
+        paintResources.listNameWidth  = paintResources.listShowArtist ? juce::jmax (0, availW / 2 - 4) : availW;
+        paintResources.listArtistWidth = juce::jmax (0, availW - paintResources.listNameWidth - 4);
+
+        auto badgeWidth = 24.0f, badgeHeight = 15.0f;
+        paintResources.gridBadgeRect = juce::Rectangle<float> ((getWidth() - badgeWidth) * 0.5f,
+                                                             (float) getHeight() - badgeHeight - 4.0f,
+                                                             badgeWidth, badgeHeight);
+    }
+
     /** fadeInMs > 0 → fade-in; ngược lại postPlay() tức thì (message thread). */
     void postPlayOrFadeIn (CueTransitionReason reason)
     {
+        warmReadAheadPipeline();
+
         if (fadeInMs > 0.0)
         {
             startFadeIn (fadeInMs);
@@ -1181,6 +1525,15 @@ private:
         transportUsesReadAhead = true;
     }
 
+    /** Prime BufferingAudioSource + OS page cache — message thread, trước GO/PAD. */
+    void warmReadAheadPipeline() noexcept
+    {
+        ensureReadAheadBuffer();
+
+        if (sharedTimeSliceThread != nullptr)
+            sharedTimeSliceThread->notify();
+    }
+
     bool isAllowedCueTransition (PadCueState from, PadCueState to) const noexcept
     {
         if (from == to)
@@ -1234,6 +1587,78 @@ private:
         return true;
     }
 
+    void changeListenerCallback (juce::ChangeBroadcaster* source) override
+    {
+        if (source == &thumbnail)
+            repaint();
+    }
+
+    void labelTextChanged (juce::Label* labelThatHasChanged) override
+    {
+        if (labelThatHasChanged != &trackNameLabel)
+            return;
+
+        const juce::String newName = trackNameLabel.getText().trim();
+
+        if (newName.isNotEmpty())
+        {
+            setCustomName (newName);
+
+            if (onTrackNameChanged)
+                onTrackNameChanged (this);
+        }
+    }
+
+    void editorShown (juce::Label* label, juce::TextEditor& editor) override
+    {
+        if (label != &trackNameLabel)
+            return;
+
+        ShowControlLookAndFeel::applyInlineListNameEditorStyle (editor, isDarkMode, isSelectedRowState);
+
+        if (isRenderAsGridMode)
+        {
+            const auto pal = ShowTheme::get (isDarkMode);
+            editor.setColour (juce::TextEditor::backgroundColourId, pal.panelElevated);
+        }
+
+        const auto pal = ShowTheme::get (isDarkMode);
+        editor.setTextToShowWhenEmpty (showcontrol::localization::tr (u8"Nhập tên bài hát mới"),
+                                       pal.textMuted);
+    }
+
+    void editorHidden (juce::Label* label, juce::TextEditor& editor) override
+    {
+        juce::ignoreUnused (editor);
+
+        if (label != &trackNameLabel)
+            return;
+
+        trackNameEditing = false;
+        trackNameLabel.setVisible (false);
+        repaint();
+    }
+
+    void layoutTrackNameLabel()
+    {
+        if (isRenderAsGridMode)
+        {
+            constexpr int kTitlePadLeft  = 12;
+            constexpr int kTitlePadRight = 10;
+            const int titleWidth = juce::jmax (0, getWidth() - kTitlePadLeft - kTitlePadRight);
+            trackNameLabel.setBounds (kTitlePadLeft, 6, titleWidth, 22);
+            return;
+        }
+
+        int textX = showcontrol::bgmList::kNameStartDefault;
+
+        if (isPlaying() || (isCueListPlayback && isPaused()))
+            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+
+        const int nameW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX);
+        trackNameLabel.setBounds (textX, 0, nameW, getHeight());
+    }
+
     void ensureThumbnailLoaded()
     {
         if (! thumbnailLoadAllowedNow || thumbnailLoaded)
@@ -1278,6 +1703,7 @@ private:
 
     void notifyPlaybackStateChanged()
     {
+        rebuildPaintResources();
         repaint();
         if (onPlaybackStateChanged)
             onPlaybackStateChanged();
@@ -1488,6 +1914,19 @@ private:
             juce::AudioFormatManager localFormatManager;
             localFormatManager.registerBasicFormats();
 
+            if (auto warmReader = std::unique_ptr<juce::AudioFormatReader> (localFormatManager.createReaderFor (f)))
+            {
+                const int warmSamples = juce::jmin (kReadAheadBufferSamples,
+                                                    (int) warmReader->lengthInSamples);
+                if (warmSamples > 0)
+                {
+                    juce::AudioBuffer<float> warmBuf (juce::jmax (1, (int) warmReader->numChannels),
+                                                      warmSamples);
+                    warmBuf.clear();
+                    warmReader->read (&warmBuf, 0, warmSamples, 0, true, true);
+                }
+            }
+
             auto payload = std::make_unique<LoadedAudioPayload>();
             payload->file = f;
             payload->reader.reset (localFormatManager.createReaderFor (f));
@@ -1533,6 +1972,9 @@ private:
         cachedMeta = payload->meta;
         if (cachedMeta.bpm <= 0.0 && previousBpm > 0.0)
             cachedMeta.bpm = previousBpm;
+
+        if (cachedMeta.formatInfoString.isEmpty())
+            cachedMeta.formatInfoString = cachedMeta.buildFormatInfoUncached();
         sourceSampleRate = payload->sampleRate;
         readerSource = std::make_unique<juce::AudioFormatReaderSource> (payload->reader.release(), true);
 
@@ -1559,8 +2001,7 @@ private:
         setCueState (PadCueState::ready, CueTransitionReason::fileLoadedReady, true);
         lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
 
-        if (playbackPreloadRequested.load (std::memory_order_relaxed))
-            ensureReadAheadBuffer();
+        warmReadAheadPipeline();
 
         if (hasPendingProjectState)
             applyPendingProjectState();
@@ -1606,7 +2047,7 @@ private:
         double tStart = 0.0, tEnd = 0.0;
         getTrimmedDisplayRange (tStart, tEnd);
         const double effectiveLen = juce::jmax (0.0, tEnd - tStart);
-        auto waveformBounds = showcontrol::gfx::sanitise (getLocalBounds().withTrimmedTop (32).withTrimmedBottom (28).reduced (8, 0));
+        const auto& waveformBounds = paintResources.waveformBounds;
         if (waveformBounds.getWidth() <= 0 || waveformBounds.getHeight() <= 0)
             return;
 
@@ -1661,47 +2102,50 @@ private:
         g.setColour (pal.textPrimary);
         if (isLoading())
         {
-            g.setFont (ShowTheme::fontBold (13.0f));
+            g.setFont (paintResources.gridTitle);
             g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), kTitlePadLeft, 10, titleWidth, 18,
                         juce::Justification::topLeft, true);
             return;
         }
 
-        // Tên bài — full width góc phải (không còn BPM badge che chữ)
-        g.setFont (ShowTheme::fontBold (13.0f));
-        g.drawText (getPadName(), kTitlePadLeft, 8, titleWidth, 17, juce::Justification::topLeft, true);
+        if (! trackNameEditing)
+        {
+            g.setFont (paintResources.gridTitle);
+            g.drawText (getPadName(), kTitlePadLeft, 8, titleWidth, 17, juce::Justification::topLeft, false);
+        }
 
-        // Artist — hiện nếu có, nhỏ hơn và muted
         if (cachedMeta.artist.isNotEmpty())
         {
             g.setColour (pal.textMuted);
-            g.setFont (ShowTheme::font (10.5f));
+            g.setFont (paintResources.gridArtist);
             g.drawText (cachedMeta.artist, kTitlePadLeft, 27, titleWidth, 14, juce::Justification::topLeft, true);
         }
 
-        // Thời gian còn lại (bottom-left)
         double remainingTime = isTransportActive() ? getRemainingSeconds() : 0.0;
-        if (isPlaying() && remainingTime <= 5.0) {
+        if (isPlaying() && remainingTime <= 5.0)
             g.setColour ((juce::Time::getMillisecondCounter() % 400) < 200 ? pal.danger : pal.textSecondary);
-        } else { g.setColour (pal.textSecondary); }
-        g.setFont (ShowTheme::timerFont (11.5f, true));
+        else
+            g.setColour (pal.textSecondary);
+
+        g.setFont (paintResources.gridTimerBold);
         g.drawText (formatTimeString (remainingTime), 12, getHeight() - 22, 80, 15, juce::Justification::bottomLeft);
 
-        // Tổng thời lượng (bottom-right)
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::timerFont (11.0f));
-        g.drawText (formatTimeString (getEffectiveLength()), getWidth() - 92, getHeight() - 22, 80, 15, juce::Justification::bottomRight);
+        g.setFont (paintResources.gridTimer);
+        g.drawText (formatTimeString (getEffectiveLength()), getWidth() - 92, getHeight() - 22, 80, 15,
+                    juce::Justification::bottomRight);
     }
 
-    void paintGridBadge (juce::Graphics& g, const juce::Rectangle<float>& bounds) {
-        auto badgeWidth = 24.0f, badgeHeight = 15.0f;
-        auto badgeRect = juce::Rectangle<float>((getWidth() - badgeWidth) / 2.0f, getHeight() - badgeHeight - 4.0f, badgeWidth, badgeHeight);
+    void paintGridBadge (juce::Graphics& g, const juce::Rectangle<float>& bounds)
+    {
+        juce::ignoreUnused (bounds);
+        const auto& badgeRect = paintResources.gridBadgeRect;
         const auto pal = ShowTheme::get (isDarkMode);
         if (isPlaying()) g.setColour (pal.success);
         else g.setColour (hasFile ? pal.shortcutBadgeBg : pal.listRowBg);
         g.fillRoundedRectangle (badgeRect, 3.0f);
         g.setColour (isPlaying() ? juce::Colours::white : (hasFile ? pal.shortcutBadgeText : pal.textMuted));
-        g.setFont (ShowTheme::fontBold (10.0f));
+        g.setFont (paintResources.gridBadge);
         g.drawText (shortcutLabel, badgeRect, juce::Justification::centred);
     }
 

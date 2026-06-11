@@ -82,6 +82,24 @@ namespace showcontrol::icons
             "M 5 3 H 19 A 2 2 0 0 1 21 5 V 19 A 2 2 0 0 1 19 21 H 5 A 2 2 0 0 1 3 19 V 5 A 2 2 0 0 1 5 3"
             " M 3 9 H 21 M 9 21 V 9";
 
+        /** lucide:mic */
+        inline constexpr const char* mic =
+            "M 12 14a4 4 0 0 0 4-4V5a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4z"
+            " M 19 11a7 7 0 0 1-14 0"
+            " M 12 18v4"
+            " M 8 22h8";
+
+        /** lucide:globe */
+        inline constexpr const char* globe =
+            "M 12 2a10 10 0 1 0 0 20a10 10 0 0 0 0-20"
+            " M 2 12h20"
+            " M 12 2a15.3 15.3 0 0 1 4 10a15.3 15.3 0 0 1-4 10a15.3 15.3 0 0 1-4-10a15.3 15.3 0 0 1 4-10";
+
+        /** lucide:shield-check */
+        inline constexpr const char* shieldCheck =
+            "M 12 22s8-4 8-10V5l-8-3l-8 3v7c0 6 8 10 8 10"
+            " M 9 12l2 2l4-4";
+
         /** Fade wedge outline — đường dốc mảnh. */
         inline constexpr const char* fadeSlope =
             "M 6 18 L 18 6";
@@ -265,6 +283,21 @@ namespace showcontrol::icons
     inline void paintLayoutIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
     {
         drawSVGPathIcon (g, "lucide:layout", Lucide::layout, bounds, colour, kOutlineStroke);
+    }
+
+    inline void paintMicIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
+    {
+        drawSVGPathIcon (g, "lucide:mic", Lucide::mic, bounds, colour, kOutlineStroke);
+    }
+
+    inline void paintGlobeIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
+    {
+        drawSVGPathIcon (g, "lucide:globe", Lucide::globe, bounds, colour, kOutlineStroke);
+    }
+
+    inline void paintShieldCheckIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
+    {
+        drawSVGPathIcon (g, "lucide:shield-check", Lucide::shieldCheck, bounds, colour, kOutlineStroke);
     }
 
     inline void paintFadeSlopeIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
