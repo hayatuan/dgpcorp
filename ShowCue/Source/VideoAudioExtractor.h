@@ -109,17 +109,47 @@ inline juce::File findFfmpegExecutable()
     }
 
     juce::ChildProcess whichProc;
+   #if JUCE_WINDOWS
+    if (whichProc.start (juce::StringArray { "where.exe", "ffmpeg" }))
+   #else
     if (whichProc.start (juce::StringArray { "/bin/sh", "-c",
                                               "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; which ffmpeg 2>/dev/null" }))
+   #endif
     {
         const auto whichOut = whichProc.readAllProcessOutput().trim();
         if (whichOut.isNotEmpty())
         {
-            const juce::File exe (whichOut);
+            const juce::File exe (whichOut.upToFirstOccurrenceOf ("\r", false, false)
+                                       .upToFirstOccurrenceOf ("\n", false, false)
+                                       .trim());
             if (exe.existsAsFile())
                 return exe;
         }
     }
+
+   #if JUCE_WINDOWS
+    const juce::StringArray winCandidates {
+        R"(C:\ffmpeg\bin\ffmpeg.exe)",
+        R"(C:\Program Files\ffmpeg\bin\ffmpeg.exe)",
+        R"(C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe)"
+    };
+
+    for (const auto& path : winCandidates)
+    {
+        const juce::File exe (path);
+        if (exe.existsAsFile())
+            return exe;
+    }
+
+    const auto localApp = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+    for (const auto& sub : { "Microsoft\\WinGet\\Links\\ffmpeg.exe",
+                             "ffmpeg\\ffmpeg.exe" })
+    {
+        const juce::File exe = localApp.getChildFile (sub);
+        if (exe.existsAsFile())
+            return exe;
+    }
+   #endif
 
     return {};
 }
@@ -166,7 +196,11 @@ inline bool isHomebrewAvailable()
 
 inline juce::String brewInstallFfmpegCommand()
 {
+   #if JUCE_WINDOWS
+    return "winget install --id Gyan.FFmpeg";
+   #else
     return "brew install ffmpeg";
+   #endif
 }
 
 inline constexpr const char* showControlWavTag() noexcept { return ".showcontrol"; }

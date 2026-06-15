@@ -2,6 +2,7 @@
 
 #include "MainComponent.h"
 #include "ShowAboutDialog.h"
+#include "ShowTypography.h"
 
 #if JUCE_MAC
 
@@ -77,6 +78,8 @@ public:
     {
 
         juce::ignoreUnused (commandLine);
+
+        showcontrol::typography::ensureLoaded();
 
         mainWindow.reset (new MainWindow (getApplicationName()));
 

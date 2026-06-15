@@ -69,6 +69,12 @@ public:
     /** Font chuột phải toàn cục — Roboto 15pt nhúng nhị phân. */
     juce::Font getPopupMenuFont() override;
 
+    juce::Font getLabelFont (juce::Label&) override;
+    juce::Font getComboBoxFont (juce::ComboBox&) override;
+    juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override;
+    juce::Font getAlertWindowTitleFont() override;
+    juce::Font getAlertWindowMessageFont() override;
+
     /** TextEditor phẳng bo góc — nền chìm, viền xanh thương hiệu khi focus. */
     void fillTextEditorBackground (juce::Graphics& g, int width, int height,
                                    juce::TextEditor& textEditor) override;
@@ -211,10 +217,7 @@ public:
 
 private:
     bool currentIsDark = true;
-    juce::Typeface::Ptr robotoRegular;
-    juce::Typeface::Ptr robotoBold;
 
-    void loadRobotoTypefaces();
     void applyPalette (bool dark);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShowControlLookAndFeel)

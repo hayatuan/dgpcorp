@@ -267,8 +267,9 @@ SystemPermissionsPanel::SystemPermissionsPanel()
     audioCard.setAllowGrantButton (true);
     audioCard.onGrantRequested = [this]
     {
+        juce::Component::SafePointer<SystemPermissionsPanel> safe (this);
         juce::RuntimePermissions::request (juce::RuntimePermissions::recordAudio,
-            [safe = juce::Component::SafePointer<SystemPermissionsPanel> (this)] (bool /*granted*/)
+                                           [safe] (bool /*granted*/)
         {
             if (safe != nullptr)
                 safe->updatePermissionUi();

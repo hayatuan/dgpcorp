@@ -30,6 +30,8 @@ target_sources(ShowCue PRIVATE
     Source/ShowTheme.h
     Source/ShowTagColors.h
     Source/MasterDeckComponent.h
+    Source/ShowTypography.h
+    Source/ShowTypography.cpp
     Source/ShowControlLookAndFeel.h
     Source/ShowControlLookAndFeel.cpp
     Source/MainComponent.h

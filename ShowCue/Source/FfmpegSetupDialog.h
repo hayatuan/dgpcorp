@@ -17,11 +17,19 @@ enum class FfmpegPromptChoice
 
 inline juce::String ffmpegMissingExplanation()
 {
+   #if JUCE_WINDOWS
+    return juce::String::fromUTF8 (
+        u8"Tính năng kéo thả video cần ffmpeg.\n\n"
+        u8"Bản cài đặt đầy đủ thường đã có ffmpeg.exe cạnh ShowCue.exe.\n"
+        u8"Nếu thiếu, chạy script: ShowCue\\scripts\\setup-thirdparty-win.ps1\n"
+        u8"Hoặc cài qua winget: winget install --id Gyan.FFmpeg");
+   #else
     return juce::String::fromUTF8 (
         u8"Tính năng kéo thả video cần ffmpeg.\n\n"
         u8"Bản cài đặt đầy đủ thường đã có ffmpeg trong app; nếu thiếu:\n"
         u8"• Có Homebrew: chọn «Cài tự động» hoặc chạy: brew install ffmpeg\n"
         u8"• Chưa có Homebrew: cài từ brew.sh, sau đó cài ffmpeg.");
+   #endif
 }
 
 inline void promptMissingFfmpeg (juce::Component* parent,
@@ -43,6 +51,10 @@ inline void promptMissingFfmpeg (juce::Component* parent,
 
     if (! hasBrew)
         w.addButton (juce::String::fromUTF8 (u8"Mở trang tải ffmpeg"), 4);
+
+   #if JUCE_WINDOWS
+    w.addButton (juce::String::fromUTF8 (u8"Sao chép lệnh winget"), 5);
+   #endif
 
     w.addButton (juce::String::fromUTF8 (u8"Để sau"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
 
@@ -67,6 +79,12 @@ inline void promptMissingFfmpeg (juce::Component* parent,
                     juce::URL ("https://ffmpeg.org/download.html").launchInDefaultBrowser();
                     onChoice (FfmpegPromptChoice::openBrewWebsite);
                     break;
+               #if JUCE_WINDOWS
+                case 5:
+                    juce::SystemClipboard::copyTextToClipboard ("winget install --id Gyan.FFmpeg");
+                    onChoice (FfmpegPromptChoice::copyInstallCommand);
+                    break;
+               #endif
                 default: onChoice (FfmpegPromptChoice::dismissed); break;
             }
         }),

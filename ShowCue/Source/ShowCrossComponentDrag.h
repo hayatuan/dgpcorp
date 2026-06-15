@@ -456,7 +456,7 @@ inline juce::Image createPremiumDragImage (const juce::String& trackTitle, int s
     g.drawRoundedRectangle (bounds, cornerRadius, 1.5f);
 
     g.setColour (juce::Colours::white);
-    g.setFont (juce::FontOptions (13.0f, juce::Font::plain));
+    g.setFont (ShowTheme::font (13.0f));
     g.drawText (trackTitle, 18, 0, imgW - 65, imgH, juce::Justification::centredLeft, true);
 
     g.setColour (juce::Colour (0xFF4A90E2));
@@ -466,7 +466,7 @@ inline juce::Image createPremiumDragImage (const juce::String& trackTitle, int s
     g.fillEllipse (badgeX, badgeY, badgeSize, badgeSize);
 
     g.setColour (juce::Colours::white);
-    g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+    g.setFont (ShowTheme::fontBold (10.5f));
     g.drawText (juce::String (count), (int) badgeX, (int) badgeY, (int) badgeSize, (int) badgeSize, juce::Justification::centred);
 
     return dragImg;

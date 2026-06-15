@@ -2,11 +2,11 @@
 # SHOWCUE - MASTER COMPREHENSIVE GITIGNORE (MAC & WINDOWS COMPATIBLE)
 #=======================================================================
 
-# --- Phân khu 1: Thư mục Build & Cache (Quét sạch rác biên dịch) ---
-build/
-build-win/
-build-debug/
-build-release/
+# --- Phân khu 1: Thư mục Build & Cache (chỉ root — tránh chặn JUCE/extras/Build/) ---
+/build/
+/build-win/
+/build-debug/
+/build-release/
 bin/
 obj/
 x64/
@@ -21,8 +21,10 @@ CMakeSettings.json
 CMakeUserPresets.json
 /compile_commands.json
 /compile_flags.txt
-*.cmake
-*.ninja
+/build/**/*.cmake
+/build/**/*.ninja
+/ShowCue/compile_commands.json
+/ShowCue/compile_flags.txt
 
 # --- Phân khu 3: IDE Cursor & Visual Studio Code ---
 .vscode/
@@ -63,3 +65,6 @@ $RECYCLE.BIN/
 # --- Phân khu 7: BẢO LƯU TÀI NGUYÊN BẮT BUỘC (TUYỆT ĐỐI KHÔNG CHẶN) ---
 # Dấu chấm than (!) ép Git giữ lại bộ font Roboto nhúng nhị phân của anh em mình
 !/Resources/Fonts/*.ttf
+# JUCE CMake helpers — không được coi là thư mục build output
+!ShowCue/JUCE/extras/Build/
+!ShowCue/JUCE/extras/Build/**

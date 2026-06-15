@@ -35,10 +35,7 @@ public:
     ListNameTextEditor()
     {
         setComponentID ("showcue-inline-list-name-editor");
-        setFont (juce::Font (juce::FontOptions()
-                                 .withName (ShowTheme::uiTypefaceName())
-                                 .withHeight (showcontrol::bgmList::kPlaylistCellFontSize)
-                                 .withStyle ("Plain")));
+        setFont (showcontrol::bgmList::playlistCellFont());
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -672,18 +669,12 @@ private:
     /** Phông chữ dòng danh sách BGM/CUE — Roboto 14.5pt, mọi trạng thái paint/editor. */
     static juce::Font sidebarListRowNameFont() noexcept
     {
-        return juce::Font (juce::FontOptions()
-                               .withName (ShowTheme::uiTypefaceName())
-                               .withHeight (kListRowFontSize)
-                               .withStyle ("Plain"));
+        return showcontrol::bgmList::playlistCellFont();
     }
 
     static juce::Font sidebarListRowHotkeyFont() noexcept
     {
-        return juce::Font (juce::FontOptions()
-                               .withName (ShowTheme::uiTypefaceName())
-                               .withHeight (kListRowHotkeyFontSize)
-                               .withStyle ("Bold"));
+        return showcontrol::bgmList::playlistCellFontBold();
     }
 
     /** Ép lại font sau PopupMenu / lookAndFeelChanged — tránh sụt size khi chuột phải hoặc chọn dòng. */

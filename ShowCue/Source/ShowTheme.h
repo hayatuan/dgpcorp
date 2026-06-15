@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "ShowTypography.h"
 
 /**
  * Premium Playout palette — ma trận màu động Sáng / Tối (Apple HIG-inspired).
@@ -183,41 +184,23 @@ namespace ShowTheme
 
     inline bool isTimerFontRequest (const juce::Font& font) noexcept
     {
-        const auto name = font.getTypefaceName();
-
-        if (name == timerTypefaceName())
-            return true;
-
-        if (name == juce::Font::getDefaultMonospacedFontName())
-            return true;
-
-        return false;
+        return showcontrol::typography::isTimerFontRequest (font);
     }
 
     inline juce::Font font (float heightPx, const juce::String& style = {})
     {
-        auto opts = juce::FontOptions().withName (uiTypefaceName()).withHeight (heightPx);
-
-        if (style.equalsIgnoreCase ("Bold"))
-            opts = opts.withStyle ("Bold");
-
-        return juce::Font (opts);
+        return showcontrol::typography::uiFont (heightPx, style);
     }
 
     inline juce::Font fontBold (float heightPx)
     {
-        return font (heightPx, "Bold");
+        return showcontrol::typography::uiFontBold (heightPx);
     }
 
     /** Monospace tabular — đồng hồ MainDesk, Inspector, cột thời gian CUE/PAD. */
     inline juce::Font timerFont (float heightPx, bool bold = false)
     {
-        auto opts = juce::FontOptions()
-                        .withName (timerTypefaceName())
-                        .withHeight (heightPx)
-                        .withStyle (bold ? "Bold" : "Regular");
-
-        return juce::Font (opts);
+        return showcontrol::typography::timerFont (heightPx, bold);
     }
 
     inline void applyTo (juce::Label& label, float heightPx, juce::Colour colour,
@@ -524,10 +507,7 @@ namespace showcontrol::bgmList
     /** Phông chữ ô dữ liệu playlist — plain 14.5pt, đồng bộ Sidebar + BGM + CUE. */
     inline juce::Font playlistCellFont() noexcept
     {
-        return juce::Font (juce::FontOptions()
-                               .withName (ShowTheme::uiTypefaceName())
-                               .withHeight (kPlaylistCellFontSize)
-                               .withStyle ("Plain"));
+        return ShowTheme::font (kPlaylistCellFontSize);
     }
 
     inline juce::Font playlistCellFontBold() noexcept

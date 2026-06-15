@@ -1,110 +1,15 @@
 #include "ShowControlLookAndFeel.h"
-#include <BinaryData.h>
-
-namespace showcontrol::typography
-{
-    static bool isBoldRequest (const juce::Font& font) noexcept
-    {
-        return font.isBold()
-            || font.getTypefaceStyle().containsIgnoreCase ("bold");
-    }
-
-    static juce::Typeface::Ptr loadFromMemory (const void* data, size_t size)
-    {
-        if (data == nullptr || size == 0)
-            return nullptr;
-
-        return juce::Typeface::createSystemTypefaceFor (data, size);
-    }
-
-    static juce::Typeface::Ptr loadSystemFamily (const juce::StringArray& families,
-                                                 const juce::String& style)
-    {
-        const auto available = juce::Font::findAllTypefaceNames();
-
-        for (const auto& family : families)
-        {
-            if (! available.contains (family, true))
-                continue;
-
-            const juce::Font probe (juce::FontOptions().withName (family).withStyle (style).withHeight (16.0f));
-            auto face = juce::Typeface::createSystemTypefaceFor (probe);
-
-            if (face != nullptr)
-                return face;
-        }
-
-        return nullptr;
-    }
-
-    static juce::Typeface::Ptr& timerRegularCache()  { static juce::Typeface::Ptr p; return p; }
-    static juce::Typeface::Ptr& timerBoldCache()     { static juce::Typeface::Ptr p; return p; }
-
-    static void clearTimerCaches()
-    {
-        timerRegularCache() = nullptr;
-        timerBoldCache() = nullptr;
-    }
-
-    static juce::Typeface::Ptr resolveTimerTypeface (bool bold)
-    {
-        auto& cache = bold ? timerBoldCache() : timerRegularCache();
-
-        if (cache != nullptr)
-            return cache;
-
-        const juce::String style = bold ? "Bold" : "Regular";
-
-        cache = loadSystemFamily ({
-            "JetBrains Mono",
-            "Roboto Mono",
-            "SF Mono",
-            "Menlo",
-            "Consolas",
-            "Courier New",
-            juce::Font::getDefaultMonospacedFontName()
-        }, style);
-
-        if (cache == nullptr)
-        {
-            const juce::Font fallback (juce::FontOptions()
-                                           .withName (juce::Font::getDefaultMonospacedFontName())
-                                           .withStyle (style)
-                                           .withHeight (16.0f));
-            cache = juce::Typeface::createSystemTypefaceFor (fallback);
-        }
-
-        return cache;
-    }
-
-    static void ensureTimerTypefaces()
-    {
-        resolveTimerTypeface (false);
-        resolveTimerTypeface (true);
-    }
-}
 
 //==============================================================================
-void ShowControlLookAndFeel::loadRobotoTypefaces()
-{
-    robotoRegular = juce::Typeface::createSystemTypefaceFor (BinaryData::RobotoRegular_ttf,
-                                                             BinaryData::RobotoRegular_ttfSize);
-    robotoBold    = juce::Typeface::createSystemTypefaceFor (BinaryData::RobotoBold_ttf,
-                                                             BinaryData::RobotoBold_ttfSize);
-}
-
 ShowControlLookAndFeel::ShowControlLookAndFeel()
 {
-    loadRobotoTypefaces();
-    showcontrol::typography::ensureTimerTypefaces();
-    setDefaultSansSerifTypefaceName ("Roboto");
+    showcontrol::typography::ensureLoaded();
+    setDefaultSansSerifTypefaceName (ShowTheme::uiTypefaceName());
     applyPalette (true);
 }
 
 ShowControlLookAndFeel::~ShowControlLookAndFeel()
 {
-    robotoRegular = nullptr;
-    robotoBold = nullptr;
 }
 
 void ShowControlLookAndFeel::setDarkMode (bool dark)
@@ -114,34 +19,19 @@ void ShowControlLookAndFeel::setDarkMode (bool dark)
 
 void ShowControlLookAndFeel::refreshTypography()
 {
-    robotoRegular = nullptr;
-    robotoBold = nullptr;
-    showcontrol::typography::clearTimerCaches();
-    juce::Typeface::clearTypefaceCache();
-    loadRobotoTypefaces();
-    showcontrol::typography::ensureTimerTypefaces();
-    setDefaultSansSerifTypefaceName ("Roboto");
+    showcontrol::typography::reload();
+    setDefaultSansSerifTypefaceName (ShowTheme::uiTypefaceName());
 }
 
 void ShowControlLookAndFeel::shutdownTypographyCaches() noexcept
 {
-    showcontrol::typography::clearTimerCaches();
-    juce::Typeface::clearTypefaceCache();
+    showcontrol::typography::shutdown();
 }
 
 juce::Typeface::Ptr ShowControlLookAndFeel::getTypefaceForFont (const juce::Font& font)
 {
-    if (ShowTheme::isTimerFontRequest (font))
-        return showcontrol::typography::resolveTimerTypeface (showcontrol::typography::isBoldRequest (font));
-
-    if (showcontrol::typography::isBoldRequest (font))
-    {
-        if (robotoBold != nullptr)
-            return robotoBold;
-    }
-
-    if (robotoRegular != nullptr)
-        return robotoRegular;
+    if (auto face = showcontrol::typography::resolveForLookAndFeel (font))
+        return face;
 
     return LookAndFeel_V4::getTypefaceForFont (font);
 }
@@ -184,6 +74,31 @@ juce::Font ShowControlLookAndFeel::getTabButtonFont (juce::TabBarButton&, float 
 juce::Font ShowControlLookAndFeel::getPopupMenuFont()
 {
     return showcontrol::ui::popupMenuFont();
+}
+
+juce::Font ShowControlLookAndFeel::getLabelFont (juce::Label&)
+{
+    return ShowTheme::font (14.0f);
+}
+
+juce::Font ShowControlLookAndFeel::getComboBoxFont (juce::ComboBox&)
+{
+    return ShowTheme::font (14.0f);
+}
+
+juce::Font ShowControlLookAndFeel::getTextButtonFont (juce::TextButton&, int buttonHeight)
+{
+    return ShowTheme::fontBold ((float) juce::jlimit (11, 15, buttonHeight / 2));
+}
+
+juce::Font ShowControlLookAndFeel::getAlertWindowTitleFont()
+{
+    return ShowTheme::fontBold (18.0f);
+}
+
+juce::Font ShowControlLookAndFeel::getAlertWindowMessageFont()
+{
+    return ShowTheme::font (14.0f);
 }
 
 void ShowControlLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton& button,
