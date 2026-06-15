@@ -46,7 +46,7 @@ public:
                                  .withAlpha (shouldDrawButtonAsHighlighted ? 0.95f : 0.72f);
 
         g.setColour (textCol);
-        g.setFont (ShowTheme::font (11.5f));
+        g.setFont (ShowTheme::font (14.5f));
         g.drawFittedText (button.getButtonText(),
                           button.getLocalBounds().reduced (8, 2),
                           juce::Justification::centred, 1);
@@ -84,7 +84,7 @@ void paintEnabledBadge (juce::Graphics& g, juce::Rectangle<float> area)
     showcontrol::icons::paintCheckmark (g, iconArea, juce::Colours::white);
 
     g.setColour (juce::Colours::white);
-    g.setFont (ShowTheme::font (10.5f).boldened());
+    g.setFont (ShowTheme::fontBold (10.5f));
     g.drawText (showcontrol::localization::tr (u8"Enabled"), pill.toNearestInt(), juce::Justification::centredLeft);
 }
 
@@ -118,7 +118,7 @@ void paintWarningBadge (juce::Graphics& g, juce::Rectangle<float> area, const ju
     g.fillRoundedRectangle (pill, 11.0f);
 
     g.setColour (juce::Colours::white);
-    g.setFont (ShowTheme::font (10.0f).boldened());
+    g.setFont (ShowTheme::fontBold (10.0f));
     g.drawFittedText (text, pill.reduced (8, 0).toNearestInt(), juce::Justification::centred, 1);
 }
 
@@ -195,13 +195,13 @@ void PermissionCardComponent::paint (juce::Graphics& g)
     badgeAreaBounds = badgePaintArea.toNearestInt();
 
     g.setColour (textPrimary);
-    g.setFont (ShowTheme::font (13.5f).boldened());
+    g.setFont (ShowTheme::fontBold (15.5f));
     g.drawFittedText (juce::LocalisedStrings::translateWithCurrentMappings (cardTitle),
-                      textCol.removeFromTop (20).toNearestInt(),
+                      textCol.removeFromTop (22).toNearestInt(),
                       juce::Justification::topLeft, 1);
 
     g.setColour (textMuted);
-    g.setFont (ShowTheme::font (11.0f));
+    g.setFont (ShowTheme::font (13.0f));
     const int descLines = (status == PermissionStatus::warning && warningLabel.isNotEmpty()) ? 2 : 4;
     g.drawFittedText (juce::LocalisedStrings::translateWithCurrentMappings (cardDescription),
                       textCol.removeFromTop (descLines > 2 ? 34 : 44).toNearestInt(),
@@ -391,14 +391,14 @@ void SystemPermissionsPanel::paint (juce::Graphics& g)
 
     hero.removeFromTop (10.0f);
     g.setColour (textPrimary);
-    g.setFont (ShowTheme::font (22.0f).boldened());
+    g.setFont (showcontrol::preferences::sectionLabelFont());
     g.drawFittedText (showcontrol::localization::tr (u8"QUYỀN HỆ THỐNG"),
                       hero.removeFromTop (30.0f).toNearestInt(),
                       juce::Justification::centredLeft, 1);
 
     hero.removeFromTop (8.0f);
     g.setColour (textMuted);
-    g.setFont (ShowTheme::font (12.0f));
+    g.setFont (showcontrol::preferences::hintFont());
     g.drawFittedText (showcontrol::localization::tr (
         u8"Để phần mềm vận hành tối ưu nhất, chúng tôi khuyến nghị kích hoạt đầy đủ các quyền này."),
                       hero.toNearestInt(),

@@ -11,9 +11,13 @@
 #include "ShowGraphicsSafe.h"
 #include "ShowFlatIcons.h"
 #include "ShowTheme.h"
+#include "ShowTagColors.h"
+#include "ShowPadGridMatrix.h"
+#include "ShowCrossComponentDrag.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowLocalization.h"
 #include "ShowWaveformCache.h"
+#include "VideoAudioExtractor.h"
 
 namespace showcontrol::audio
 {
@@ -197,6 +201,13 @@ public:
     std::function<void(SoundPad*)> onPadReorderBegin;
     std::function<void(SoundPad*, juce::Point<int>)> onPadReorderMove;
     std::function<void(SoundPad*)> onPadReorderEnd;
+    /** Grid DnD: mô tả multi-pad cho DragAndDropContainer::startDragging. */
+    std::function<juce::var()> onBuildPadDragDescription;
+    /** List DnD: payload SIDEBAR_LIST khi kéo từ BGM/CUE list view. */
+    std::function<juce::var()> onBuildSidebarListDragDescription;
+    std::function<juce::Image (int itemCount)> onCreateMultiItemDragImage;
+    /** List reorder: số dòng đang chọn (badge capsule drag). */
+    std::function<int()> onGetRowReorderDragCount;
     std::function<void(SoundPad*)> onTrackFinished; // Cổng callback báo tử chuyển bài liên tục Foobar2000 Mode
     std::function<void(SoundPad*)> onAudioFileLoaded;
     /** Background normalize xong — Inspector cập nhật nhãn LUFS/RMS. */
@@ -205,6 +216,8 @@ public:
     std::function<void(SoundPad*)> onRequestGo;
     /** true trong lúc startup reassert — chặn triggerPlay/Stop ảo từ UI. */
     std::function<bool()> isPlaybackCommandBlocked;
+    /** Token UI playback — pad fade-out cũ return im lặng khi không còn là focus. */
+    std::function<bool()> isActivePlaybackUiOwner;
 
     /** wireSoundPad chỉ gán callback một lần — tránh đăng ký listener trùng khi loadList. */
     bool isUiCallbacksWired = false;
@@ -222,6 +235,11 @@ public:
         return true;
     }
 
+    void clearHotkeyTriggerGuard() noexcept
+    {
+        hotkeyTriggerGuardUntilMs.store (0, std::memory_order_relaxed);
+    }
+
     void setClickToTrigger (bool shouldTriggerOnClick) noexcept { clickToTriggerOnClick = shouldTriggerOnClick; }
     bool getClickToTrigger() const noexcept { return clickToTriggerOnClick; }
 
@@ -235,6 +253,20 @@ public:
     }
 
     bool isArmed() const noexcept { return isArmedState; }
+
+    void setIsCurrentlyDragged (bool dragged) noexcept
+    {
+        if (isCurrentlyDragged == dragged)
+            return;
+
+        isCurrentlyDragged = dragged;
+        setAlpha (dragged ? 0.0f : 1.0f);
+        resized();
+        repaint();
+    }
+
+    bool isCurrentlyDraggedState() const noexcept { return isCurrentlyDragged; }
+    bool hasActiveJuceSystemDrag() const noexcept { return juceSystemDragStarted; }
 
     /** Đọc trước buffer trên message thread — gọi trước GO để giảm trễ. */
     void prepareForInstantPlay()
@@ -302,6 +334,7 @@ public:
             thumbnail.setSource (nullptr);
             thumbnail.clear();
             thumbnailLoaded = false;
+            invalidateWaveformBaseCache();
         }
 
         ensureThumbnailLoaded();
@@ -363,6 +396,10 @@ public:
         if (readerSource)
             readerSource->setLooping (s);
         realtimeSource.setLooping (s);
+
+        if (! isRenderAsGridMode)
+            rebuildPaintResources();
+
         repaint();
     }
     juce::String getFilePath() const { return hasFile ? musicFile.getFullPathName() : ""; }
@@ -385,6 +422,75 @@ public:
     {
         customName = name.trim();
         repaint();
+    }
+
+    juce::Colour getTagColour() const noexcept { return tagColour; }
+
+    juce::Colour& getTagColourRef() noexcept { return tagColour; }
+
+    /** Live 0ms — Inspector / palette gọi trực tiếp; ép waveform cache đổi màu ngay. */
+    void setPadThemeColour (juce::Colour newColour)
+    {
+        const auto snapped = showcontrol::colours::snapToPalette (newColour);
+        tagColour = snapped;
+        invalidateWaveformBaseCache();
+        repaint();
+    }
+
+    void setTagColour (juce::Colour c)
+    {
+        const auto snapped = showcontrol::colours::snapToPalette (c);
+
+        if (tagColour.getARGB() == snapped.getARGB())
+        {
+            invalidateWaveformBaseCache();
+            repaint();
+            return;
+        }
+
+        setPadThemeColour (snapped);
+    }
+
+    /** Nền thẻ PAD — trắng (sáng) / xám đen flat (tối). */
+    juce::Colour getPadSurfaceColour() const noexcept
+    {
+        return showcontrol::colours::padSurfaceColour (isDarkMode);
+    }
+
+    /** Màu mực chủ đề — tiêu đề, hotkey, waveform trên thẻ PAD Farrago. */
+    juce::Colour getActiveInkColour() const noexcept
+    {
+        const auto& pal = ShowTheme::get (isDarkMode);
+
+        if (showcontrol::colours::isDefaultTagColour (tagColour))
+            return pal.textPrimary;
+
+        return tagColour;
+    }
+
+    juce::Colour getPadThemeColour() const noexcept { return getActiveInkColour(); }
+
+    juce::Colour getPadTitleColour() const noexcept
+    {
+        return getActiveInkColour();
+    }
+
+    juce::Colour getWaveformFillColour() const noexcept
+    {
+        const auto& pal = ShowTheme::get (isDarkMode);
+
+        if (showcontrol::colours::isDefaultTagColour (tagColour))
+            return pal.waveformFill.withAlpha (showcontrol::colours::kPadWaveformInkAlpha);
+
+        return tagColour.withAlpha (showcontrol::colours::kPadWaveformInkAlpha);
+    }
+
+    juce::Colour getPadSelectionBorderColour() const noexcept
+    {
+        if (showcontrol::colours::isDefaultTagColour (tagColour))
+            return ShowTheme::get (isDarkMode).accent;
+
+        return tagColour;
     }
 
     /** List row hoặc ô PAD grid — double-click tên / menu chuột phải. Message thread only. */
@@ -427,8 +533,10 @@ public:
         if (isPlaying() || (isCueListPlayback && isPaused()))
             textX = showcontrol::bgmList::kNameStartWithStatusIcon;
 
-        const int nameW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX);
-        return localX >= textX && localX < textX + nameW;
+        const bool reserveLoopSlot = ! isCueListPlayback && isLooping() && hasFile;
+        const auto nameLayout = showcontrol::bgmList::layoutListNameRow (getWidth(), getHeight(), textX,
+                                                                         reserveLoopSlot);
+        return nameLayout.nameArea.contains (localX, localY);
     }
 
     std::function<void (SoundPad*)> onTrackNameChanged;
@@ -447,6 +555,17 @@ public:
         return isLoading() || hasFile || musicFile.existsAsFile();
     }
     int getPadIndex() const { return myIndex; }
+    juce::String getPadDragIdentityToken() const noexcept { return juce::String (myIndex); }
+    int getGridRow() const noexcept { return gridRow; }
+    int getGridCol() const noexcept { return gridCol; }
+
+    void updateGridPosition (int row, int col) { setGridPosition (row, col, true); }
+
+    void refreshHotkeyLabel()
+    {
+        refreshShortcutLabelFromGrid();
+        repaint();
+    }
 
     void setTrimStart (double seconds)
     {
@@ -499,15 +618,18 @@ public:
     {
         isDarkMode = isDark;
         setOpaque (true);
+        invalidateWaveformBaseCache();
         rebuildPaintResources();
         repaint();
     }
 
     void setIsSelectedRow (bool select) { isSelectedRowState = select; repaint(); }
+    bool isRowSelected() const noexcept { return isSelectedRowState; }
 
     void setRenderMode (bool asGrid)
     {
         isRenderAsGridMode = asGrid;
+        setWantsKeyboardFocus (asGrid);
         rebuildPaintResources();
         repaint();
     }
@@ -543,23 +665,133 @@ public:
         notifyPlaybackStateChanged();
     }
 
-    void setPadIndex (int index) {
+    void setPadIndex (int index)
+    {
         myIndex = index;
-        const juce::String matrix40 = "1234567890QWERTYUIOPASDFGHJKL;ZXCVBNM,.";
-        if (index >= 0 && index < matrix40.length())
+
+        if (! gridPositionAssigned)
         {
-            shortcutLabel = juce::String::charToString (matrix40[index]);
-        }
-        else if (index >= matrix40.length() && index < matrix40.length() + 8)
-        {
-            // Bổ sung 8 phím chuẩn còn lại để đủ 48 PAD.
-            shortcutLabel = "F" + juce::String (index - matrix40.length() + 1);
+            const auto cell = showcontrol::padgrid::gridFromLinearSlot (index);
+            setGridPosition (cell.y, cell.x, true);
         }
         else
         {
-            shortcutLabel = juce::String (index + 1);
+            refreshShortcutLabelFromGrid();
         }
+
         repaint();
+    }
+
+    void setGridPosition (int row, int col, bool refreshHotkeyLabel = true)
+    {
+        gridRow = juce::jlimit (0, showcontrol::padgrid::kRows - 1, row);
+        gridCol = juce::jlimit (0, showcontrol::padgrid::kCols - 1, col);
+        gridPositionAssigned = true;
+
+        if (refreshHotkeyLabel)
+            refreshShortcutLabelFromGrid();
+
+        repaint();
+    }
+
+    /** Batch duplicate — cập nhật ô lưới + hotkey, không repaint trong vòng lặp. */
+    void assignGridCellSilent (int row, int col) noexcept
+    {
+        gridRow = juce::jlimit (0, showcontrol::padgrid::kRows - 1, row);
+        gridCol = juce::jlimit (0, showcontrol::padgrid::kCols - 1, col);
+        gridPositionAssigned = true;
+        refreshShortcutLabelFromGrid();
+    }
+
+    /**
+     * Nhân bản RAM-first từ PAD đã sẵn sàng — chỉ sao chép metadata trong vòng lặp batch,
+     * không đọc đĩa / không setSource waveform. Gọi finalizeClonedAudioAttach() sau batch.
+     */
+    bool cloneReadyAudioFrom (const SoundPad& src) noexcept
+    {
+        if (&src == this)
+            return false;
+
+        cancelPendingAsyncWork();
+        thumbnailLoadAllowedNow = false;
+        normalizationAllowedNow = false;
+        hasPendingNormalization = false;
+        pendingNormalizationFile = juce::File();
+
+        musicFile = src.musicFile;
+        cachedFileName = src.cachedFileName;
+        cachedMeta = src.cachedMeta;
+        measuredLoudness = src.measuredLoudness;
+        thumbnailPendingFile = musicFile;
+        pendingLoadGain = src.getOutputGain();
+
+        if (! musicFile.existsAsFile())
+        {
+            hasFile = false;
+            thumbnailLoaded = false;
+            setCueState (PadCueState::empty, CueTransitionReason::fileUnload, true);
+            return false;
+        }
+
+        hasFile = false;
+        thumbnailLoaded = false;
+        setCueState (PadCueState::loading, CueTransitionReason::fileLoadStart, true);
+        return true;
+    }
+
+    /** Sau batch duplicate — gắn transport + waveform qua AudioThumbnailCache dùng chung. */
+    bool finalizeClonedAudioAttach() noexcept
+    {
+        if (! musicFile.existsAsFile())
+        {
+            setCueState (PadCueState::empty, CueTransitionReason::fileLoadFail, true);
+            return false;
+        }
+
+        const double savedTrimStart = trimStart;
+        const double savedTrimEnd   = trimEnd;
+        const float savedGain       = getOutputGain();
+
+        auto reader = std::unique_ptr<juce::AudioFormatReader> (formatManager.createReaderFor (musicFile));
+
+        if (reader == nullptr)
+        {
+            setCueState (PadCueState::empty, CueTransitionReason::fileLoadFail, true);
+            return false;
+        }
+
+        realtimeSource.postStop();
+        transportSource.setSource (nullptr);
+        readerSource.reset();
+
+        sourceSampleRate = reader->sampleRate;
+        readerSource = std::make_unique<juce::AudioFormatReaderSource> (reader.release(), true);
+        readerSource->setLooping (isLoopingState);
+        realtimeSource.setLooping (isLoopingState);
+
+        const int readAhead = sharedTimeSliceThread != nullptr ? kReadAheadBufferSamples : 0;
+        transportUsesReadAhead = readAhead > 0;
+        transportSource.setSource (readerSource.get(), readAhead, sharedTimeSliceThread, sourceSampleRate);
+
+        trimStart = savedTrimStart;
+        trimEnd   = savedTrimEnd;
+        realtimeSource.setTrimRange (trimStart, trimEnd);
+        setOutputGain (savedGain);
+
+        hasFile = true;
+        setCueState (PadCueState::ready, CueTransitionReason::fileLoadedReady, true);
+        lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
+
+        thumbnailLoadAllowedNow = true;
+        ensureThumbnailLoaded();
+        warmReadAheadPipeline();
+
+        return true;
+    }
+
+    void refreshShortcutLabelFromGrid()
+    {
+        shortcutLabel = showcontrol::padgrid::hotkeyForCell (gridRow, gridCol).label;
     }
 
     void triggerPlay()
@@ -587,7 +819,7 @@ public:
                 if (isStopping())
                     return;
 
-                startFadeOut();
+                stopTransportWithConfiguredFade();
                 return;
             }
 
@@ -685,14 +917,40 @@ public:
         playState.store (PlayState::Stopped, std::memory_order_release);
         realtimeSource.postResetOutputIdle();
         transportSource.stop();
+        transportSource.setPosition (trimStart);
         lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
         lastDeferredStopGeneration = realtimeSource.getDeferredStopGeneration();
+    }
+
+    /** Dừng cứng 0ms — bỏ qua fade guard (fadeOutMs = 0 hoặc panic stop). */
+    void triggerStopImmediate() noexcept
+    {
+        if (isPlaybackCommandBlocked && isPlaybackCommandBlocked())
+            return;
+
+        playState.store (PlayState::Stopped, std::memory_order_release);
+        setCueState (PadCueState::stopped, CueTransitionReason::userStop, true);
+        realtimeSource.postStop();
+        transportSource.stop();
+        transportSource.setPosition (trimStart);
+        realtimeSource.postSeek (trimStart);
+        lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
+        lastDeferredStopGeneration = realtimeSource.getDeferredStopGeneration();
+        stopTimer();
+        notifyPlaybackStateChanged();
+        repaint();
     }
 
     void triggerStop()
     {
         if (isPlaybackCommandBlocked && isPlaybackCommandBlocked())
             return;
+
+        if (fadeOutMs < 5.0)
+        {
+            triggerStopImmediate();
+            return;
+        }
 
         // ── Guard idempotency: nếu đang FadingOut, bỏ toàn bộ stop dội
         // (không re-touch gain/transportSource.stop để tránh giật).
@@ -704,16 +962,16 @@ public:
             return;
         }
 
-        playState.store (PlayState::Stopped, std::memory_order_release);
+        triggerStopImmediate();
+    }
 
-        setCueState (PadCueState::stopped, CueTransitionReason::userStop);
-        realtimeSource.postStop();
-        transportSource.stop();
-        // Ack finishedGen hiện tại để khi timer restart (do triggerPlay tiếp theo),
-        // nó không nhầm lẫn gen cũ từ chu kỳ phát trước với natural end mới.
-        lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
-        stopTimer();
-        notifyPlaybackStateChanged();
+    /** Stop theo cấu hình fadeOutMs — 0ms = hard stop, >0 = fade out. */
+    void stopTransportWithConfiguredFade() noexcept
+    {
+        if (fadeOutMs < 5.0)
+            triggerStopImmediate();
+        else
+            startFadeOut();
     }
     void loadExternalFile (const juce::File& file) { loadAudioFileInternal (file); }
 
@@ -741,7 +999,14 @@ public:
         playState.store (PlayState::FadingOut, std::memory_order_release);
 
         const double dur = durationMsOverride >= 0.0 ? durationMsOverride : fadeOutMs;
-        if (! realtimeSource.postFadeOut ((float) std::max (100.0, dur)))
+
+        if (dur < 5.0)
+        {
+            triggerStopImmediate();
+            return;
+        }
+
+        if (! realtimeSource.postFadeOut ((float) dur))
         {
             playState.store (isPlaying() ? PlayState::Playing : PlayState::Stopped,
                              std::memory_order_release);
@@ -1085,6 +1350,11 @@ public:
         return juce::String::formatted ("%02d:%02d.%d", mins, secs, ms);
     }
 
+    bool ownsPlaybackUiUpdates() const noexcept
+    {
+        return ! isActivePlaybackUiOwner || isActivePlaybackUiOwner();
+    }
+
     void timerCallback() override
     {
         consumeDeferredTransportStopRequests();
@@ -1106,17 +1376,24 @@ public:
             // Luôn dừng transport trực tiếp tại đây để tránh tự loop từ vị trí trimStart.
             transportSource.stop();
             stopTimer();
-            repaint();
-            if (onPlaybackStateChanged)
-                onPlaybackStateChanged();
+
+            if (ownsPlaybackUiUpdates())
+            {
+                repaint();
+
+                if (onPlaybackStateChanged)
+                    onPlaybackStateChanged();
+            }
+
             if (! isCueListPlayback && onTrackFinished)
                 onTrackFinished (this);
+
             return;
         }
 
         syncCueStateFromPlayback();
 
-        if (isLoading() || isTransportActive())
+        if (ownsPlaybackUiUpdates() && (isLoading() || isTransportActive()))
             repaint();
     }
 
@@ -1132,9 +1409,13 @@ public:
         }
 
         reorderDragActive = false;
+        juceSystemDragStarted = false;
 
         if (onSelected)
             onSelected (this, e.mods);
+
+        if (isRenderAsGridMode)
+            grabKeyboardFocus();
 
         if (clickToTriggerOnClick && hasAudioFile() && onRequestGo != nullptr)
             onRequestGo (this);
@@ -1149,6 +1430,16 @@ public:
         }
 
         juce::Component::mouseDoubleClick (e);
+
+        if (! hasAudioFile())
+            return;
+
+        if (onRequestGo != nullptr)
+            onRequestGo (this);
+        else
+            triggerPlay();
+
+        repaint();
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
@@ -1162,8 +1453,11 @@ public:
                 return;
 
             reorderDragActive = true;
+
             if (onPadReorderBegin)
                 onPadReorderBegin (this);
+
+            tryStartJuceCrossDrag();
         }
 
         if (onPadReorderMove)
@@ -1191,22 +1485,149 @@ public:
         }
 
         reorderDragActive = false;
+        juceSystemDragStarted = false;
+
+        if (isCurrentlyDragged)
+            setIsCurrentlyDragged (false);
     }
 
     void paintGridMode (juce::Graphics& g, const juce::Rectangle<float>& bounds)
     {
         paintGridBackground (g, bounds);
-        if (hasFile) paintGridWaveform (g, bounds);
-        paintGridBadge (g, bounds);
+        paintGridHeader (g);
+        if (hasFile && showGridWaveform)
+            paintGridWaveform (g, bounds);
+        paintGridFooter (g);
+        if (showGridHotkeyBadge)
+            paintGridBadge (g, bounds);
+    }
+
+    juce::Image makeFarragoDragSnapshot()
+    {
+        auto image = createComponentSnapshot (getLocalBounds(), true, 1.0f);
+
+        if (! image.isValid())
+            return image;
+
+        juce::Image faded = image.createCopy();
+
+        if (faded.getFormat() != juce::Image::PixelFormat::ARGB)
+            faded = faded.convertedToFormat (juce::Image::PixelFormat::ARGB);
+
+        juce::Image::BitmapData data (faded, juce::Image::BitmapData::readWrite);
+        constexpr float kFarragoGhostAlpha = 0.82f;
+
+        for (int y = 0; y < faded.getHeight(); ++y)
+        {
+            auto* line = data.getLinePointer (y);
+
+            for (int x = 0; x < faded.getWidth(); ++x)
+            {
+                auto* px = line + x * 4;
+                px[3] = (juce::uint8) juce::jlimit (0, 255,
+                                                    (int) std::lround ((float) px[3] * kFarragoGhostAlpha));
+            }
+        }
+
+        return faded;
+    }
+
+    void tryStartJuceCrossDrag()
+    {
+        if (juceSystemDragStarted)
+            return;
+
+        if (auto* dragContainer = juce::DragAndDropContainer::findParentDragContainerFor (this))
+        {
+            juce::var description;
+
+            if (isRenderAsGridMode)
+            {
+                if (onBuildPadDragDescription == nullptr)
+                    return;
+
+                const auto payload = onBuildPadDragDescription();
+
+                juce::Array<int> padIndices;
+                int anchorIndex = -1;
+
+                if (showcontrol::crossdrag::decodePadPanelPayload (payload, padIndices, anchorIndex))
+                {
+                    description = showcontrol::crossdrag::buildLocalPadMoveDragToken (padIndices, anchorIndex);
+                }
+                else
+                {
+                    description = showcontrol::crossdrag::buildLocalPadMoveDragToken (getPadDragIdentityToken().getIntValue());
+                }
+            }
+            else
+            {
+                description = showcontrol::crossdrag::buildLocalRowReorderDragToken (getPadDragIdentityToken().getIntValue());
+            }
+
+            if (isRenderAsGridMode)
+            {
+                if (! description.isString())
+                    return;
+            }
+            else if (! description.isString())
+            {
+                return;
+            }
+
+            setIsCurrentlyDragged (true);
+
+            int itemCount = showcontrol::crossdrag::dragPayloadItemCount (description);
+
+            if (! isRenderAsGridMode && onGetRowReorderDragCount != nullptr)
+                itemCount = juce::jmax (1, onGetRowReorderDragCount());
+
+            juce::Image dragImage;
+
+            if (isRenderAsGridMode)
+                dragImage = makeFarragoDragSnapshot();
+            else if (onCreateMultiItemDragImage != nullptr)
+                dragImage = onCreateMultiItemDragImage (itemCount);
+            else
+                dragImage = showcontrol::crossdrag::createPremiumDragImage (getPadName(), itemCount);
+
+            if (! dragImage.isValid())
+                return;
+
+            juce::Point<int> imageOffset (dragImage.getWidth() / 2, dragImage.getHeight() / 2);
+
+            dragContainer->startDragging (description,
+                                          this,
+                                          juce::ScaledImage (dragImage),
+                                          true,
+                                          &imageOffset);
+            juceSystemDragStarted = true;
+        }
     }
 
     void paintListMode (juce::Graphics& g, const juce::Rectangle<float>& bounds)
     {
         const auto pal = ShowTheme::get (isDarkMode);
 
-        if (isSelectedRowState) g.fillAll (pal.rowSelected);
-        else if (isMouseHovering) g.fillAll (pal.rowHover);
-        else g.fillAll (pal.listRowBg);
+        if (! isSelectedRowState && isMouseHovering)
+        {
+            g.setColour (pal.rowHover);
+            g.fillAll();
+        }
+        else
+        {
+            showcontrol::bgmList::paintPlaylistRowBackground (g, getLocalBounds(), isSelectedRowState, pal);
+        }
+
+        if (! showcontrol::colours::isDefaultTagColour (tagColour))
+        {
+            g.setColour (tagColour);
+            showcontrol::gfx::safeFillRect (g, 0, 0, showcontrol::bgmList::kLeftRailWidth, getHeight());
+        }
+        else
+        {
+            showcontrol::bgmList::paintPlaylistRowLeftRail (g, getHeight(), pal);
+        }
 
         g.setColour (pal.borderSubtle);
         g.drawHorizontalLine (getHeight() - 1, 0.0f, bounds.getWidth());
@@ -1231,23 +1652,26 @@ public:
             showcontrol::icons::paintPauseIcon (g, paintResources.listStatusIconBounds, iconCol);
         }
 
-        g.setColour (highlightRow ? ((isCueListPlayback && isPaused()) ? pal.warning : pal.success)
-                                 : pal.textPrimary);
-        g.setFont (highlightRow || isSelectedRowState ? paintResources.listTitleBold : paintResources.listTitle);
+        juce::Colour trackNameColour = pal.textPrimary;
+
+        if (highlightRow)
+            trackNameColour = (isCueListPlayback && isPaused()) ? pal.warning : pal.success;
+
+        g.setColour (trackNameColour);
+        g.setFont (paintResources.listTitle);
 
         if (isLoading())
         {
             g.setColour (pal.warning);
-            g.setFont (paintResources.listTitleBold);
-            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), paintResources.listNameTextX, 0,
-                        showcontrol::bgmList::nameColumnMaxWidth (getWidth(), paintResources.listNameTextX),
-                        getHeight(), juce::Justification::centredLeft, true);
+            g.setFont (paintResources.listTitle);
+            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), paintResources.listNameArea,
+                        juce::Justification::centredLeft, true);
             return;
         }
 
         if (! trackNameEditing)
-            g.drawText (getPadName(), paintResources.listNameTextX, 0, paintResources.listNameWidth,
-                        getHeight(), juce::Justification::centredLeft, false);
+            g.drawText (getPadName(), paintResources.listNameArea,
+                        juce::Justification::centredLeft, true);
 
         if (paintResources.listShowArtist)
         {
@@ -1276,18 +1700,28 @@ public:
             }
 
             g.setFont (paintResources.listTimerBold);
-            g.drawText (formatTimeString (remainingTime), paintResources.listRemainingRect,
-                        juce::Justification::centred);
+            showcontrol::bgmList::drawPlaylistTimeCell (g, formatTimeString (remainingTime),
+                                                        paintResources.listRemainingRect);
 
             g.setColour (pal.textMuted);
             g.setFont (paintResources.listTimer);
-            g.drawText (formatTimeString (getEffectiveLength()), paintResources.listTotalRect,
-                        juce::Justification::centred);
+            showcontrol::bgmList::drawPlaylistTimeCell (g, formatTimeString (getEffectiveLength()),
+                                                        paintResources.listTotalRect);
         }
     }
 
     void resized() override
     {
+        const int w = getWidth();
+        const int h = getHeight();
+        const bool isTinyCell = h < 40 || w < 48;
+        const bool isCompactFooter = h < 65 || w < 85;
+
+        showGridWaveform    = ! isTinyCell;
+        showGridDuration    = isRenderAsGridMode && ! isCompactFooter;
+        showGridHotkeyBadge = isRenderAsGridMode && w > 20;
+
+        invalidateWaveformBaseCache();
         rebuildPaintResources();
 
         if (trackNameEditing)
@@ -1328,7 +1762,7 @@ private:
         FadingOut = 2
     };
 
-    juce::File musicFile; bool hasFile = false, isLoopingState = false, isDarkMode = true; bool isRenderAsGridMode = true, isSelectedRowState = false, isMouseHovering = false; int myIndex = 0; juce::String shortcutLabel, cachedFileName, customName; double trimStart = 0.0, trimEnd = 0.0;
+    juce::File musicFile; bool hasFile = false, isLoopingState = false, isDarkMode = true; bool isRenderAsGridMode = true, isSelectedRowState = false, isMouseHovering = false; int myIndex = 0; int gridRow = 0, gridCol = 0; bool gridPositionAssigned = false; juce::String shortcutLabel, cachedFileName, customName; juce::Colour tagColour = showcontrol::colours::defaultTagColour(); double trimStart = 0.0, trimEnd = 0.0;
     AudioMetadata cachedMeta;
     double fadeInMs  = 0.0;
     double fadeOutMs = 0.0;
@@ -1355,6 +1789,8 @@ private:
     bool thumbnailLoadAllowedNow = false;
     bool thumbnailLoaded = false;
     juce::File thumbnailPendingFile;
+    juce::Image waveformBaseCache;
+    bool waveformBaseCacheValid = false;
 
     bool normalizationAllowedNow = false;
     bool hasPendingNormalization = false;
@@ -1366,7 +1802,12 @@ private:
     bool clickToTriggerOnClick = false;
     bool isArmedState = false;
     bool reorderDragActive = false;
+    bool juceSystemDragStarted = false;
+    bool isCurrentlyDragged = false;
     bool trackNameEditing = false;
+    bool showGridWaveform = true;
+    bool showGridDuration = true;
+    bool showGridHotkeyBadge = true;
     TrackNameEditLabel trackNameLabel;
     bool mixerRegisteredWithMaster = false;
     juce::TimeSliceThread* sharedTimeSliceThread = nullptr;
@@ -1394,11 +1835,16 @@ private:
         juce::Font listTimerBold { juce::FontOptions() };
         juce::Font listTimer { juce::FontOptions() };
         juce::Rectangle<int> waveformBounds;
+        juce::Rectangle<int> gridTitleRect;
+        juce::Rectangle<int> gridArtistRect;
+        juce::Rectangle<int> gridRemainingRect;
+        juce::Rectangle<int> gridTotalRect;
         juce::Rectangle<int> listRemainingRect;
         juce::Rectangle<int> listTotalRect;
         juce::Rectangle<float> listLoopIconBounds;
         juce::Rectangle<float> listStatusIconBounds;
         juce::Rectangle<float> gridBadgeRect;
+        juce::Rectangle<int> listNameArea;
         int listNameTextX = showcontrol::bgmList::kNameStartDefault;
         int listNameWidth = 0;
         int listArtistWidth = 0;
@@ -1414,18 +1860,94 @@ private:
         paintResources.gridTimerBold = ShowTheme::timerFont (11.5f, true);
         paintResources.gridTimer     = ShowTheme::timerFont (11.0f);
         paintResources.gridBadge     = ShowTheme::fontBold (10.0f);
-        paintResources.listIndex     = ShowTheme::fontBold (11.0f);
-        paintResources.listTitle     = ShowTheme::font (13.5f);
-        paintResources.listTitleBold = ShowTheme::font (13.5f, "Bold");
+        const auto listTypography    = showcontrol::bgmList::makePlaylistRowTypography();
+        paintResources.listIndex     = listTypography.index;
+        paintResources.listTitle     = listTypography.cellPlain;
+        paintResources.listTitleBold = listTypography.cellPlain;
         paintResources.listArtist    = ShowTheme::font (11.5f);
-        paintResources.listTimerBold = ShowTheme::timerFont (12.5f, true);
-        paintResources.listTimer     = ShowTheme::timerFont (12.5f);
+        paintResources.listTimerBold = showcontrol::bgmList::playlistTimerFont (true);
+        paintResources.listTimer     = showcontrol::bgmList::playlistTimerFont (false);
 
-        paintResources.waveformBounds = showcontrol::gfx::sanitise (
-            getLocalBounds().withTrimmedTop (32).withTrimmedBottom (28).reduced (8, 0));
+        if (isRenderAsGridMode)
+        {
+            const int w = getWidth();
+            const int h = getHeight();
+            const float aspectWH = (h > 0) ? (float) w / (float) h : 1.0f;
+            const bool isWideFlat   = aspectWH > 1.75f;
+            const bool isTallNarrow = aspectWH < 0.8f;
+            const float layoutScale = juce::jlimit (0.62f, 1.0f,
+                                                    juce::jmin ((float) w / 96.0f, (float) h / 44.0f));
+
+            paintResources.gridTitle     = ShowTheme::fontBold (13.0f * layoutScale);
+            paintResources.gridArtist    = ShowTheme::font (10.5f * layoutScale);
+            paintResources.gridTimerBold = ShowTheme::timerFont (11.5f * layoutScale, true);
+            paintResources.gridTimer     = ShowTheme::timerFont (11.0f * layoutScale);
+            paintResources.gridBadge     = ShowTheme::fontBold (juce::jmax (8.0f, 10.0f * layoutScale));
+
+            const int kTitleTopPad = juce::jmax (2, h / (isWideFlat ? 18 : 14));
+            const int kTitleLineH  = juce::jmax (10, juce::jmin (18, h / (isTallNarrow ? 6 : 5)));
+            const bool showArtist  = showGridDuration && cachedMeta.artist.isNotEmpty()
+                                     && h > 52 && ! isWideFlat;
+            const int artistLineH  = showArtist ? juce::jmax (9, kTitleLineH - 2) : 0;
+            const int headerBottom = kTitleTopPad + kTitleLineH
+                                   + (artistLineH > 0 ? artistLineH + 2 : juce::jmax (2, h / 18));
+
+            const int bottomBarH = showGridDuration
+                                       ? juce::jmax (26, juce::jmax (12, h / (isWideFlat ? 9 : 7)))
+                                       : (showGridHotkeyBadge ? 20 : 4);
+
+            paintResources.gridTitleRect = { 6, kTitleTopPad, juce::jmax (0, w - 12), kTitleLineH };
+
+            if (artistLineH > 0)
+                paintResources.gridArtistRect = { 6, kTitleTopPad + kTitleLineH + 1, juce::jmax (0, w - 12), artistLineH };
+            else
+                paintResources.gridArtistRect = {};
+
+            paintResources.waveformBounds = showcontrol::gfx::sanitise (
+                getLocalBounds().withTrimmedTop (headerBottom)
+                                 .withTrimmedBottom (bottomBarH)
+                                 .reduced (juce::jmax (2, w / (isTallNarrow ? 18 : 24)),
+                                           juce::jmax (1, h / (isWideFlat ? 32 : 28))));
+
+            const int labelH = 16;
+
+            if (showGridDuration)
+            {
+                const int yPos    = h - labelH - 4;
+                const int centerW = juce::jlimit (30, 50, w / 4);
+                const int sideW   = juce::jmax (0, (w - centerW) / 2 - 6);
+
+                paintResources.gridRemainingRect = { 4, yPos, sideW, labelH };
+                paintResources.gridBadgeRect     = { (float) ((w - centerW) / 2),
+                                                     (float) (yPos - 2),
+                                                     (float) centerW,
+                                                     (float) (labelH + 2) };
+                paintResources.gridTotalRect     = { w - (w - centerW) / 2 + 2, yPos, sideW, labelH };
+            }
+            else if (showGridHotkeyBadge)
+            {
+                paintResources.gridRemainingRect = {};
+                paintResources.gridTotalRect     = {};
+                paintResources.gridBadgeRect     = { 0.0f,
+                                                     (float) (h - 20),
+                                                     (float) w,
+                                                     18.0f };
+            }
+            else
+            {
+                paintResources.gridRemainingRect = {};
+                paintResources.gridTotalRect     = {};
+                paintResources.gridBadgeRect     = {};
+            }
+        }
+        else
+        {
+            paintResources.waveformBounds = showcontrol::gfx::sanitise (
+                getLocalBounds().withTrimmedTop (32).withTrimmedBottom (28).reduced (8, 0));
+        }
+
         paintResources.listRemainingRect = showcontrol::bgmList::timeRemainingBounds (getWidth(), getHeight());
         paintResources.listTotalRect     = showcontrol::bgmList::totalDurationBounds (getWidth(), getHeight());
-        paintResources.listLoopIconBounds = showcontrol::bgmList::loopIconBounds (getWidth(), getHeight());
         paintResources.listStatusIconBounds = showcontrol::bgmList::statusIconBounds (getHeight());
 
         const bool highlightRow = isPlaying() || isPaused();
@@ -1433,15 +1955,26 @@ private:
             ? showcontrol::bgmList::kNameStartWithStatusIcon
             : showcontrol::bgmList::kNameStartDefault;
 
-        const int availW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), paintResources.listNameTextX);
+        const bool reserveLoopSlot = ! isCueListPlayback && isLooping() && hasFile;
+        const auto nameLayout = showcontrol::bgmList::layoutListNameRow (getWidth(), getHeight(),
+                                                                         paintResources.listNameTextX,
+                                                                         reserveLoopSlot);
+        paintResources.listNameArea = nameLayout.nameArea;
+        paintResources.listLoopIconBounds = nameLayout.loopIconArea;
+        paintResources.listNameWidth = nameLayout.nameArea.getWidth();
+
+        const int availW = paintResources.listNameWidth;
         paintResources.listShowArtist = cachedMeta.artist.isNotEmpty() && getHeight() >= 30;
         paintResources.listNameWidth  = paintResources.listShowArtist ? juce::jmax (0, availW / 2 - 4) : availW;
         paintResources.listArtistWidth = juce::jmax (0, availW - paintResources.listNameWidth - 4);
 
-        auto badgeWidth = 24.0f, badgeHeight = 15.0f;
-        paintResources.gridBadgeRect = juce::Rectangle<float> ((getWidth() - badgeWidth) * 0.5f,
-                                                             (float) getHeight() - badgeHeight - 4.0f,
-                                                             badgeWidth, badgeHeight);
+        if (! isRenderAsGridMode)
+        {
+            const float badgeWidth = 24.0f, badgeHeight = 15.0f;
+            paintResources.gridBadgeRect = juce::Rectangle<float> ((getWidth() - badgeWidth) * 0.5f,
+                                                                 (float) getHeight() - badgeHeight - 4.0f,
+                                                                 badgeWidth, badgeHeight);
+        }
     }
 
     /** fadeInMs > 0 → fade-in; ngược lại postPlay() tức thì (message thread). */
@@ -1590,7 +2123,37 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster* source) override
     {
         if (source == &thumbnail)
+        {
+            invalidateWaveformBaseCache();
+            rebuildWaveformBaseCacheIfNeeded();
             repaint();
+        }
+    }
+
+    void invalidateWaveformBaseCache() noexcept
+    {
+        waveformBaseCacheValid = false;
+        waveformBaseCache = {};
+    }
+
+    void rebuildWaveformBaseCacheIfNeeded()
+    {
+        if (waveformBaseCacheValid || ! thumbnailLoaded)
+            return;
+
+        const auto& wb = paintResources.waveformBounds;
+
+        if (wb.getWidth() <= 0 || wb.getHeight() <= 0)
+            return;
+
+        double tStart = 0.0, tEnd = 0.0;
+        getTrimmedDisplayRange (tStart, tEnd);
+
+        waveformBaseCache = juce::Image (juce::Image::ARGB, wb.getWidth(), wb.getHeight(), true);
+        juce::Graphics cacheG (waveformBaseCache);
+        cacheG.setColour (getWaveformFillColour());
+        thumbnail.drawChannel (cacheG, wb.withPosition (0, 0), tStart, tEnd, 0, 1.0f);
+        waveformBaseCacheValid = true;
     }
 
     void labelTextChanged (juce::Label* labelThatHasChanged) override
@@ -1650,13 +2213,9 @@ private:
             return;
         }
 
-        int textX = showcontrol::bgmList::kNameStartDefault;
-
-        if (isPlaying() || (isCueListPlayback && isPaused()))
-            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
-
-        const int nameW = showcontrol::bgmList::nameColumnMaxWidth (getWidth(), textX);
-        trackNameLabel.setBounds (textX, 0, nameW, getHeight());
+        rebuildPaintResources();
+        trackNameLabel.setBounds (paintResources.listNameArea);
+        trackNameLabel.setJustificationType (juce::Justification::centredLeft);
     }
 
     void ensureThumbnailLoaded()
@@ -1704,7 +2263,12 @@ private:
     void notifyPlaybackStateChanged()
     {
         rebuildPaintResources();
+
+        if (! ownsPlaybackUiUpdates())
+            return;
+
         repaint();
+
         if (onPlaybackStateChanged)
             onPlaybackStateChanged();
     }
@@ -1725,15 +2289,19 @@ private:
         transportSource.setGain (getOutputGain());
         transportSource.stop();
         transportSource.setPosition (trimStart);
+        realtimeSource.postSeek (trimStart);
         realtimeSource.postSetGain (getOutputGain());
 
         if (! isTransportActive())
             stopTimer();
 
-        repaint();
+        if (ownsPlaybackUiUpdates())
+        {
+            repaint();
 
-        if (onPlaybackStateChanged)
-            onPlaybackStateChanged();
+            if (onPlaybackStateChanged)
+                onPlaybackStateChanged();
+        }
     }
 
     void consumeDeferredTransportStopRequests()
@@ -1752,6 +2320,7 @@ private:
         transportSource.setGain (getOutputGain());
         transportSource.stop();
         transportSource.setPosition (trimStart);
+        realtimeSource.postSeek (trimStart);
     }
 
     void acknowledgeDeferredStopGeneration() noexcept
@@ -1941,7 +2510,7 @@ private:
             }
 
             payload->sampleRate = payload->reader->sampleRate;
-            payload->displayName = f.getFileNameWithoutExtension();
+            payload->displayName = VideoAudioExtractor::displayNameFromAudioPath (f);
             payload->meta = AudioMetadataReader::readFromReader (payload->reader.get(), f);
 
             juce::MessageManager::callAsync ([safePad, generation, payload = std::move (payload)]() mutable
@@ -2026,18 +2595,31 @@ private:
     }
 
     void paintGridBackground (juce::Graphics& g, const juce::Rectangle<float>& bounds) {
-        const auto pal = ShowTheme::get (isDarkMode);
-        juce::Colour gradientTop    = isMouseHovering ? pal.panelElevated : pal.padGradientTop;
-        juce::Colour gradientBottom = isDarkMode ? pal.padGradientBottom : (isMouseHovering ? pal.rowHover : pal.padGradientBottom);
-        g.setGradientFill (juce::ColourGradient (gradientTop, 0, 0, gradientBottom, 0, bounds.getHeight(), false));
-        g.fillRoundedRectangle (bounds, ShowTheme::kPanelCornerRadius);
+        const float corner = ShowTheme::kPanelCornerRadius;
+
+        g.setColour (getPadSurfaceColour());
+        g.fillRoundedRectangle (bounds, corner);
+
         const bool playingNow = isPlaying() || isFading();
-        g.setColour (playingNow ? pal.padPlayingBorder : pal.padBorder);
-        g.drawRoundedRectangle (bounds, ShowTheme::kPanelCornerRadius, 1.0f);
+
+        if (isSelectedRowState)
+        {
+            g.setColour (getPadSelectionBorderColour());
+            g.drawRoundedRectangle (bounds.reduced (1.0f), corner, 2.5f);
+        }
+        else
+        {
+            juce::Colour borderCol = isDarkMode ? juce::Colour (0xFF2F3542) : juce::Colour (0xFFE5E5EA);
+            if (playingNow)
+                borderCol = getActiveInkColour().withAlpha (0.55f);
+
+            g.setColour (borderCol);
+            g.drawRoundedRectangle (bounds, corner, 1.0f);
+        }
 
         if (isArmedState)
         {
-            g.setColour (pal.accent);
+            g.setColour (getActiveInkColour());
             g.fillEllipse (bounds.getRight() - 14.0f, bounds.getY() + 6.0f, 8.0f, 8.0f);
         }
     }
@@ -2048,12 +2630,19 @@ private:
         getTrimmedDisplayRange (tStart, tEnd);
         const double effectiveLen = juce::jmax (0.0, tEnd - tStart);
         const auto& waveformBounds = paintResources.waveformBounds;
+        const bool hasCustomTint = ! showcontrol::colours::isDefaultTagColour (tagColour);
         if (waveformBounds.getWidth() <= 0 || waveformBounds.getHeight() <= 0)
             return;
 
-        // Zoom waveform vào đúng vùng trim (không vẽ full file + mask).
-        g.setColour (ShowTheme::get (isDarkMode).waveformFill);
-        thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+        rebuildWaveformBaseCacheIfNeeded();
+
+        if (waveformBaseCacheValid)
+            g.drawImage (waveformBaseCache, waveformBounds.toFloat());
+        else
+        {
+            g.setColour (getWaveformFillColour());
+            thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+        }
 
         if (effectiveLen > 0.0 && currentPos > tStart)
         {
@@ -2068,8 +2657,16 @@ private:
             {
                 g.saveState();
                 g.reduceClipRegion (progressBounds.toNearestInt());
-                g.setColour (ShowTheme::get (isDarkMode).waveformPlayhead);
-                thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+                g.setColour (getWaveformFillColour().brighter (hasCustomTint ? 0.12f : 0.18f));
+
+                if (waveformBaseCacheValid)
+                    g.drawImage (waveformBaseCache, waveformBounds.toFloat());
+                else
+                {
+                    g.setColour (getWaveformFillColour());
+                    thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+                }
+
                 g.restoreState();
             }
         }
@@ -2077,8 +2674,8 @@ private:
         const auto& palWave = ShowTheme::get (isDarkMode);
         if (isSelectedRowState)
         {
-            g.setColour (palWave.accent);
-            g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 2.0f);
+            g.setColour (getPadSelectionBorderColour());
+            g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 2.5f);
         }
         else if (isPlaying() || isFading())
         {
@@ -2090,20 +2687,19 @@ private:
             g.setColour (palWave.warning);
             g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.5f);
         }
-        paintGridMetadata (g, tStart, tEnd, currentPos);
     }
 
-    void paintGridMetadata (juce::Graphics& g, double tStart, double tEnd, double currentPos) {
+    void paintGridHeader (juce::Graphics& g)
+    {
         const auto pal = ShowTheme::get (isDarkMode);
-        constexpr int kTitlePadLeft  = 12;
-        constexpr int kTitlePadRight = 10;
-        const int titleWidth = getWidth() - kTitlePadLeft - kTitlePadRight;
 
-        g.setColour (pal.textPrimary);
+        g.setColour (getPadTitleColour());
+
         if (isLoading())
         {
             g.setFont (paintResources.gridTitle);
-            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."), kTitlePadLeft, 10, titleWidth, 18,
+            g.drawText (juce::String::fromUTF8 (u8"Đang nạp..."),
+                        paintResources.gridTitleRect,
                         juce::Justification::topLeft, true);
             return;
         }
@@ -2111,40 +2707,73 @@ private:
         if (! trackNameEditing)
         {
             g.setFont (paintResources.gridTitle);
-            g.drawText (getPadName(), kTitlePadLeft, 8, titleWidth, 17, juce::Justification::topLeft, false);
+            g.drawText (getPadName(),
+                        paintResources.gridTitleRect,
+                        juce::Justification::topLeft, false);
         }
 
-        if (cachedMeta.artist.isNotEmpty())
+        if (paintResources.gridArtistRect.getHeight() > 0)
         {
             g.setColour (pal.textMuted);
             g.setFont (paintResources.gridArtist);
-            g.drawText (cachedMeta.artist, kTitlePadLeft, 27, titleWidth, 14, juce::Justification::topLeft, true);
+            g.drawText (cachedMeta.artist,
+                        paintResources.gridArtistRect,
+                        juce::Justification::topLeft, true);
         }
+    }
 
+    void paintGridFooter (juce::Graphics& g)
+    {
+        if (! showGridDuration)
+            return;
+
+        const auto pal = ShowTheme::get (isDarkMode);
         double remainingTime = isTransportActive() ? getRemainingSeconds() : 0.0;
+
         if (isPlaying() && remainingTime <= 5.0)
             g.setColour ((juce::Time::getMillisecondCounter() % 400) < 200 ? pal.danger : pal.textSecondary);
         else
             g.setColour (pal.textSecondary);
 
         g.setFont (paintResources.gridTimerBold);
-        g.drawText (formatTimeString (remainingTime), 12, getHeight() - 22, 80, 15, juce::Justification::bottomLeft);
+        g.drawText (formatTimeString (remainingTime),
+                    paintResources.gridRemainingRect,
+                    juce::Justification::centredLeft);
 
         g.setColour (pal.textMuted);
         g.setFont (paintResources.gridTimer);
-        g.drawText (formatTimeString (getEffectiveLength()), getWidth() - 92, getHeight() - 22, 80, 15,
-                    juce::Justification::bottomRight);
+        g.drawText (formatTimeString (getEffectiveLength()),
+                    paintResources.gridTotalRect,
+                    juce::Justification::centredRight);
     }
 
     void paintGridBadge (juce::Graphics& g, const juce::Rectangle<float>& bounds)
     {
+        if (! showGridHotkeyBadge)
+            return;
+
         juce::ignoreUnused (bounds);
         const auto& badgeRect = paintResources.gridBadgeRect;
         const auto pal = ShowTheme::get (isDarkMode);
-        if (isPlaying()) g.setColour (pal.success);
-        else g.setColour (hasFile ? pal.shortcutBadgeBg : pal.listRowBg);
+        const bool hasCustomInk = ! showcontrol::colours::isDefaultTagColour (tagColour);
+        const auto ink = getActiveInkColour();
+
+        if (isPlaying())
+            g.setColour (pal.success);
+        else if (hasCustomInk)
+            g.setColour (ink.withAlpha (isDarkMode ? 0.22f : 0.12f));
+        else
+            g.setColour (isDarkMode ? pal.shortcutBadgeBg : (hasFile ? pal.shortcutBadgeBg : pal.listRowBg));
+
         g.fillRoundedRectangle (badgeRect, 3.0f);
-        g.setColour (isPlaying() ? juce::Colours::white : (hasFile ? pal.shortcutBadgeText : pal.textMuted));
+
+        if (isPlaying())
+            g.setColour (juce::Colours::white);
+        else if (hasCustomInk)
+            g.setColour (ink);
+        else
+            g.setColour (hasFile ? pal.shortcutBadgeText : pal.textMuted);
+
         g.setFont (paintResources.gridBadge);
         g.drawText (shortcutLabel, badgeRect, juce::Justification::centred);
     }

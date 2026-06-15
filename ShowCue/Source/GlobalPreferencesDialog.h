@@ -198,7 +198,7 @@ public:
         showcontrol::preferences::drawTabIcon (g, iconArea, tabIcon, iconCol);
 
         g.setColour (iconCol);
-        g.setFont (ShowTheme::font (11.0f));
+        g.setFont (showcontrol::preferences::tabLabelFont());
         g.drawText (showcontrol::localization::tr (labelKey), bounds.toNearestInt(), juce::Justification::centred);
     }
 
@@ -332,7 +332,7 @@ public:
         }
 
         g.setColour (selected ? labelCol : mutedCol);
-        g.setFont (ShowTheme::font (10.5f));
+        g.setFont (showcontrol::preferences::tabLabelFont().withHeight (12.5f));
         g.drawText (showcontrol::localization::tr (labelKey),
                     bounds.removeFromBottom (16.0f).toNearestInt(),
                     juce::Justification::centred);
@@ -353,15 +353,15 @@ public:
 
     explicit ThemePreferencesPanel (int themeId, int languageIndex)
     {
-        sectionLabel.setFont (ShowTheme::fontBold (13.0f));
+        sectionLabel.setFont (showcontrol::preferences::sectionLabelFont());
         sectionLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (sectionLabel);
 
-        hintLabel.setFont (ShowTheme::font (11.0f));
+        hintLabel.setFont (showcontrol::preferences::hintFont());
         hintLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (hintLabel);
 
-        languageLabel.setFont (ShowTheme::fontBold (13.0f));
+        languageLabel.setFont (showcontrol::preferences::sectionLabelFont());
         languageLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (languageLabel);
 

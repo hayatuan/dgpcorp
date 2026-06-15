@@ -306,10 +306,10 @@ private:
             g.drawHorizontalLine (y, (float) plot.getX(), (float) plot.getRight());
         }
 
-        g.setFont (ShowTheme::font (9.0f));
+        g.setFont (showcontrol::equalizer::gridFont());
         g.setColour (pal.textMuted);
-        g.drawText ("Hz", plot.getX(), plot.getBottom() + 2, 24, 14, juce::Justification::centredLeft);
-        g.drawText ("dB", plot.getX() - 2, plot.getY() - 2, 20, 12, juce::Justification::bottomRight);
+        g.drawText ("Hz", plot.getX(), plot.getBottom() + 2, 28, 16, juce::Justification::centredLeft);
+        g.drawText ("dB", plot.getX() - 2, plot.getY() - 2, 24, 14, juce::Justification::bottomRight);
     }
 
     void drawBandNode (juce::Graphics& g, juce::Rectangle<int> plot, int band) const
@@ -324,24 +324,24 @@ private:
         g.drawVerticalLine (x, (float) plot.getY(), (float) plot.getBottom());
 
         const auto pal = ShowTheme::get (isDark);
-        auto freqBadge = juce::Rectangle<int> (x - 26, plot.getY() - 34, 52, 12);
+        auto freqBadge = juce::Rectangle<int> (x - 30, plot.getY() - 36, 60, 14);
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::font (8.5f));
+        g.setFont (showcontrol::equalizer::gridFont());
         g.drawText (PadParametricEq6::formatBandFrequencyHz (hz),
                     freqBadge, juce::Justification::centred);
 
-        auto badge = juce::Rectangle<int> (x - 11, plot.getY() - 20, 22, 16);
+        auto badge = juce::Rectangle<int> (x - 12, plot.getY() - 20, 24, 17);
         g.setColour (col);
         g.fillRoundedRectangle (badge.toFloat(), 4.0f);
         g.setColour (juce::Colours::white);
-        g.setFont (ShowTheme::fontBold (9.5f));
+        g.setFont (showcontrol::equalizer::bandBadgeFont());
         g.drawText (bandBadgeText (band), badge, juce::Justification::centred);
 
         const float r = 9.0f;
         g.setColour (col);
         g.fillEllipse ((float) x - r, (float) y - r, r * 2.0f, r * 2.0f);
         g.setColour (juce::Colours::white);
-        g.setFont (ShowTheme::fontBold (12.0f));
+        g.setFont (showcontrol::equalizer::bandBadgeFont().withHeight (13.0f));
         g.drawText ("+", juce::Rectangle<int> ((int) ((float) x - r), (int) ((float) y - r),
                                               (int) (r * 2.0f), (int) (r * 2.0f)),
                    juce::Justification::centred);
@@ -420,12 +420,12 @@ public:
         hintLabel.setText (showcontrol::localization::tr (
                                u8"Kéo nút + theo chiều dọc · thấp → cao: HP → LS → P1 → P2 → HS → LP"),
                            juce::dontSendNotification);
-        hintLabel.setFont (ShowTheme::font (10.5f));
+        hintLabel.setFont (showcontrol::equalizer::hintFont());
         hintLabel.setJustificationType (juce::Justification::centredLeft);
 
         for (int b = 0; b < PadParametricEq6::kNumBands; ++b)
         {
-            bandValueLabels[(size_t) b].setFont (ShowTheme::font (10.0f));
+            bandValueLabels[(size_t) b].setFont (showcontrol::equalizer::bandValueFont());
             bandValueLabels[(size_t) b].setJustificationType (juce::Justification::centred);
             addAndMakeVisible (bandValueLabels[(size_t) b]);
         }
@@ -482,10 +482,10 @@ public:
         b.removeFromTop (6);
         peqDisplay.setBounds (b.removeFromTop (juce::jmax (220, b.getHeight() - 88)));
         b.removeFromTop (6);
-        hintLabel.setBounds (b.removeFromTop (16));
+        hintLabel.setBounds (b.removeFromTop (18));
         b.removeFromTop (4);
 
-        auto valueRow = b.removeFromTop (18);
+        auto valueRow = b.removeFromTop (20);
         const int colW = juce::jmax (1, valueRow.getWidth() / PadParametricEq6::kNumBands);
         for (int i = 0; i < PadParametricEq6::kNumBands; ++i)
         {

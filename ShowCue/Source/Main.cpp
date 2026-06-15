@@ -1,6 +1,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "MainComponent.h"
+#include "ShowAboutDialog.h"
 
 #if JUCE_MAC
 
@@ -62,7 +63,10 @@ public:
 
     const juce::String getApplicationName() override       { return "ShowCue"; }
 
-    const juce::String getApplicationVersion() override    { return "1.0.0-beta"; }
+    const juce::String getApplicationVersion() override
+    {
+        return showcontrol::about::marketingVersionLine();
+    }
 
     bool moreThanOneInstanceAllowed() override             { return true; }
 

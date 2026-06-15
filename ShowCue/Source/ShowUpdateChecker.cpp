@@ -15,7 +15,54 @@ juce::String normaliseVersionTag (juce::String version)
 
     return version.trim();
 }
+
+bool urlEndsWithExtension (const juce::String& url, juce::StringRef ext)
+{
+    return url.endsWithIgnoreCase (ext);
+}
+
+juce::String firstAssetUrl (const juce::Array<juce::var>& assets)
+{
+    for (const auto& assetVar : assets)
+    {
+        const auto url = assetVar.getProperty ("browser_download_url", {}).toString().trim();
+
+        if (url.isNotEmpty())
+            return url;
+    }
+
+    return {};
+}
 } // namespace
+
+juce::String pickBestAssetDownloadUrl (const juce::var& releaseObject)
+{
+    if (auto* assets = releaseObject.getProperty ("assets", {}).getArray())
+    {
+#if JUCE_MAC
+        static constexpr const char* kPreferredExts[] = { ".dmg", ".zip" };
+#elif JUCE_WINDOWS
+        static constexpr const char* kPreferredExts[] = { ".zip", ".exe", ".msi" };
+#else
+        static constexpr const char* kPreferredExts[] = { ".zip" };
+#endif
+
+        for (const char* ext : kPreferredExts)
+        {
+            for (const auto& assetVar : *assets)
+            {
+                const auto url = assetVar.getProperty ("browser_download_url", {}).toString().trim();
+
+                if (url.isNotEmpty() && urlEndsWithExtension (url, ext))
+                    return url;
+            }
+        }
+
+        return firstAssetUrl (*assets);
+    }
+
+    return {};
+}
 
 int compareVersionStrings (const juce::String& lhs, const juce::String& rhs)
 {
@@ -47,20 +94,7 @@ std::optional<RemoteVersionInfo> parseUpdateJson (const juce::String& jsonText)
     if (parsed.hasProperty ("tag_name"))
     {
         info.version = normaliseVersionTag (parsed.getProperty ("tag_name", {}).toString());
-
-        if (auto* assets = parsed.getProperty ("assets", {}).getArray())
-        {
-            for (const auto& assetVar : *assets)
-            {
-                const auto assetUrl = assetVar.getProperty ("browser_download_url", {}).toString().trim();
-
-                if (assetUrl.isNotEmpty())
-                {
-                    info.downloadUrl = assetUrl;
-                    break;
-                }
-            }
-        }
+        info.downloadUrl = pickBestAssetDownloadUrl (parsed);
 
         if (info.downloadUrl.isEmpty())
             info.downloadUrl = parsed.getProperty ("html_url", {}).toString().trim();
@@ -237,7 +271,10 @@ void ShowUpdateChecker::dispatchUiResult (bool success, int statusCode, const ju
                 [downloadUrl] (int result)
                 {
                     if (result == 0 && downloadUrl.isNotEmpty())
+                    {
+                        // Cập nhật qua trình duyệt hệ thống — không tải/giải nén trong process.
                         juce::URL (downloadUrl).launchInDefaultBrowser();
+                    }
                 });
         });
     }

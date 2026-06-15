@@ -10,6 +10,7 @@
 #include "ShowControlMacWindow.h"
 #include "ShowOutputRouting.h"
 #include "ShowLocalization.h"
+#include "ShowTagColors.h"
 
 //==============================================================================
 class InspectorWaveform : public juce::Component,
@@ -59,6 +60,7 @@ public:
     }
     void setDarkMode  (bool dark)                    { isDark = dark; repaint(); }
     void setShowTimeRuler (bool shouldShow)          { showTimeRuler = shouldShow; repaint(); }
+    void setItemInkColour (juce::Colour c) noexcept  { itemInk = c; repaint(); }
 
     /** Cập nhật vùng fade-in / fade-out để vẽ overlay lên waveform. */
     void setFadeRegions (double fadeInMs, double fadeOutMs, double effectiveLengthSec)
@@ -107,9 +109,9 @@ public:
         if (b.getWidth() <= 0.0f || b.getHeight() <= 0.0f)
             return;
 
-        g.setColour (pal.listRowBg);
+        g.setColour (isDark ? pal.listRowBg : juce::Colours::white);
         g.fillRoundedRectangle (b, 5.0f);
-        g.setColour (pal.border);
+        g.setColour (isDark ? pal.border : juce::Colour (0xFFE5E5EA));
         g.drawRoundedRectangle (b, 5.0f, 1.0f);
 
         if (thumbnail == nullptr || thumbnail->getTotalLength() <= 0.0)
@@ -136,7 +138,7 @@ public:
         if (showTimeRuler)
             drawTimeRuler (g, showcontrol::gfx::sanitise (getRulerBounds()));
 
-        g.setColour (pal.waveformFill);
+        g.setColour (itemInk.withAlpha (showcontrol::colours::kInspectorWaveformInkAlpha));
         thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
 
         if (totalLen > 0.0 && currentPos > viewStart)
@@ -149,7 +151,7 @@ public:
             {
                 g.saveState();
                 g.reduceClipRegion (playedBounds);
-                g.setColour (pal.waveformPlayhead);
+                g.setColour (itemInk.withAlpha (showcontrol::colours::kInspectorWaveformPlayedAlpha));
                 thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
                 g.restoreState();
             }
@@ -173,7 +175,7 @@ public:
 
             if (showTimeRuler)
             {
-                g.setFont (ShowTheme::fontBold (8.5f));
+                g.setFont (showcontrol::trimEditor::markerLabelFont());
                 g.drawText (showcontrol::localization::tr (u8"Điểm đầu"),
                             startX + 6, waveArea.getY() + 10, 72, 12,
                             juce::Justification::centredLeft);
@@ -188,7 +190,7 @@ public:
 
             if (showTimeRuler)
             {
-                g.setFont (ShowTheme::fontBold (8.5f));
+                g.setFont (showcontrol::trimEditor::markerLabelFont());
                 g.drawText (showcontrol::localization::tr (u8"Điểm cuối"),
                             endX - 78, waveArea.getY() + 10, 72, 12,
                             juce::Justification::centredRight);
@@ -331,7 +333,7 @@ private:
         if (visibleDuration > 120.0) tickStepSec = 10.0;
 
         const double firstTick = std::floor (viewStart / tickStepSec) * tickStepSec;
-        g.setFont (ShowTheme::font (9.0f));
+        g.setFont (showcontrol::trimEditor::rulerFont());
         g.setColour (pal.textMuted);
         for (double t = firstTick; t <= viewEnd; t += tickStepSec)
         {
@@ -361,6 +363,7 @@ private:
     double viewStart = 0.0, viewEnd = 0.0;
     double fadeInSec = 0.0, fadeOutSec = 0.0, effectiveLen = 0.0;
     bool showTimeRuler = false;
+    juce::Colour itemInk { showcontrol::colours::tagColourAt (7) };
 };
 
 //==============================================================================
@@ -368,6 +371,29 @@ class InspectorStyle : public juce::LookAndFeel_V4
 {
 public:
     void setDarkMode (bool dark) { isDarkMode = dark; }
+
+    void setItemAccentColour (juce::Colour c) noexcept { itemAccent = c; }
+
+    juce::Colour getItemAccent() const noexcept { return itemAccent; }
+
+    void drawButtonBackground (juce::Graphics& g, juce::Button& button,
+                               const juce::Colour& backgroundColour,
+                               bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
+    {
+        const auto id = button.getComponentID();
+
+        if (id == "sc_inspector_icon_play" || id == "sc_inspector_icon_pause" || id == "sc_inspector_icon_stop")
+        {
+            juce::ignoreUnused (shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+            const auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+            g.setColour (backgroundColour);
+            g.fillRoundedRectangle (bounds, 5.0f);
+            return;
+        }
+
+        LookAndFeel_V4::drawButtonBackground (g, button, backgroundColour,
+                                              shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+    }
 
     void drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPos, float minSliderPos, float maxSliderPos,
@@ -439,7 +465,7 @@ public:
 
         const auto textArea = bounds.reduced (6.0f, 2.0f).withTrimmedRight (16.0f);
         g.setColour (box.findColour (juce::ComboBox::textColourId));
-        g.setFont (ShowTheme::font (11.0f));
+        g.setFont (showcontrol::inspector::paramLabelFont());
         g.drawText (box.getText(), textArea.toNearestInt(), juce::Justification::centredLeft, true);
 
         juce::Path p;
@@ -500,7 +526,9 @@ public:
             return;
         }
 
-        LookAndFeel_V4::drawButtonText (g, button, shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+        g.setColour (col);
+        g.setFont (showcontrol::inspector::buttonFont());
+        g.drawText (button.getButtonText(), button.getLocalBounds(), juce::Justification::centred);
     }
 
     void drawToggleButton (juce::Graphics& g, juce::ToggleButton& btn, bool isHighlighted, bool) override
@@ -508,6 +536,7 @@ public:
         const auto bounds = btn.getLocalBounds().toFloat();
         const bool toggled = btn.getToggleState();
         const auto pal = ShowTheme::get (isDarkMode);
+        const auto accent = itemAccent;
         const auto id = btn.getComponentID();
 
         if (id == "sc_inspector_loop")
@@ -516,7 +545,7 @@ public:
 
             if (toggled)
             {
-                g.setColour (pal.accent.withAlpha (isDarkMode ? 0.28f : 0.18f));
+                g.setColour (accent.withAlpha (isDarkMode ? 0.28f : 0.18f));
                 g.fillRoundedRectangle (fullBounds, 5.0f);
             }
             else
@@ -529,14 +558,59 @@ public:
             }
 
             constexpr float kIcon = showcontrol::icons::kButtonIconSize;
-            auto iconArea = fullBounds.removeFromLeft (kIcon + 10.0f).withSizeKeepingCentre (kIcon, kIcon);
-            const auto loopCol = toggled ? pal.accent : pal.textMuted;
+            constexpr float kIconSlot = kIcon + 8.0f;
+            auto iconArea = fullBounds.removeFromLeft (kIconSlot).withSizeKeepingCentre (kIcon, kIcon);
+            const auto loopCol = toggled ? accent : pal.textMuted;
             showcontrol::icons::paintLoopIcon (g, iconArea, loopCol, toggled);
 
-            g.setColour (toggled ? pal.accent : pal.textPrimary);
-            g.setFont (ShowTheme::fontBold (11.0f));
-            g.drawText (btn.getButtonText(), fullBounds.withTrimmedLeft (kIcon + 6.0f),
-                        juce::Justification::centredLeft);
+            g.setColour (toggled ? accent : pal.textPrimary);
+            g.setFont (showcontrol::inspector::buttonFont());
+            g.drawText (btn.getButtonText(), fullBounds.reduced (2.0f, 0.0f),
+                        juce::Justification::centred);
+            return;
+        }
+
+        if (id == "sc_inspector_equalizer")
+        {
+            if (toggled)
+            {
+                g.setColour (accent.withAlpha (isDarkMode ? 0.28f : 0.18f));
+                g.fillRoundedRectangle (bounds, 5.0f);
+            }
+            else
+            {
+                const auto cols = showcontrol::ui::toggleButtonColours (isDarkMode, false, isHighlighted);
+                g.setColour (cols.background);
+                g.fillRoundedRectangle (bounds, ShowTheme::kPanelCornerRadius);
+                g.setColour (pal.inputOutline.withAlpha (0.85f));
+                g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
+            }
+
+            g.setColour (toggled ? accent : pal.textPrimary);
+            g.setFont (showcontrol::inspector::buttonFont());
+            g.drawText (btn.getButtonText(), bounds, juce::Justification::centred);
+            return;
+        }
+
+        if (id == "sc_inspector_normalize")
+        {
+            if (toggled)
+            {
+                g.setColour (accent);
+                g.fillRoundedRectangle (bounds, 5.0f);
+            }
+            else
+            {
+                const auto cols = showcontrol::ui::toggleButtonColours (isDarkMode, false, isHighlighted);
+                g.setColour (cols.background);
+                g.fillRoundedRectangle (bounds, ShowTheme::kPanelCornerRadius);
+                g.setColour (pal.inputOutline.withAlpha (0.85f));
+                g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
+            }
+
+            g.setColour (toggled ? juce::Colours::white : pal.textPrimary);
+            g.setFont (showcontrol::inspector::buttonFont());
+            g.drawText (btn.getButtonText(), bounds, juce::Justification::centred);
             return;
         }
 
@@ -560,7 +634,7 @@ public:
             const auto segCols = showcontrol::ui::toggleButtonColours (isDarkMode, toggled, isHighlighted && ! toggled);
 
             if (toggled)
-                drawSegment (bounds.reduced (0.5f), pal.accent.brighter (isHighlighted ? (isDarkMode ? 0.12f : 0.08f) : 0.0f));
+                drawSegment (bounds.reduced (0.5f), accent.brighter (isHighlighted ? (isDarkMode ? 0.12f : 0.08f) : 0.0f));
             else
                 drawSegment (bounds.reduced (0.5f), segCols.background);
 
@@ -572,8 +646,9 @@ public:
             g.setColour (pal.border);
             g.strokePath (outline, juce::PathStrokeType (1.0f));
 
-            g.setColour (toggled ? pal.accentOnDark : segCols.text);
-            g.setFont (ShowTheme::font (11.0f, toggled ? "Bold" : "Plain"));
+            g.setColour (toggled ? juce::Colours::white : segCols.text);
+            g.setFont (ShowTheme::font (showcontrol::inspector::kParamLabelFontSize,
+                                        toggled ? "Bold" : "Plain"));
             g.drawText (btn.getButtonText(), bounds, juce::Justification::centred);
             return;
         }
@@ -584,7 +659,7 @@ public:
         g.setColour (pal.inputOutline.withAlpha (0.85f));
         g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
         g.setColour (cols.text.withMultipliedAlpha (btn.isEnabled() ? 1.0f : 0.5f));
-        g.setFont (ShowTheme::fontBold (11.0f));
+        g.setFont (showcontrol::inspector::buttonFont());
         g.drawText (btn.getButtonText(), bounds, juce::Justification::centred);
     }
 
@@ -598,7 +673,7 @@ public:
         const auto pal = ShowTheme::get (isDarkMode);
         l->setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
         l->setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-        l->setColour (juce::TextEditor::focusedOutlineColourId, pal.accent);
+        l->setColour (juce::TextEditor::focusedOutlineColourId, itemAccent);
         l->setColour (juce::TextEditor::backgroundColourId,
                       slider.findColour (juce::Slider::textBoxBackgroundColourId));
 
@@ -643,12 +718,13 @@ public:
         const auto pal = ShowTheme::get (isDarkMode);
         const auto bounds = juce::Rectangle<float> (0.5f, 0.5f, (float) width - 1.0f, (float) height - 1.0f);
 
-        g.setColour (pal.accent);
+        g.setColour (itemAccent);
         g.drawRoundedRectangle (bounds, kCapsuleRadius, 1.5f);
     }
 
 private:
     bool isDarkMode = true;
+    juce::Colour itemAccent { showcontrol::colours::tagColourAt (7) };
 };
 
 //==============================================================================
@@ -678,7 +754,7 @@ public:
         infoLabel.setText (showcontrol::localization::tr (
                                u8"Kéo 2 marker vàng/đỏ để chọn điểm IN/OUT. Lăn chuột để zoom."),
                            juce::dontSendNotification);
-        infoLabel.setFont (ShowTheme::fontBold (12.0f));
+        infoLabel.setFont (showcontrol::trimEditor::infoFont());
         const auto pal = ShowTheme::get (isDark);
         infoLabel.setColour (juce::Label::textColourId, pal.textSecondary);
 
@@ -807,7 +883,9 @@ private:
 };
 
 //==============================================================================
-class InspectorPanel : public juce::Component, public juce::Timer
+class InspectorPanel : public juce::Component,
+                       public juce::Timer,
+                       private juce::Label::Listener
 {
 public:
     InspectorPanel()
@@ -817,44 +895,18 @@ public:
         inspectorViewport.setScrollBarsShown (true, false);
         inspectorViewport.setScrollBarThickness (8);
 
-        inspectorContent.addAndMakeVisible (nameLabel); nameLabel.setText (juce::String::fromUTF8 (u8"Name"), juce::dontSendNotification);
-        nameLabel.setFont (ShowTheme::fontBold (11.5f));
+        inspectorContent.addAndMakeVisible (nameLabel);
+        nameLabel.setText (juce::String::fromUTF8 (u8"Name"), juce::dontSendNotification);
+        nameLabel.setFont (showcontrol::inspector::paramLabelFont());
+        nameLabel.setJustificationType (juce::Justification::centredLeft);
 
-        inspectorContent.addAndMakeVisible (nameEditor);
-        nameEditor.setFont (ShowTheme::font (13.5f));
-        nameEditor.setJustification (juce::Justification::centredLeft);
-        nameEditor.setIndents (8, 4);
-        nameEditor.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
-        nameEditor.setReturnKeyStartsNewLine (false);
-        nameEditor.onTextChange = [this]
-        {
-            if (currentPad == nullptr)
-                return;
-
-            currentPad->setCustomName (nameEditor.getText());
-
-            if (onTrackNameChanged != nullptr)
-                onTrackNameChanged();
-        };
-        nameEditor.onReturnKey = [this] {
-            if (currentPad != nullptr)
-            {
-                currentPad->setCustomName (nameEditor.getText());
-                nameEditor.giveAwayKeyboardFocus();
-                if (onTrackNameChanged != nullptr)
-                    onTrackNameChanged();
-                if (onProjectEdited) onProjectEdited();
-            }
-        };
-        nameEditor.onFocusLost = [this] {
-            if (currentPad != nullptr)
-            {
-                currentPad->setCustomName (nameEditor.getText());
-                if (onTrackNameChanged != nullptr)
-                    onTrackNameChanged();
-                if (onProjectEdited) onProjectEdited();
-            }
-        };
+        inspectorContent.addAndMakeVisible (nameValueLabel);
+        nameValueLabel.setMinimumHorizontalScale (0.68f);
+        nameValueLabel.setFont (showcontrol::inspector::trackNameFont());
+        nameValueLabel.setJustificationType (juce::Justification::centredLeft);
+        nameValueLabel.setEditable (true, true, false);
+        nameValueLabel.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
+        nameValueLabel.addListener (this);
 
         inspectorContent.addAndMakeVisible (waveformDisplay);
         waveformDisplay.setShowTimeRuler (false);
@@ -888,7 +940,9 @@ public:
         inspectorContent.addAndMakeVisible (trimEndLabel); trimEndLabel.setText ("00:00.0", juce::dontSendNotification);
         trimEndLabel.setFont (ShowTheme::timerFont (10.0f)); trimEndLabel.setJustificationType (juce::Justification::centredRight);
 
-        inspectorContent.addAndMakeVisible (trimResetBtn); trimResetBtn.setButtonText (juce::String::fromUTF8 (u8"Reset"));
+        inspectorContent.addAndMakeVisible (trimResetBtn);
+        trimResetBtn.setLookAndFeel (&inspectorStyle);
+        trimResetBtn.setButtonText (juce::String::fromUTF8 (u8"Reset"));
         trimResetBtn.onClick = [this] {
             if (currentPad) {
                 currentPad->setTrimStart (0.0); currentPad->setTrimEnd (0.0); 
@@ -936,14 +990,14 @@ public:
             {
                 if (onFadePadRequested)
                     onFadePadRequested (currentPad);
-                currentPad->startFadeOut(); // dùng fadeOutMs của pad
+                currentPad->stopTransportWithConfiguredFade();
             }
         };
 
         // Fade In duration slider (0 = tắt)
         inspectorContent.addAndMakeVisible (fadeInLabel);
         fadeInLabel.setText (juce::String::fromUTF8 (u8"Fade In"), juce::dontSendNotification);
-        fadeInLabel.setFont (ShowTheme::font (10.5f));
+        fadeInLabel.setFont (showcontrol::inspector::paramLabelFont());
         fadeInLabel.setJustificationType (juce::Justification::centredRight);
 
         fadeInSlider.setLookAndFeel (&inspectorStyle);
@@ -966,7 +1020,7 @@ public:
         // Fade Out duration slider
         inspectorContent.addAndMakeVisible (fadeOutLabel);
         fadeOutLabel.setText (juce::String::fromUTF8 (u8"Fade Out"), juce::dontSendNotification);
-        fadeOutLabel.setFont (ShowTheme::font (10.5f));
+        fadeOutLabel.setFont (showcontrol::inspector::paramLabelFont());
         fadeOutLabel.setJustificationType (juce::Justification::centredRight);
 
         fadeOutSlider.setLookAndFeel (&inspectorStyle);
@@ -987,6 +1041,7 @@ public:
         };
 
         equalizerBtn.setLookAndFeel (&inspectorStyle);
+        equalizerBtn.setComponentID ("sc_inspector_equalizer");
         inspectorContent.addAndMakeVisible (equalizerBtn);
         equalizerBtn.setButtonText (showcontrol::localization::tr (u8"Equalizer"));
         equalizerBtn.onClick = [this] { openEqualizerDialog(); };
@@ -995,7 +1050,7 @@ public:
         timeLabel.setFont (ShowTheme::timerFont (32.0f, true)); timeLabel.setJustificationType (juce::Justification::centred);
 
         inspectorContent.addAndMakeVisible (metaFormatLabel);
-        metaFormatLabel.setFont (ShowTheme::font (11.0f));
+        metaFormatLabel.setFont (showcontrol::inspector::paramLabelFont());
         metaFormatLabel.setJustificationType (juce::Justification::centred);
 
         loopToggle.setComponentID ("sc_inspector_loop");
@@ -1006,13 +1061,15 @@ public:
             if (currentPad != nullptr)
             {
                 currentPad->setLooping (loopToggle.getToggleState());
+                if (onPadLoopChanged)
+                    onPadLoopChanged (currentPad);
                 if (onProjectEdited) onProjectEdited();
             }
         };
 
         inspectorContent.addAndMakeVisible (volumeLabel);
         volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng (Volume):"), juce::dontSendNotification);
-        volumeLabel.setFont (ShowTheme::font (10.5f));
+        volumeLabel.setFont (showcontrol::inspector::paramLabelFont());
         volumeLabel.setJustificationType (juce::Justification::centredLeft);
 
         volumeSlider.setLookAndFeel (&inspectorStyle);
@@ -1028,6 +1085,7 @@ public:
 
         // Auto Normalize Toggle với 3 chế độ AI
         inspectorContent.addAndMakeVisible (normalizeToggle);
+        normalizeToggle.setComponentID ("sc_inspector_normalize");
         normalizeToggle.setButtonText (showcontrol::localization::tr (u8"Đồng bộ âm lượng"));
         normalizeToggle.setToggleState (true, juce::dontSendNotification);
         normalizeToggle.setLookAndFeel (&inspectorStyle);
@@ -1055,6 +1113,8 @@ public:
         // Chọn chế độ chuẩn hoá: RMS (cổ điển) hoặc LUFS (broadcast AI)
         normalizeRmsBtn.setLookAndFeel (&inspectorStyle);
         normalizeLufsBtn.setLookAndFeel (&inspectorStyle);
+        normalizeRmsBtn.setComponentID ("theme_seg_left");
+        normalizeLufsBtn.setComponentID ("theme_seg_right");
         inspectorContent.addAndMakeVisible (normalizeRmsBtn);
         normalizeRmsBtn.setButtonText ("RMS");
         normalizeRmsBtn.setToggleState (true, juce::dontSendNotification);
@@ -1083,6 +1143,7 @@ public:
         };
 
         inspectorContent.addAndMakeVisible (normalizeListBtn);
+        normalizeListBtn.setLookAndFeel (&inspectorStyle);
         normalizeListBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cả list"));
         normalizeListBtn.onClick = [this]
         {
@@ -1092,7 +1153,7 @@ public:
 
         inspectorContent.addAndMakeVisible (rmsLabel);
         rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
-        rmsLabel.setFont (ShowTheme::font (10.5f));
+        rmsLabel.setFont (showcontrol::inspector::paramLabelFont());
         rmsLabel.setJustificationType (juce::Justification::centredLeft);
         rmsLabel.setVisible (false);
 
@@ -1104,6 +1165,7 @@ public:
         hotkeyScopeActiveBtn.setLookAndFeel (&inspectorStyle);
         hotkeyScopeGlobalBtn.setLookAndFeel (&inspectorStyle);
         hotkeyScopeLabel.setText ("Hotkey Scope", juce::dontSendNotification);
+        hotkeyScopeLabel.setFont (showcontrol::inspector::paramLabelFont());
         hotkeyScopeActiveBtn.setButtonText ("Active List");
         hotkeyScopeGlobalBtn.setButtonText ("Global");
         setHotkeyScopeSelectionId (1, juce::dontSendNotification);
@@ -1120,7 +1182,7 @@ public:
         // Output Bus selector — điều hướng tín hiệu pad ra cổng output riêng
         inspectorContent.addAndMakeVisible (outputBusLabel);
         outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
-        outputBusLabel.setFont (ShowTheme::font (10.5f));
+        outputBusLabel.setFont (showcontrol::inspector::paramLabelFont());
         outputBusLabel.setJustificationType (juce::Justification::centredLeft);
 
         outputBusCombo.setLookAndFeel (&inspectorStyle);
@@ -1149,8 +1211,11 @@ public:
 
     ~InspectorPanel() override
     {
+        nameValueLabel.removeListener (this);
         stopTimer();
         detachFromPadResources();
+        trimResetBtn.setLookAndFeel (nullptr);
+        normalizeListBtn.setLookAndFeel (nullptr);
         loopToggle.setLookAndFeel (nullptr);
         normalizeToggle.setLookAndFeel (nullptr);
         normalizeRmsBtn.setLookAndFeel (nullptr);
@@ -1177,8 +1242,13 @@ public:
     std::function<void()> onProjectEdited;
     /** Live update — tên pad đổi trong nameEditor, MainComponent refresh CUE/BGM list. */
     std::function<void()> onTrackNameChanged;
+    std::function<void (SoundPad*)> onPadLoopChanged;
     /** Gọi khi user đổi output bus của pad — MainComponent lưu project. */
     std::function<void(int busIndex)> onOutputBusChanged;
+
+    /** Đồng bộ màu tag PAD ↔ Cuelist + lưu JSON. */
+    std::function<void(SoundPad*, juce::Colour)> onTagColourChanged;
+    std::function<void()> onActivePadChanged;
 
     /** Chuẩn hoá âm lượng toàn bộ pad có file trong list đang active (RMS hoặc LUFS). */
     std::function<void(bool useLufs)> onNormalizeActiveListRequested;
@@ -1266,16 +1336,15 @@ public:
         auto editorBg = pal.inputBg;
         auto editorOutline = pal.inputOutline;
         auto sliderTr = pal.sliderTrack;
-        auto accent = pal.accent;
         auto btnSec = pal.buttonSecondary;
 
-        nameLabel.setColour (juce::Label::textColourId, mutedCol);
-        nameEditor.setColour (juce::TextEditor::backgroundColourId, editorBg);
-        nameEditor.setColour (juce::TextEditor::textColourId, textCol);
-        nameEditor.setColour (juce::TextEditor::outlineColourId, editorOutline);
-        nameEditor.setColour (juce::CaretComponent::caretColourId, pal.accent);
-        nameEditor.setColour (juce::TextEditor::focusedOutlineColourId, pal.accent);
-        nameEditor.setColour (juce::TextEditor::highlightedTextColourId, textCol);
+        nameLabel.setColour (juce::Label::textColourId, mutedCol.withAlpha (0.6f));
+        nameValueLabel.setColour (juce::Label::textColourId, textCol);
+        nameValueLabel.setFont (showcontrol::inspector::trackNameFont());
+        nameValueLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        nameValueLabel.setColour (juce::Label::backgroundWhenEditingColourId, editorBg);
+        nameValueLabel.setColour (juce::Label::outlineWhenEditingColourId, editorOutline);
+        nameValueLabel.setColour (juce::Label::textWhenEditingColourId, textCol);
         waveformDisplay.setDarkMode (isDark);
         trimStartLabel.setColour (juce::Label::textColourId, pal.trimMarkerStart);
         trimEndLabel.setColour (juce::Label::textColourId, pal.trimMarkerEnd);
@@ -1283,20 +1352,13 @@ public:
         trimResetBtn.setColour (juce::TextButton::textColourOffId, mutedCol);
         backBtn.setColour (juce::TextButton::buttonColourId, btnSec);
         backBtn.setColour (juce::TextButton::textColourOffId, textCol);
-        playBtn.setColour (juce::TextButton::buttonColourId, accent);
-        playBtn.setColour (juce::TextButton::textColourOffId, isDark ? juce::Colours::white : pal.panelElevated);
         fadeOutBtn.setColour (juce::TextButton::buttonColourId, btnSec);
         fadeOutBtn.setColour (juce::TextButton::textColourOffId, textCol);
         normalizeListBtn.setColour (juce::TextButton::buttonColourId, btnSec);
         normalizeListBtn.setColour (juce::TextButton::textColourOffId, textCol);
-        timeLabel.setColour (juce::Label::textColourId, textCol);
         metaFormatLabel.setColour (juce::Label::textColourId, mutedCol);
         loopToggle.setColour (juce::ToggleButton::textColourId, textCol);
         volumeLabel.setColour (juce::Label::textColourId, mutedCol);
-        equalizerBtn.setColour (juce::TextButton::buttonColourId, btnSec);
-        equalizerBtn.setColour (juce::TextButton::textColourOffId, textCol);
-        volumeSlider.setColour (juce::Slider::trackColourId, sliderTr);
-        volumeSlider.setColour (juce::Slider::thumbColourId, pal.sliderThumb);
         normalizeToggle.setColour (juce::ToggleButton::textColourId, textCol);
         outputBusLabel.setColour (juce::Label::textColourId, mutedCol);
         sectionDivider.setDarkMode (isDark);
@@ -1313,7 +1375,7 @@ public:
             combo->setColour (juce::PopupMenu::backgroundColourId, comboBg);
             combo->setColour (juce::PopupMenu::textColourId, comboText);
             combo->setColour (juce::PopupMenu::highlightedBackgroundColourId,
-                               isDark ? pal.rowSelected : pal.accent.withAlpha (0.14f));
+                               isDark ? pal.rowSelected : getItemAccentColour().withAlpha (0.14f));
             combo->setColour (juce::PopupMenu::highlightedTextColourId, textCol);
         }
         fadeInLabel.setColour (juce::Label::textColourId, mutedCol);
@@ -1322,18 +1384,13 @@ public:
         juce::Slider* fadeSliders[] = { &fadeInSlider, &fadeOutSlider };
         for (auto* slider : fadeSliders)
         {
-            slider->setColour (juce::Slider::trackColourId, sliderTr);
-            slider->setColour (juce::Slider::thumbColourId, pal.sliderThumb);
-            // Màu capsule ms — hardcode từ ShowTheme, không findColour cross-class (tránh assert LnF:82).
             slider->setColour (juce::Slider::textBoxTextColourId,       textCol);
             slider->setColour (juce::Slider::textBoxBackgroundColourId, editorBg.brighter (0.05f));
             slider->setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-            slider->setColour (juce::Slider::textBoxHighlightColourId, pal.accentSoft.withAlpha (0.28f));
             slider->repaint();
         }
 
-        updateEqualizerButtonStyle();
-        repaint();
+        applyItemAccentColours();
     }
 
     void openTrimEditor (juce::Component* positionAnchor = nullptr)
@@ -1341,13 +1398,40 @@ public:
         openAdvancedTrimWindow (positionAnchor);
     }
 
+    void refreshPadDisplayName()
+    {
+        if (currentPad == nullptr)
+            return;
+
+        nameValueLabel.setText (currentPad->getPadName(), juce::dontSendNotification);
+    }
+
+    void labelTextChanged (juce::Label* labelThatHasChanged) override
+    {
+        if (labelThatHasChanged != &nameValueLabel || currentPad == nullptr)
+            return;
+
+        currentPad->setCustomName (nameValueLabel.getText());
+
+        if (onTrackNameChanged != nullptr)
+            onTrackNameChanged();
+
+        if (onProjectEdited != nullptr)
+            onProjectEdited();
+    }
+
     void selectPad (SoundPad* newPad)
     {
         if (newPad == currentPad)
         {
             if (currentPad != nullptr)
+            {
+                refreshPadDisplayName();
                 refreshTransportUi();
+            }
 
+            syncInspectorColourFromPad();
+            applyItemAccentColours();
             return;
         }
 
@@ -1358,7 +1442,7 @@ public:
 
         if (currentPad != nullptr)
         {
-            nameEditor.setText (currentPad->getPadName(), juce::dontSendNotification);
+            nameValueLabel.setText (currentPad->getPadName(), juce::dontSendNotification);
             volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
             outputBusCombo.setSelectedItemIndex (
                 juce::jlimit (0, showcontrol::routing::kInspectorBusCount - 1, currentPad->getOutputBus()),
@@ -1384,17 +1468,28 @@ public:
             waveformDisplay.setFadeRegions (currentPad->getFadeInMs(), currentPad->getFadeOutMs(), currentPad->getEffectiveLength());
             syncDspControlsFromPad();
             currentPad->scheduleDeferredInspectorLoads();
+            applyItemAccentColours();
         }
         else
         {
-            nameEditor.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
+            nameValueLabel.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
             timeLabel.setText ("00:00.0", juce::dontSendNotification);
             trimStartLabel.setText ("00:00.0", juce::dontSendNotification); trimEndLabel.setText ("00:00.0", juce::dontSendNotification);
             rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
             waveformDisplay.setThumbnail (nullptr);
             updateRmsLabelAppearance();
             updateFileInfoLabels ({});
+            applyItemAccentColours();
         }
+
+        if (onActivePadChanged)
+            onActivePadChanged();
+    }
+
+    void refreshTagColourUi()
+    {
+        syncInspectorColourFromPad();
+        applyItemAccentColours();
     }
 
     /** Gọi sau khi file load xong để cập nhật metadata mà không cần select lại. */
@@ -1450,16 +1545,77 @@ public:
 
     void syncDspControlsFromPad()
     {
-        updateEqualizerButtonStyle();
+        applyItemAccentColours();
     }
 
     void updateEqualizerButtonStyle()
     {
-        const auto pal = ShowTheme::get (isDarkTheme);
         const bool eqOn = currentPad != nullptr && currentPad->getDspEqEnabled();
-        equalizerBtn.setColour (juce::TextButton::buttonColourId, eqOn ? pal.accentSoft : pal.buttonSecondary);
-        equalizerBtn.setColour (juce::TextButton::textColourOffId,
-                                eqOn ? (isDarkTheme ? juce::Colours::white : pal.panelElevated) : pal.textPrimary);
+        equalizerBtn.setToggleState (eqOn, juce::dontSendNotification);
+        equalizerBtn.repaint();
+    }
+
+    juce::Colour getItemAccentColour() const noexcept
+    {
+        const auto& pal = ShowTheme::get (isDarkTheme);
+
+        if (showcontrol::colours::isDefaultTagColour (currentInspectorColour))
+            return pal.accent;
+
+        return currentInspectorColour;
+    }
+
+    void syncInspectorColourFromPad()
+    {
+        if (currentPad == nullptr)
+        {
+            currentInspectorColour = showcontrol::colours::defaultTagColour();
+            return;
+        }
+
+        currentInspectorColour = showcontrol::colours::snapToPalette (currentPad->getTagColour());
+    }
+
+    void applyItemAccentColours()
+    {
+        syncInspectorColourFromPad();
+
+        const auto accent = getItemAccentColour();
+        const auto& pal = ShowTheme::get (isDarkTheme);
+
+        inspectorStyle.setItemAccentColour (accent);
+        waveformDisplay.setItemInkColour (accent);
+
+        nameValueLabel.setColour (juce::Label::outlineWhenEditingColourId, accent);
+        nameValueLabel.setColour (juce::Label::textWhenEditingColourId, pal.textPrimary);
+
+        playBtn.setColour (juce::TextButton::buttonColourId, accent);
+        playBtn.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+
+        timeLabel.setColour (juce::Label::textColourId, accent);
+
+        volumeSlider.setColour (juce::Slider::trackColourId, pal.sliderTrack);
+        volumeSlider.setColour (juce::Slider::thumbColourId, accent);
+        volumeSlider.repaint();
+
+        juce::Slider* accentSliders[] = { &fadeInSlider, &fadeOutSlider };
+        for (auto* slider : accentSliders)
+        {
+            slider->setColour (juce::Slider::trackColourId, pal.sliderTrack);
+            slider->setColour (juce::Slider::thumbColourId, accent);
+            slider->setColour (juce::Slider::textBoxHighlightColourId, accent.withAlpha (0.28f));
+            slider->repaint();
+        }
+
+        loopToggle.repaint();
+        normalizeToggle.repaint();
+        normalizeRmsBtn.repaint();
+        normalizeLufsBtn.repaint();
+        updateEqualizerButtonStyle();
+        playBtn.repaint();
+        waveformDisplay.repaint();
+        inspectorContent.repaint();
+        repaint();
     }
 
     void openEqualizerDialog (juce::Component* positionAnchor = nullptr)
@@ -1583,13 +1739,13 @@ public:
         static constexpr int marginBottom = 10;
         static constexpr int gap = 8;
         static constexpr int pairGap = 8;
-        static constexpr int rowHName = 28;
+        static constexpr int rowHName = 34;
         static constexpr int rowHWave = 72;
         static constexpr int rowHTrim = 16;
         static constexpr int rowHTransport = 28;
         static constexpr int rowHTime = 30;
         static constexpr int rowHMeta = 12;
-        static constexpr int rowHLoopEq = 28;
+        static constexpr int rowHLoopEq = 32;
         static constexpr int rowHBus = 28;
         static constexpr int rowHBusLabel = 110;
         static constexpr int rowHVolume = 28;
@@ -1621,9 +1777,9 @@ public:
         // --- Tên file ---
         {
             auto nameRow = area.removeFromTop (rowHName);
-            const int nameLabelW = measureInspectorLabelWidth (nameLabel, nameRow.getWidth() / 3);
+            constexpr int nameLabelW = 48;
             nameLabel.setBounds (nameRow.removeFromLeft (nameLabelW));
-            nameEditor.setBounds (nameRow);
+            nameValueLabel.setBounds (nameRow);
         }
 
         skipGap();
@@ -1634,7 +1790,7 @@ public:
         {
             auto trimRow = area.removeFromTop (rowHTrim);
             const int endW = juce::jmin (trimRow.getWidth() / 3, measureInspectorLabelWidth (trimEndLabel, trimRow.getWidth() / 3));
-            const int resetMeasured = juce::GlyphArrangement::getStringWidthInt (ShowTheme::font (11.0f),
+            const int resetMeasured = juce::GlyphArrangement::getStringWidthInt (showcontrol::inspector::buttonFont(),
                                                                                  trimResetBtn.getButtonText()) + 16;
             const int resetW = juce::jmin (trimRow.getWidth() / 4, juce::jlimit (40, trimRow.getWidth() / 4, resetMeasured));
             const int rightClusterW = endW + pairGap + resetW;
@@ -1664,13 +1820,15 @@ public:
         metaFormatLabel.setBounds (area.removeFromTop (rowHMeta));
         skipGap();
 
-        // --- Loop / Equalizer ---
+        // --- Loop / Equalizer — 2 nút ngang full width ---
         {
-            auto loopEqRow = area.removeFromTop (rowHLoopEq);
-            const int halfW = juce::jmax (0, (loopEqRow.getWidth() - pairGap) / 2);
-            loopToggle.setBounds (loopEqRow.removeFromLeft (halfW));
-            loopEqRow.removeFromLeft (pairGap);
-            equalizerBtn.setBounds (loopEqRow);
+            auto buttonRow = area.removeFromTop (rowHLoopEq);
+            const int totalWidth = buttonRow.getWidth();
+            const int singleButtonW = juce::jmax (1, (totalWidth - pairGap) / 2);
+
+            loopToggle.setBounds (buttonRow.removeFromLeft (singleButtonW).reduced (2, 0));
+            buttonRow.removeFromLeft (pairGap);
+            equalizerBtn.setBounds (buttonRow.reduced (2, 0));
         }
 
         skipGap();
@@ -1863,11 +2021,12 @@ private:
     bool isDarkTheme = true;
     bool normalizeModeIsLufs = false;
     bool normModeRowsVisible = false;
+    juce::Colour currentInspectorColour = showcontrol::colours::defaultTagColour();
     juce::StringArray cachedInspectorBusNames;
     InspectorStyle inspectorStyle;
     juce::Label nameLabel, trimStartLabel, trimEndLabel, timeLabel, volumeLabel, rmsLabel, hotkeyScopeLabel;
     juce::TextButton normalizeListBtn;
-    juce::TextEditor nameEditor;
+    TrackNameEditLabel nameValueLabel;
     InspectorWaveform waveformDisplay;
     juce::TextButton trimResetBtn, backBtn, playBtn, fadeOutBtn;
     juce::ToggleButton loopToggle, normalizeToggle;

@@ -8,6 +8,13 @@
 
 namespace showcontrol::update
 {
+/**
+ * Kiến trúc cập nhật ShowCue (Beta 2+):
+ * - Chỉ gọi GitHub Releases API, so sánh semver, hỏi người dùng.
+ * - "Tải về ngay" → launchInDefaultBrowser() — KHÔNG downloadToFile / unzip / shell.
+ * - Không ghi đè ShowCue.app vào /Applications từ trong app → không cần xattr -cr nội bộ.
+ * - Gatekeeper/quarantine: do trình duyệt + người dùng cài (.dmg kéo thả hoặc mở .zip).
+ */
 inline constexpr const char* kGitHubLatestReleaseUrl =
     "https://api.github.com/repos/hayatuan/dgpcorp/releases/latest";
 
@@ -21,6 +28,9 @@ struct RemoteVersionInfo
 int compareVersionStrings (const juce::String& lhs, const juce::String& rhs);
 
 std::optional<RemoteVersionInfo> parseUpdateJson (const juce::String& jsonText);
+
+/** Chọn URL asset phù hợp nền tảng (.dmg ưu tiên trên macOS, rồi .zip). */
+juce::String pickBestAssetDownloadUrl (const juce::var& releaseObject);
 
 /** Kiểm tra cập nhật bất đồng bộ — request trên luồng ngầm, UI trên message thread. */
 class ShowUpdateChecker final : public juce::Thread

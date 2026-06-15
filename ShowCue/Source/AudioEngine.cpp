@@ -61,7 +61,20 @@ bool AudioEngine::stopCue (SoundPad* pad) noexcept
     if (! pad->isTransportActive())
         return false;
 
-    pad->triggerStop();
+    if (pad->getFadeOutMs() < 5.0)
+    {
+        pad->triggerStopImmediate();
+    }
+    else if (pad->isPlaying() || pad->isPaused())
+    {
+        pad->startFadeOut();
+    }
+    else
+    {
+        // Đang fade-out dở — ép dừng theo cấu hình (0ms = hard stop).
+        pad->stopTransportWithConfiguredFade();
+    }
+
     return true;
 }
 

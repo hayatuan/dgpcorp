@@ -32,6 +32,22 @@ namespace ShowAudioFormats
                "*.WAV;*.WAVE;*.MP3;*.M4A;*.M4B;*.AAC;*.FLAC;*.OGG;*.OGA;*.AIF;*.AIFF;*.WMA;*.WV";
     }
 
+    /** Audio + video — hộp thoại «Thêm file» / kéo-thả. */
+    inline juce::String mediaFileChooserWildcard()
+    {
+        return fileChooserWildcard()
+             + ";*.mp4;*.mov;*.mkv;*.avi;*.m4v;*.webm;*.wmv;*.mpg;*.mpeg;*.3gp"
+               ";*.MP4;*.MOV;*.MKV;*.AVI;*.M4V;*.WEBM;*.WMV;*.MPG;*.MPEG;*.3GP";
+    }
+
+    /** Cờ chuẩn mở nhiều file cùng lúc (JUCE: canSelectMultipleItems). */
+    inline int fileChooserOpenMultipleFlags() noexcept
+    {
+        return juce::FileBrowserComponent::openMode
+             | juce::FileBrowserComponent::canSelectFiles
+             | juce::FileBrowserComponent::canSelectMultipleItems;
+    }
+
     /** Giới hạn quét nông — tránh treo UI khi thả nhầm thư mục quá lớn. */
     inline constexpr int kMaxShallowFolderAudioFiles = 5000;
 

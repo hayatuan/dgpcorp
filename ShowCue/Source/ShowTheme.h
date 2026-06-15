@@ -171,7 +171,7 @@ namespace ShowTheme
 
     inline const juce::String& uiTypefaceName()
     {
-        static const juce::String kName { "UIFont" };
+        static const juce::String kName { "Roboto" };
         return kName;
     }
 
@@ -198,8 +198,8 @@ namespace ShowTheme
     {
         auto opts = juce::FontOptions().withName (uiTypefaceName()).withHeight (heightPx);
 
-        if (style.equalsIgnoreCase ("Bold") || style == "Plain")
-            opts = opts.withStyle (style);
+        if (style.equalsIgnoreCase ("Bold"))
+            opts = opts.withStyle ("Bold");
 
         return juce::Font (opts);
     }
@@ -228,63 +228,76 @@ namespace ShowTheme
     }
 }
 
-/** Cột BGM list — header (MainComponent) và dòng (SoundPad) dùng chung bounds. */
-namespace showcontrol::bgmList
+/** Typography Inspector — nhãn tham số + nút bấm đồng bộ FOH. */
+namespace showcontrol::inspector
 {
-    inline constexpr int kTimeRemainingWidth      = 140;
-    inline constexpr int kTotalDurationWidth      = 130;
-    inline constexpr int kTimeRemainingRightOffset = 285;
-    inline constexpr int kTotalDurationRightOffset  = 145;
-    inline constexpr int kTitleLeftPad            = 20;
-    inline constexpr int kTitleRightReserve       = 315;
+    inline constexpr float kParamLabelFontSize = 14.0f;
+    inline constexpr float kButtonFontSize     = 14.5f;
+    inline constexpr float kTrackNameFontSize  = 16.5f;
 
-    /** Cột số thứ tự + icon trạng thái + tên bài (BGM / CUE list). */
-    inline constexpr int kIndexX                  = 10;
-    inline constexpr int kIndexWidth              = 25;
-    inline constexpr float kStatusIconX           = 38.0f;
-    inline constexpr float kListIconSize          = 14.0f;
-    inline constexpr int kNameStartWithStatusIcon = 60;
-    inline constexpr int kNameStartDefault        = 38;
-    inline constexpr float kLoopIconGapBeforeTime = 6.0f;
-
-    inline juce::Rectangle<float> statusIconBounds (int rowHeight) noexcept
+    inline juce::Font paramLabelFont() noexcept
     {
-        const float y = ((float) rowHeight - kListIconSize) * 0.5f;
-        return { kStatusIconX, y, kListIconSize, kListIconSize };
+        return ShowTheme::font (kParamLabelFontSize);
     }
 
-    inline juce::Rectangle<float> loopIconBounds (int panelWidth, int rowHeight) noexcept
+    inline juce::Font buttonFont() noexcept
     {
-        const float x = (float) panelWidth - (float) kTimeRemainingRightOffset
-                        - kListIconSize - kLoopIconGapBeforeTime;
-        const float y = ((float) rowHeight - kListIconSize) * 0.5f;
-        return { x, y, kListIconSize, kListIconSize };
+        return ShowTheme::fontBold (kButtonFontSize);
     }
 
-    inline juce::Rectangle<int> timeRemainingBounds (int panelWidth, int height) noexcept
+    inline juce::Font trackNameFont() noexcept
     {
-        return { panelWidth - kTimeRemainingRightOffset, 0, kTimeRemainingWidth, height };
-    }
-
-    inline juce::Rectangle<int> totalDurationBounds (int panelWidth, int height) noexcept
-    {
-        return { panelWidth - kTotalDurationRightOffset, 0, kTotalDurationWidth, height };
-    }
-
-    inline juce::Rectangle<int> titleBounds (int panelWidth, int height) noexcept
-    {
-        return { kTitleLeftPad, 0, juce::jmax (0, panelWidth - kTitleRightReserve), height };
-    }
-
-    inline int nameColumnMaxWidth (int panelWidth, int nameStartX) noexcept
-    {
-        return juce::jmax (0, panelWidth - kTimeRemainingRightOffset - nameStartX);
+        return ShowTheme::fontBold (kTrackNameFontSize);
     }
 }
 
-/** Màu nền/chữ nút — đảm bảo tương phản khi hover (isHighlighted). */
+/** Trim Editor — ruler / marker / hint to rõ từ xa. */
+namespace showcontrol::trimEditor
+{
+    inline constexpr float kRulerFontSize       = 14.5f;
+    inline constexpr float kMarkerLabelFontSize = 14.5f;
+    inline constexpr float kInfoFontSize        = 14.5f;
+
+    inline juce::Font rulerFont() noexcept       { return ShowTheme::font (kRulerFontSize); }
+    inline juce::Font markerLabelFont() noexcept { return ShowTheme::fontBold (kMarkerLabelFontSize); }
+    inline juce::Font infoFont() noexcept        { return ShowTheme::fontBold (kInfoFontSize); }
+}
+
+/** Equalizer dialog — Hz / dB / Q badges. */
+namespace showcontrol::equalizer
+{
+    inline constexpr float kGridFontSize      = 14.5f;
+    inline constexpr float kBandBadgeFontSize = 14.5f;
+    inline constexpr float kBandValueFontSize = 14.5f;
+    inline constexpr float kHintFontSize      = 13.0f;
+
+    inline juce::Font gridFont() noexcept      { return ShowTheme::font (kGridFontSize); }
+    inline juce::Font bandBadgeFont() noexcept { return ShowTheme::fontBold (kBandBadgeFontSize); }
+    inline juce::Font bandValueFont() noexcept { return ShowTheme::font (kBandValueFontSize); }
+    inline juce::Font hintFont() noexcept      { return ShowTheme::font (kHintFontSize); }
+}
+
+/** Main deck — nút Monitor cạnh đồng hồ. */
+namespace showcontrol::masterDeck
+{
+    inline constexpr float kMonitorButtonFontSize = 15.0f;
+
+    inline juce::Font monitorButtonFont() noexcept
+    {
+        return ShowTheme::fontBold (kMonitorButtonFontSize);
+    }
+}
+
+/** PopupMenu chuột phải + màu nền/chữ nút — đảm bảo tương phản khi hover. */
 namespace showcontrol::ui
 {
+    inline constexpr float kPopupMenuFontSize = 15.0f;
+
+    inline juce::Font popupMenuFont() noexcept
+    {
+        return ShowTheme::font (kPopupMenuFontSize);
+    }
+
     struct ButtonSurfaceColours
     {
         juce::Colour background;
@@ -331,5 +344,263 @@ namespace showcontrol::ui
             return pal.inputBg;
 
         return isDark ? ShowTheme::rgb (0x3A3A3C) : ShowTheme::rgb (0xE5E5EA);
+    }
+}
+
+/** Typography cửa sổ Cài đặt 3 tab — tab bar, nhãn phân khu, gợi ý. */
+namespace showcontrol::preferences
+{
+    inline constexpr float kTabLabelFontSize     = 15.0f;
+    inline constexpr float kSectionLabelFontSize = 15.5f;
+    inline constexpr float kHintFontSize         = 13.0f;
+
+    inline juce::Font tabLabelFont() noexcept
+    {
+        return ShowTheme::font (kTabLabelFontSize);
+    }
+
+    inline juce::Font sectionLabelFont() noexcept
+    {
+        return ShowTheme::fontBold (kSectionLabelFontSize);
+    }
+
+    inline juce::Font hintFont() noexcept
+    {
+        return ShowTheme::font (kHintFontSize);
+    }
+}
+
+/** Typography cửa sổ Cài đặt Audio — Roboto to rõ, đồng bộ ShowControl. */
+namespace showcontrol::audioSettings
+{
+    inline constexpr float kLabelFontSize  = 15.5f;
+    inline constexpr float kComboFontSize  = 15.0f;
+    inline constexpr float kButtonFontSize = 14.5f;
+    inline constexpr float kEditorFontSize = 14.5f;
+
+    inline juce::Font labelFont() noexcept
+    {
+        return ShowTheme::font (kLabelFontSize);
+    }
+
+    inline juce::Font comboFont() noexcept
+    {
+        return ShowTheme::font (kComboFontSize);
+    }
+
+    inline juce::Font buttonFont() noexcept
+    {
+        return ShowTheme::fontBold (kButtonFontSize);
+    }
+
+    inline juce::Font editorFont() noexcept
+    {
+        return ShowTheme::font (kEditorFontSize);
+    }
+}
+
+/** Cột BGM list — header (MainComponent) và dòng (SoundPad) dùng chung bounds. */
+namespace showcontrol::bgmList
+{
+    /** Cỡ chữ thống nhất mọi cột dòng (số thứ tự, tên, thời gian) — Sidebar + Table. */
+    inline constexpr float kPlaylistCellFontSize  = 14.5f;
+    inline constexpr float kSidebarHotkeyFontSize = 12.5f;
+    /** Chiều cao dòng compact — BGM (SoundPad) và CUE list dùng chung. */
+    inline constexpr int kPlaylistRowHeight       = 34;
+    /** Khoảng thở giữa tiêu đề cột và dòng 1 — BGM header + CUE list. */
+    inline constexpr int kPlaylistHeaderHeight    = 36;
+    inline constexpr int kPlaylistHeaderGap       = 4;
+    /** Dải biên dọc mép trái dòng — đồng bộ CUE tag rail / BGM list. */
+    inline constexpr int kLeftRailWidth           = 4;
+
+    inline constexpr int kTimeRemainingWidth      = 140;
+    inline constexpr int kTotalDurationWidth      = 130;
+    inline constexpr int kTimeRemainingRightOffset = 285;
+    inline constexpr int kTotalDurationRightOffset  = 145;
+    inline constexpr int kTitleLeftPad            = 20;
+    inline constexpr int kTitleRightReserve       = 315;
+
+    /** Cột số thứ tự + icon trạng thái + tên bài (BGM / CUE list). */
+    inline constexpr int kIndexX                  = 10;
+    inline constexpr int kIndexWidth              = 25;
+    inline constexpr float kStatusIconX           = 38.0f;
+    inline constexpr float kListIconSize          = 14.0f;
+    inline constexpr int kNameStartWithStatusIcon = 60;
+    inline constexpr int kNameStartDefault        = 38;
+    inline constexpr int kLoopIconSlotWidth       = 20;
+    inline constexpr int kLoopIconRightPad        = 6;
+    inline constexpr int kNameLoopIconGap         = 8;
+
+    struct ListNameCellLayout
+    {
+        juce::Rectangle<int> nameArea;
+        juce::Rectangle<float> loopIconArea;
+    };
+
+    inline juce::Rectangle<int> listNameCellArea (int panelWidth, int rowHeight, int nameStartX) noexcept
+    {
+        return { nameStartX, 0,
+                 juce::jmax (0, panelWidth - kTimeRemainingRightOffset - nameStartX), rowHeight };
+    }
+
+    /** Cắt lát từ phải: loop slot cố định + gap 8px — tên bài chỉ chiếm phần còn lại bên trái. */
+    inline ListNameCellLayout layoutListNameCell (juce::Rectangle<int> cellArea,
+                                                  bool reserveLoopSlot) noexcept
+    {
+        ListNameCellLayout layout;
+        auto area = cellArea;
+
+        if (reserveLoopSlot)
+        {
+            area.removeFromRight (kLoopIconRightPad);
+            const auto loopSlot = area.removeFromRight (kLoopIconSlotWidth);
+            const float iconSz = kListIconSize;
+            layout.loopIconArea = {
+                (float) loopSlot.getX() + ((float) loopSlot.getWidth() - iconSz) * 0.5f,
+                (float) loopSlot.getY() + ((float) loopSlot.getHeight() - iconSz) * 0.5f,
+                iconSz, iconSz
+            };
+            area.removeFromRight (kNameLoopIconGap);
+        }
+
+        layout.nameArea = area;
+        return layout;
+    }
+
+    inline ListNameCellLayout layoutListNameRow (int panelWidth, int rowHeight, int nameStartX,
+                                                 bool reserveLoopSlot) noexcept
+    {
+        return layoutListNameCell (listNameCellArea (panelWidth, rowHeight, nameStartX), reserveLoopSlot);
+    }
+
+    inline juce::Rectangle<float> statusIconBounds (int rowHeight) noexcept
+    {
+        const float y = ((float) rowHeight - kListIconSize) * 0.5f;
+        return { kStatusIconX, y, kListIconSize, kListIconSize };
+    }
+
+    inline juce::Rectangle<float> loopIconBounds (int panelWidth, int rowHeight) noexcept
+    {
+        return layoutListNameRow (panelWidth, rowHeight, kNameStartDefault, true).loopIconArea;
+    }
+
+    inline juce::Rectangle<int> timeRemainingBounds (int panelWidth, int height) noexcept
+    {
+        return { panelWidth - kTimeRemainingRightOffset, 0, kTimeRemainingWidth, height };
+    }
+
+    inline juce::Rectangle<int> totalDurationBounds (int panelWidth, int height) noexcept
+    {
+        return { panelWidth - kTotalDurationRightOffset, 0, kTotalDurationWidth, height };
+    }
+
+    /** Vẽ chữ số thời gian canh giữa tâm cột — BGM + CUE list dùng chung. */
+    inline void drawPlaylistTimeCell (juce::Graphics& g,
+                                      const juce::String& text,
+                                      juce::Rectangle<int> columnBounds) noexcept
+    {
+        g.drawText (text, columnBounds, juce::Justification::centred, true);
+    }
+
+    /** Tiêu đề cột playlist — xám đậm (sáng) / bạc (tối). */
+    inline juce::Colour playlistHeaderTextColour (bool isDark) noexcept
+    {
+        const auto pal = ShowTheme::get (isDark);
+        return isDark ? pal.textPrimary.withAlpha (0.82f)
+                      : pal.textPrimary.withAlpha (0.68f);
+    }
+
+    inline juce::Rectangle<int> titleBounds (int panelWidth, int height) noexcept
+    {
+        return { kTitleLeftPad, 0, juce::jmax (0, panelWidth - kTitleRightReserve), height };
+    }
+
+    inline int nameColumnMaxWidth (int panelWidth, int nameStartX,
+                                   bool reserveLoopSlot = false) noexcept
+    {
+        return layoutListNameRow (panelWidth, 1, nameStartX, reserveLoopSlot).nameArea.getWidth();
+    }
+
+    /** Phông chữ ô dữ liệu playlist — plain 14.5pt, đồng bộ Sidebar + BGM + CUE. */
+    inline juce::Font playlistCellFont() noexcept
+    {
+        return juce::Font (juce::FontOptions()
+                               .withName (ShowTheme::uiTypefaceName())
+                               .withHeight (kPlaylistCellFontSize)
+                               .withStyle ("Plain"));
+    }
+
+    inline juce::Font playlistCellFontBold() noexcept
+    {
+        return ShowTheme::fontBold (kPlaylistCellFontSize);
+    }
+
+    /** @deprecated alias — dùng playlistCellFont(). */
+    inline juce::Font playlistTrackNameFont() noexcept
+    {
+        return playlistCellFont();
+    }
+
+    /** Cùng cỡ/khối Roboto với tên bài — tránh lệch số nhỏ chữ to. */
+    inline juce::Font playlistTimerFont (bool bold = false) noexcept
+    {
+        return bold ? playlistCellFontBold() : playlistCellFont();
+    }
+
+    /** Tiêu đề cột playlist — Semi-Bold 15pt đồng bộ hàng con 14.5pt. */
+    inline juce::Font playlistHeaderFont() noexcept
+    {
+        return ShowTheme::fontBold (15.0f);
+    }
+
+    /** Typography dòng playlist — BGM (SoundPad) và CUE list dùng chung. */
+    struct PlaylistRowTypography
+    {
+        juce::Font index;
+        juce::Font cellPlain;
+        juce::Font timerPlain;
+        juce::Font timerBold;
+    };
+
+    inline PlaylistRowTypography makePlaylistRowTypography() noexcept
+    {
+        const auto plain = playlistCellFont();
+        return {
+            playlistCellFontBold(),
+            plain,
+            plain,
+            plain
+        };
+    }
+
+    inline void paintPlaylistRowBackground (juce::Graphics& g,
+                                          juce::Rectangle<int> bounds,
+                                          bool isRowSelected,
+                                          const ShowTheme::Palette& pal) noexcept
+    {
+        if (isRowSelected)
+        {
+            const auto frame = bounds.reduced (2).toFloat();
+
+            g.setColour (pal.accent.withAlpha (0.14f));
+            g.fillRoundedRectangle (frame, 4.0f);
+
+            g.setColour (pal.accent);
+            g.drawRoundedRectangle (frame, 4.0f, 1.2f);
+        }
+        else
+        {
+            g.setColour (pal.listRowBg);
+            g.fillRect (bounds);
+        }
+    }
+
+    /** Vạch/rail dọc mép trái ngoài cùng — BGM list (CUE dùng tagColour cùng bề rộng). */
+    inline void paintPlaylistRowLeftRail (juce::Graphics& g,
+                                          int rowHeight,
+                                          const ShowTheme::Palette& pal) noexcept
+    {
+        g.setColour (pal.borderSubtle);
+        g.fillRect (0, 0, kLeftRailWidth, rowHeight);
     }
 }

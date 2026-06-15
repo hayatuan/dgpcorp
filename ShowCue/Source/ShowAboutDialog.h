@@ -7,6 +7,14 @@
 
 namespace showcontrol::about
 {
+/** Chuỗi phiên bản marketing — đồng bộ ProjectInfo::versionString với nhãn Beta 2 Universal. */
+inline juce::String marketingVersionLine()
+{
+    return juce::String::fromUTF8 (u8"v")
+         + juce::String (ProjectInfo::versionString)
+         + juce::String::fromUTF8 (u8" - Beta 2 (Universal Binary)");
+}
+
 inline juce::File resolveBundledResourceFile (const juce::String& fileName)
 {
    #if JUCE_MAC
@@ -95,7 +103,7 @@ public:
         }
 
         donateQrComponent.setVisible (hasDonateQrImage);
-        setSize (560, 456);
+        setSize (560, 472);
     }
 
     std::function<void()> onCloseRequested;
@@ -118,7 +126,7 @@ public:
         auto text = leftTextArea;
 
         g.setColour (textPrimary);
-        g.setFont (ShowTheme::font (22.0f).boldened());
+        g.setFont (ShowTheme::fontBold (22.0f));
         g.drawFittedText (juce::String::fromUTF8 (u8"ShowCue"),
                           text.removeFromTop (28),
                           juce::Justification::centredLeft,
@@ -134,14 +142,20 @@ public:
 
         text.removeFromTop (6);
         g.setFont (ShowTheme::font (12.5f));
-        g.drawFittedText (showcontrol::localization::tr (u8"Phiên bản ")
-                              + juce::String (ProjectInfo::versionString),
+        g.drawFittedText (marketingVersionLine(),
                           text.removeFromTop (18),
                           juce::Justification::centredLeft,
                           1);
 
+        text.removeFromTop (4);
+        g.drawFittedText (juce::String::fromUTF8 (
+                              u8"CÔNG TY TNHH CÔNG NGHỆ KỸ THUẬT DƯƠNG GIA PHÁT (DGP CORP)"),
+                          text.removeFromTop (34),
+                          juce::Justification::centredLeft,
+                          2);
+
         text.removeFromTop (2);
-        g.drawFittedText (juce::String::fromUTF8 (u8"© 2026 HAYATUAN. Bảo lưu mọi quyền."),
+        g.drawFittedText (juce::String::fromUTF8 (u8"© 2026 DGP CORP. All rights reserved."),
                           text.removeFromTop (18),
                           juce::Justification::centredLeft,
                           2);

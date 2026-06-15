@@ -1,8 +1,10 @@
 #include "CueListPanel.h"
+#include "MainComponent.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowGraphicsSafe.h"
 #include "ShowFlatIcons.h"
 #include "HotkeyManager.h"
+#include "ShowKeyboardInput.h"
 #include "ShowLocalization.h"
 
 namespace
@@ -35,6 +37,18 @@ namespace
         sorted.sort();
         return sorted;
     }
+
+    /** Bulk delete: index cao → thấp — tránh lệch pha mảng khi xóa nhiều dòng. */
+    juce::Array<int> sparseSetToDescendingArray (const juce::SparseSet<int>& rows)
+    {
+        const auto ascending = sparseSetToSortedArray (rows);
+        juce::Array<int> descending;
+
+        for (int i = ascending.size(); --i >= 0;)
+            descending.add (ascending.getUnchecked (i));
+
+        return descending;
+    }
 }
 
 //==============================================================================
@@ -45,7 +59,7 @@ public:
     explicit CueListHeaderComponent (CueListPanel& ownerIn) : owner (ownerIn)
     {
         setInterceptsMouseClicks (false, false);
-        setOpaque (false);
+        setOpaque (true);
     }
 
     void paint (juce::Graphics& g) override
@@ -90,7 +104,11 @@ public:
         if (auto* vp = owner.listBox.getViewport())
         {
             const auto local = owner.listBox.getLocalPoint (&owner, owner.cueRowReorderPointerPos);
+            const int prevInsert = owner.cueRowReorderInsertIndex;
             owner.autoScrollListBoxForReorder (local);
+
+            if (owner.cueRowReorderInsertIndex != prevInsert)
+                owner.repaintReorderInsertLineStrips (prevInsert, owner.cueRowReorderInsertIndex);
         }
 
         repaint();
@@ -174,7 +192,33 @@ void CueListBox::mouseDrag (const juce::MouseEvent& e)
     if (owner.tryImmediateCueRowDrag (e))
         return; // TUYỆT ĐỐI không gọi juce::ListBox::mouseDrag (e) — chặn marquee xanh
 
+    const auto rel = e.getEventRelativeTo (this);
+    const int rowUnderDrag = hitRowIndexAt (rel.getMouseDownX(), rel.getMouseDownY());
+
+    if (rowUnderDrag >= 0 && rowUnderDrag < owner.cues.size())
+        return; // Chặn snapshot hàng dọc JUCE — chỉ Capsule Pill custom
+
     juce::ListBox::mouseDrag (e);
+}
+
+juce::ScaledImage CueListBox::createSnapshotOfRows (const juce::SparseSet<int>& rows, int& x, int& y)
+{
+    if (rows.isEmpty())
+        return juce::ListBox::createSnapshotOfRows (rows, x, y);
+
+    const int anchorRow = rows[0];
+    const juce::String title = owner.getCueTitleRowAtIndex (anchorRow);
+    const int itemCount = juce::jmax (1, rows.size());
+    juce::Image premiumDragProxy = CueListPanel::createPremiumCueDragImage (title, itemCount);
+
+    if (! premiumDragProxy.isValid())
+        return juce::ListBox::createSnapshotOfRows (rows, x, y);
+
+    const auto rowBounds = getRowPosition (anchorRow, true);
+    x = rowBounds.getCentreX() - premiumDragProxy.getWidth() / 2;
+    y = rowBounds.getCentreY() - premiumDragProxy.getHeight() / 2;
+
+    return juce::ScaledImage (premiumDragProxy);
 }
 
 void CueListBox::triggerCueDragSession (const juce::MouseEvent& e)
@@ -198,6 +242,258 @@ void CueListBox::mouseUp (const juce::MouseEvent& e)
     juce::ListBox::mouseUp (e);
 }
 
+bool CueListBox::keyPressed (const juce::KeyPress& key)
+{
+    if (owner.keyPressed (key))
+        return true;
+
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
+
+    // Delete/Backspace do MainComponent + CueListPanel xử lý — không để ListBox nuốt IME backspace.
+    if (keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey)
+        return false;
+
+    return juce::ListBox::keyPressed (key);
+}
+
+//==============================================================================
+/** Ô dòng CUE tái sử dụng — zero-allocation qua ListBoxModel::refreshComponentForRow. */
+class CueListPanel::CueListRowCell : public juce::Component
+{
+public:
+    class TrackLoopIconComponent : public juce::Component
+    {
+    public:
+        explicit TrackLoopIconComponent (CueListPanel& ownerIn) : owner (ownerIn)
+        {
+            setInterceptsMouseClicks (false, false);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            const auto& pal = ShowTheme::get (owner.isDarkMode);
+            showcontrol::icons::paintLoopIcon (g, getLocalBounds().toFloat(), pal.accent, true);
+        }
+
+    private:
+        CueListPanel& owner;
+    };
+
+    explicit CueListRowCell (CueListPanel& ownerIn)
+        : owner (ownerIn), trackLoopIconComponent (ownerIn)
+    {
+        setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (trackLoopIconComponent);
+    }
+
+    void updateRowData (int rowIndexIn, bool selected)
+    {
+        rowIndex = rowIndexIn;
+        rowSelected = selected;
+
+        bool isLooping = false;
+
+        if (owner.padAccessor != nullptr)
+        {
+            if (auto* pad = owner.padAccessor (rowIndex))
+                isLooping = pad->isLooping() && pad->hasAudioFile();
+        }
+
+        trackLoopIconComponent.setVisible (isLooping);
+        resized();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        if (! juce::isPositiveAndBelow (rowIndex, owner.cues.size()))
+            return;
+
+        layoutLoopIconInNameColumn();
+
+        const int width = getWidth();
+        const int height = getHeight();
+
+        juce::Graphics::ScopedSaveState rowOpacity (g);
+        juce::ignoreUnused (rowOpacity);
+
+        const auto cols = showcontrol::ui::ThemePaintColours::read (owner);
+        const auto& pal = ShowTheme::get (cols.isDark);
+        const auto& cue = owner.cues.getReference (rowIndex);
+
+        juce::Rectangle<int> row (0, 0, width, height);
+
+        showcontrol::bgmList::paintPlaylistRowBackground (g, row, rowSelected, pal);
+
+        SoundPad* pad = nullptr;
+        if (owner.padAccessor)
+            pad = owner.padAccessor (rowIndex);
+
+        const bool isActivePlay = (pad != nullptr && pad->isPlaying());
+        const bool isPaused     = (pad != nullptr && pad->isPaused());
+        const bool isRowLive    = isActivePlay || isPaused;
+
+        if (! showcontrol::colours::isDefaultTagColour (cue.tagColour))
+        {
+            g.setColour (cue.tagColour);
+            showcontrol::gfx::safeFillRect (g, 0, 0, showcontrol::bgmList::kLeftRailWidth, height);
+        }
+        else
+        {
+            showcontrol::bgmList::paintPlaylistRowLeftRail (g, height, pal);
+        }
+
+        g.setColour (cols.textMuted);
+        g.setFont (owner.rowFonts.indexBold);
+        g.drawText (juce::String (cue.cueNumber),
+                    showcontrol::bgmList::kIndexX, 0,
+                    showcontrol::bgmList::kIndexWidth, height,
+                    juce::Justification::centred);
+
+        int textX = showcontrol::bgmList::kNameStartDefault;
+
+        if (isActivePlay)
+        {
+            const auto iconBounds = showcontrol::bgmList::statusIconBounds (height);
+            showcontrol::icons::paintSpeakerIcon (g, iconBounds,
+                                                  showcontrol::icons::speakerPlayingColour (rowSelected),
+                                                  rowSelected);
+            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+        }
+        else if (isPaused)
+        {
+            const auto iconBounds = showcontrol::bgmList::statusIconBounds (height);
+            const auto iconCol = showcontrol::icons::iconColourForListState (rowSelected, cols.isDark);
+            showcontrol::icons::paintPauseIcon (g, iconBounds, iconCol);
+            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+        }
+
+        if (rowIndex == owner.armedIndex)
+        {
+            g.setColour (pal.accent);
+            g.drawRoundedRectangle (row.reduced (2, 2).toFloat(), 4.0f, 1.5f);
+        }
+
+        juce::Colour trackNameColour = pal.textMuted;
+
+        if (cue.isEnabled)
+        {
+            if (isPaused)
+                trackNameColour = pal.warning;
+            else if (isActivePlay)
+                trackNameColour = pal.success;
+            else
+                trackNameColour = pal.textPrimary;
+        }
+
+        g.setColour (trackNameColour);
+        g.setFont (owner.rowFonts.namePlain);
+
+        const bool reserveLoopSlot = owner.reserveLoopSlotForRow (rowIndex);
+        const auto nameLayout = showcontrol::bgmList::layoutListNameRow (width, height, textX, reserveLoopSlot);
+
+        if (owner.renamingTrackIndex != rowIndex)
+        {
+            const juce::String displayName = cue.name.isNotEmpty()
+                ? cue.name
+                : (pad != nullptr ? pad->getPadName() : juce::String());
+
+            g.drawText (displayName, nameLayout.nameArea, juce::Justification::centredLeft, true);
+        }
+
+        if (cue.autoFollow)
+        {
+            g.setColour (pal.success);
+            g.setFont (owner.rowFonts.autoFollow);
+            g.drawText (juce::String::fromUTF8 (u8"→"), width - 320, 0, 28, height, juce::Justification::centredRight);
+        }
+
+        const auto remainingRect = showcontrol::bgmList::timeRemainingBounds (width, height);
+        const auto elapsedRect   = showcontrol::bgmList::totalDurationBounds (width, height);
+        const bool hasTimedTrack = (pad != nullptr && pad->hasAudioFile());
+
+        if (hasTimedTrack || isRowLive)
+        {
+            juce::String remainingText = juce::String::fromUTF8 (u8"00:00.0");
+            juce::String elapsedText   = juce::String::fromUTF8 (u8"00:00.0");
+
+            if (isRowLive && juce::isPositiveAndBelow (rowIndex, owner.rowRemainingText.size()))
+                remainingText = owner.rowRemainingText.getReference (rowIndex);
+
+            if (isRowLive && juce::isPositiveAndBelow (rowIndex, owner.rowElapsedText.size()))
+                elapsedText = owner.rowElapsedText.getReference (rowIndex);
+
+            double remainingSecs = 0.0;
+
+            if (isRowLive && pad != nullptr)
+                remainingSecs = pad->getRemainingSeconds();
+
+            if (isActivePlay && remainingSecs <= 5.0)
+            {
+                if ((juce::Time::getMillisecondCounter() % 400) < 200)
+                    g.setColour (pal.danger);
+                else
+                    g.setColour (pal.textSecondary);
+            }
+            else
+            {
+                g.setColour (pal.textSecondary);
+            }
+
+            g.setFont (owner.rowFonts.timer);
+            showcontrol::bgmList::drawPlaylistTimeCell (g, remainingText, remainingRect);
+
+            g.setColour (pal.textMuted);
+            g.setFont (owner.rowFonts.timer);
+            showcontrol::bgmList::drawPlaylistTimeCell (g, elapsedText, elapsedRect);
+        }
+
+        g.setColour (pal.borderSubtle);
+        g.drawHorizontalLine (height - 1, 0.0f, (float) width);
+    }
+
+    void resized() override
+    {
+        layoutLoopIconInNameColumn();
+    }
+
+private:
+    int nameColumnStartX() const
+    {
+        int textX = showcontrol::bgmList::kNameStartDefault;
+
+        if (owner.padAccessor != nullptr)
+        {
+            if (auto* pad = owner.padAccessor (rowIndex))
+            {
+                if (pad->isPlaying() || pad->isPaused())
+                    textX = showcontrol::bgmList::kNameStartWithStatusIcon;
+            }
+        }
+
+        return textX;
+    }
+
+    /** Vùng cột 1 (tên cue) — kết thúc trước cột thời gian, đồng bộ BGM list. */
+    juce::Rectangle<int> nameColumnArea() const
+    {
+        return showcontrol::bgmList::listNameCellArea (getWidth(), getHeight(), nameColumnStartX());
+    }
+
+    void layoutLoopIconInNameColumn()
+    {
+        auto cellArea = nameColumnArea();
+        cellArea.removeFromRight (showcontrol::bgmList::kLoopIconRightPad);
+        auto loopIconArea = cellArea.removeFromRight (showcontrol::bgmList::kLoopIconSlotWidth);
+        trackLoopIconComponent.setBounds (loopIconArea.withSizeKeepingCentre (16, 16));
+    }
+
+    CueListPanel& owner;
+    int rowIndex = -1;
+    bool rowSelected = false;
+    TrackLoopIconComponent trackLoopIconComponent;
+};
+
 //==============================================================================
 class CueListPanel::CueListBoxModel : public juce::ListBoxModel
 {
@@ -209,142 +505,36 @@ public:
         return owner.cues.size();
     }
 
-    void paintListBoxItem (int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected) override
+    void paintListBoxItem (int, juce::Graphics&, int, int, bool) override
+    {
+        // CueListRowCell vẽ toàn bộ nội dung — tránh double-paint.
+    }
+
+    juce::Component* refreshComponentForRow (int rowNumber, bool isRowSelected,
+                                             juce::Component* existingComponentToUpdate) override
     {
         if (! juce::isPositiveAndBelow (rowNumber, owner.cues.size()))
-            return;
-
-        // Làm mờ dòng nguồn khi reorder — đồng bộ BGM list (setAlpha 0.30 trên SoundPad).
-        juce::Graphics::ScopedSaveState rowOpacity (g);
-        if (owner.cueRowReorderActive && owner.listBox.isRowSelected (rowNumber))
-            g.setOpacity (0.30f);
-
-        const auto cols = showcontrol::ui::ThemePaintColours::read (owner);
-        const auto& pal = ShowTheme::get (cols.isDark);
-        const auto& cue = owner.cues.getReference (rowNumber);
-
-        juce::Rectangle<int> row (0, 0, width, height);
-
-        if (rowIsSelected)
-            g.setColour (cols.rowSelected);
-        else if (rowNumber % 2 == 0)
-            g.setColour (cols.listRowBg);
-        else
-            g.setColour (cols.isDark ? cols.panelBg : cols.windowBg);
-        showcontrol::gfx::safeFillRect (g, row);
-
-        SoundPad* pad = nullptr;
-        if (owner.padAccessor)
-            pad = owner.padAccessor (rowNumber);
-
-        const bool isActivePlay = (pad != nullptr && pad->isPlaying());
-        const bool isPaused     = (pad != nullptr && pad->isPaused());
-        const bool isRowLive    = isActivePlay || isPaused;
-
-        if (isRowLive)
         {
-            g.setColour (pal.success.withAlpha (0.16f));
-            showcontrol::gfx::safeFillRect (g, row.reduced (0, 1));
-            g.setColour (pal.success);
-            showcontrol::gfx::safeFillRect (g, 0, 4, 3, height - 8);
+            delete existingComponentToUpdate;
+            return nullptr;
         }
 
-        g.setColour (cue.tagColour);
-        showcontrol::gfx::safeFillRect (g, isActivePlay ? 3 : 0, 0, 4, height);
+        auto* cell = dynamic_cast<CueListRowCell*> (existingComponentToUpdate);
 
-        g.setColour (cols.textMuted);
-        g.setFont (ShowTheme::fontBold (11.0f));
-        g.drawText (juce::String (cue.cueNumber),
-                    showcontrol::bgmList::kIndexX, 0,
-                    showcontrol::bgmList::kIndexWidth, height,
-                    juce::Justification::centred);
+        if (cell == nullptr)
+            cell = new CueListRowCell (owner);
 
-        int textX = showcontrol::bgmList::kNameStartDefault;
-        if (isActivePlay)
-        {
-            const auto iconBounds = showcontrol::bgmList::statusIconBounds (height);
-            showcontrol::icons::paintSpeakerIcon (g, iconBounds,
-                                                  showcontrol::icons::speakerPlayingColour (rowIsSelected),
-                                                  rowIsSelected);
-            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
-        }
-        else if (isPaused)
-        {
-            const auto iconBounds = showcontrol::bgmList::statusIconBounds (height);
-            const auto iconCol = showcontrol::icons::iconColourForListState (rowIsSelected, cols.isDark);
-            showcontrol::icons::paintPauseIcon (g, iconBounds, iconCol);
-            textX = showcontrol::bgmList::kNameStartWithStatusIcon;
-        }
-
-        if (rowNumber == owner.armedIndex)
-        {
-            g.setColour (pal.accent);
-            g.drawRoundedRectangle (row.reduced (2, 2).toFloat(), 4.0f, 1.5f);
-        }
-
-        const bool highlightRow = isRowLive || rowIsSelected;
-        g.setColour (cue.isEnabled ? (highlightRow ? (isPaused ? pal.warning : pal.success) : pal.textPrimary)
-                                   : pal.textMuted);
-        g.setFont (ShowTheme::font (13.5f, highlightRow ? "Bold" : "Plain"));
-
-        const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (width, textX);
-
-        if (owner.renamingTrackIndex != rowNumber)
-        {
-            const juce::String displayName = cue.name.isNotEmpty()
-                ? cue.name
-                : (pad != nullptr ? pad->getPadName() : juce::String());
-
-            g.drawText (displayName, textX, 0, nameMaxW, height, juce::Justification::centredLeft, true);
-        }
-
-        if (cue.autoFollow)
-        {
-            g.setColour (pal.success);
-            g.setFont (ShowTheme::fontBold (11.0f));
-            g.drawText (juce::String::fromUTF8 (u8"→"), width - 320, 0, 28, height, juce::Justification::centredRight);
-        }
-
-        double remainingSec = 0.0;
-        double elapsedSec   = 0.0;
-
-        if (pad != nullptr && pad->hasAudioFile())
-        {
-            if (isActivePlay)
-            {
-                elapsedSec   = pad->getElapsedSeconds();
-                remainingSec = pad->getRemainingSeconds();
-            }
-            else if (isPaused)
-            {
-                elapsedSec   = pad->getElapsedSeconds();
-                remainingSec = 0.0;
-            }
-            else
-            {
-                elapsedSec   = 0.0;
-                remainingSec = 0.0;
-            }
-        }
-
-        g.setColour (pal.textSecondary);
-        g.setFont (ShowTheme::timerFont (12.5f, true));
-        const auto remainingRect = showcontrol::bgmList::timeRemainingBounds (width, height);
-        g.drawText (formatCueTimeString (remainingSec), remainingRect, juce::Justification::centred);
-
-        g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::timerFont (12.5f));
-        const auto elapsedRect = showcontrol::bgmList::totalDurationBounds (width, height);
-        g.drawText (formatCueTimeString (elapsedSec), elapsedRect, juce::Justification::centred);
-
-        g.setColour (pal.borderSubtle);
-        g.drawHorizontalLine (height - 1, 0.0f, (float) width);
+        cell->updateRowData (rowNumber, isRowSelected);
+        return cell;
     }
 
     void listBoxItemClicked (int row, const juce::MouseEvent& e) override
     {
         if (e.mods.isPopupMenu())
         {
+            if (! juce::isPositiveAndBelow (row, owner.cues.size()))
+                return;
+
             owner.listBox.selectRow (row, false, true);
             owner.selectedIndex = row;
             owner.fireSelectionFromListBox();
@@ -376,6 +566,12 @@ public:
 
     void backgroundClicked (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu())
+        {
+            owner.showListBackgroundSortMenu (e);
+            return;
+        }
+
         const auto local = owner.listBox.getLocalPoint (e.eventComponent, e.getPosition());
         owner.beginCueMarquee (local, e.mods);
     }
@@ -383,13 +579,19 @@ public:
     void selectedRowsChanged (int lastRowSelected) override
     {
         juce::ignoreUnused (lastRowSelected);
+
+        if (owner.shouldSilenceListenersForStateOp())
+            return;
+
         owner.fireSelectionFromListBox();
     }
 
-    juce::var getDragSourceDescription (const juce::SparseSet<int>&) override
+    juce::var getDragSourceDescription (const juce::SparseSet<int>& selectedRows) override
     {
-        // Reorder nội bộ qua CueListBox::mouseDrag (mirror SoundPad) — không dùng native ListBox DnD.
-        return juce::var();
+        if (selectedRows.isEmpty())
+            return juce::var();
+
+        return juce::var (showcontrol::crossdrag::buildLocalRowReorderDragToken (selectedRows[0]));
     }
 
     bool mayDragToExternalWindows() const override { return false; }
@@ -402,11 +604,11 @@ private:
 CueListPanel::CueListPanel()
     : listBox ("CueListBox", *this)
 {
+    setOpaque (true);
     setWantsKeyboardFocus (true);
 
     headerComponent = std::make_unique<CueListHeaderComponent> (*this);
     addAndMakeVisible (*headerComponent);
-    headerComponent->setVisible (false);
 
     reorderOverlay = std::make_unique<CueReorderOverlay> (*this);
     addChildComponent (*reorderOverlay);
@@ -471,22 +673,134 @@ void CueListPanel::refreshLocalizedText()
     listBox.repaint();
 }
 
+void CueListPanel::rebuildRowPaintFonts()
+{
+    const auto typography = showcontrol::bgmList::makePlaylistRowTypography();
+
+    rowFonts.indexBold  = typography.index;
+    rowFonts.namePlain  = typography.cellPlain;
+    rowFonts.nameBold   = typography.cellPlain;
+    rowFonts.timer      = typography.timerPlain;
+    rowFonts.timerBold  = typography.timerBold;
+    rowFonts.autoFollow = ShowTheme::fontBold (11.0f);
+}
+
+bool CueListPanel::shouldSilenceListenersForStateOp() const noexcept
+{
+    if (auto* main = findParentComponentOfClass<MainComponent>())
+        return main->isOperatingState();
+
+    return false;
+}
+
+bool CueListPanel::reserveLoopSlotForRow (int rowIndex) const noexcept
+{
+    if (padAccessor == nullptr || ! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return false;
+
+    if (auto* pad = padAccessor (rowIndex))
+        return pad->isLooping() && pad->hasAudioFile();
+
+    return false;
+}
+
+void CueListPanel::repaintReorderSourceRows()
+{
+    for (int i = 0; i < dragSourceRows.size(); ++i)
+        listBox.repaintRow (dragSourceRows[i]);
+}
+
+void CueListPanel::syncRowLiveTextCaches()
+{
+    rowRemainingText.resize (cues.size());
+    rowElapsedText.resize (cues.size());
+
+    if (! padAccessor)
+        return;
+
+    for (int i = 0; i < cues.size(); ++i)
+    {
+        auto* pad = padAccessor (i);
+
+        if (pad == nullptr || ! pad->isTransportActive())
+        {
+            rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
+            rowElapsedText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
+            continue;
+        }
+
+        if (pad->isPlaying())
+        {
+            rowRemainingText.set (i, formatCueTimeString (pad->getRemainingSeconds()));
+            rowElapsedText.set (i, formatCueTimeString (pad->getElapsedSeconds()));
+        }
+        else if (pad->isPaused())
+        {
+            rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
+            rowElapsedText.set (i, formatCueTimeString (pad->getElapsedSeconds()));
+        }
+        else
+        {
+            rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
+            rowElapsedText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
+        }
+    }
+}
+
 void CueListPanel::updateTheme (bool isDark)
 {
     isDarkMode = isDark;
+    rebuildRowPaintFonts();
     ShowControlLookAndFeel::applyTrackNameLabelStyle (trackNameLabel, isDark,
                                                       renamingTrackIndex >= 0
                                                           && listBox.isRowSelected (renamingTrackIndex));
     listBox.repaint();
+
+    if (headerComponent != nullptr)
+        headerComponent->repaint();
+
     repaint();
+}
+
+bool CueListPanel::shouldShowColumnHeader() const noexcept
+{
+    return ! cues.isEmpty();
+}
+
+void CueListPanel::updateListBoxContentIfLaidOut() noexcept
+{
+    if (listBox.getWidth() > 0 && listBox.getHeight() > 0)
+        listBox.updateContent();
 }
 
 void CueListPanel::refreshListBoxData()
 {
-    listBox.updateContent();
+    resized();
+    updateListBoxContentIfLaidOut();
+    syncHeaderToListScrollbar();
     resetListScrollToTop();
     listBox.repaint();
     repaint();
+}
+
+void CueListPanel::syncCueTagColourAt (int index, juce::Colour colour)
+{
+    if (! juce::isPositiveAndBelow (index, cues.size()))
+        return;
+
+    cues.getReference (index).tagColour = showcontrol::colours::snapToPalette (colour);
+    repaintCueRow (index);
+}
+
+void CueListPanel::repaintCueRow (int rowIndex)
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return;
+
+    if (auto* cell = dynamic_cast<CueListRowCell*> (listBox.getComponentForRowNumber (rowIndex)))
+        cell->updateRowData (rowIndex, listBox.isRowSelected (rowIndex));
+    else
+        listBox.repaintRow (rowIndex);
 }
 
 void CueListPanel::resetListScrollToTop()
@@ -498,6 +812,7 @@ void CueListPanel::resetListScrollToTop()
 void CueListPanel::setCues (const juce::Array<CueItem>& newCues)
 {
     cues = newCues;
+    syncRowLiveTextCaches();
     refreshListBoxData();
     syncLiveTimer();
 }
@@ -505,8 +820,74 @@ void CueListPanel::setCues (const juce::Array<CueItem>& newCues)
 void CueListPanel::addCue (const CueItem& item)
 {
     cues.add (item);
-    listBox.updateContent();
-    listBox.repaint();
+        updateListBoxContentIfLaidOut();
+        resized();
+        listBox.repaint();
+}
+
+void CueListPanel::removeCueFromDataModelAtIndex (int rowIndex)
+{
+    if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
+        return;
+
+    cues.remove (rowIndex);
+
+    if (selectedIndex >= cues.size())
+        selectedIndex = cues.size() - 1;
+}
+
+void CueListPanel::applySelectionAnchorAfterRowRemoval (int firstDeletedRow)
+{
+    if (cues.isEmpty())
+    {
+        selectedIndex = -1;
+        listBox.deselectAllRows();
+        return;
+    }
+
+    const int targetRow = juce::jmin (juce::jmax (0, firstDeletedRow - 1), cues.size() - 1);
+    setSelectedIndex (targetRow);
+}
+
+void CueListPanel::updateTableContent()
+{
+    refreshListBoxData();
+}
+
+void CueListPanel::deleteSelectedCues()
+{
+    removeSelectedCues();
+}
+
+void CueListPanel::removeSelectedCues()
+{
+    const juce::SparseSet<int> selectedRows = listBox.getSelectedRows();
+
+    if (selectedRows.isEmpty())
+        return;
+
+    const auto rowsDescending = sparseSetToDescendingArray (selectedRows);
+    const auto rowsAscending  = sparseSetToSortedArray (selectedRows);
+
+    if (onCueSelectionChanged)
+        onCueSelectionChanged (rowsAscending);
+
+    if (onDeleteKeyPressed)
+    {
+        onDeleteKeyPressed();
+        return;
+    }
+
+    const int lowestDeletedRow = rowsDescending.getLast();
+
+    for (const int row : rowsDescending)
+        removeCueFromDataModelAtIndex (row);
+
+    updateTableContent();
+    applySelectionAnchorAfterRowRemoval (lowestDeletedRow);
+
+    if (auto* mainComp = findParentComponentOfClass<MainComponent>())
+        mainComp->triggerSave();
 }
 
 void CueListPanel::removeCue (int index)
@@ -517,7 +898,8 @@ void CueListPanel::removeCue (int index)
         if (selectedIndex >= cues.size())
             selectedIndex = cues.size() - 1;
 
-        listBox.updateContent();
+        resized();
+        updateListBoxContentIfLaidOut();
         listBox.repaint();
         syncLiveTimer();
     }
@@ -555,8 +937,14 @@ void CueListPanel::setPlayingIndex (int idx)
 {
     if (playingIndex != idx)
     {
+        const int prev = playingIndex;
         playingIndex = idx;
-        listBox.repaint();
+
+        if (prev >= 0)
+            listBox.repaintRow (prev);
+
+        if (playingIndex >= 0)
+            listBox.repaintRow (playingIndex);
     }
 
     syncLiveTimer();
@@ -566,8 +954,14 @@ void CueListPanel::setArmedIndex (int idx)
 {
     if (armedIndex != idx)
     {
+        const int prev = armedIndex;
         armedIndex = idx;
-        listBox.repaint();
+
+        if (prev >= 0)
+            listBox.repaintRow (prev);
+
+        if (armedIndex >= 0)
+            listBox.repaintRow (armedIndex);
     }
 }
 
@@ -579,13 +973,13 @@ const CueItem* CueListPanel::getCue (int index) const
 void CueListPanel::setPadAccessor (std::function<SoundPad* (int index)> accessor)
 {
     padAccessor = std::move (accessor);
-    listBox.repaint();
+    updateListBoxContentIfLaidOut();
+    syncHeaderToListScrollbar();
 }
 
 void CueListPanel::notifyPlaybackActivity()
 {
     syncLiveTimer();
-    listBox.repaint();
 }
 
 bool CueListPanel::handleTransportKey (const juce::KeyPress& key)
@@ -593,7 +987,7 @@ bool CueListPanel::handleTransportKey (const juce::KeyPress& key)
     if (! isVisible())
         return false;
 
-    const int keyCode = key.getKeyCode();
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
 
     if (keyCode == juce::KeyPress::spaceKey || keyCode == 32)
     {
@@ -603,9 +997,7 @@ bool CueListPanel::handleTransportKey (const juce::KeyPress& key)
         return true;
     }
 
-    const auto ch = key.getTextCharacter();
-
-    if (ch == 'p' || ch == 'P')
+    if (keyCode == (int) 'p' || keyCode == (int) 'P')
     {
         if (selectedIndex >= 0 && onCueListPause)
             onCueListPause (selectedIndex);
@@ -613,7 +1005,7 @@ bool CueListPanel::handleTransportKey (const juce::KeyPress& key)
         return true;
     }
 
-    if (ch == 's' || ch == 'S')
+    if (keyCode == (int) 's' || keyCode == (int) 'S')
     {
         if (selectedIndex >= 0 && onCueListStop)
             onCueListStop (selectedIndex);
@@ -629,9 +1021,9 @@ int CueListPanel::getPreferredHeight() const
     if (cues.isEmpty())
         return kRowH;
 
-    return cueListHasLoadedContent (cues)
+    return shouldShowColumnHeader()
                ? (kHeaderH + kHeaderGap + cues.size() * kRowH)
-               : kRowH;
+               : cues.size() * kRowH;
 }
 
 void CueListPanel::paint (juce::Graphics& g)
@@ -658,23 +1050,57 @@ void CueListPanel::paint (juce::Graphics& g)
     }
 }
 
+void CueListPanel::syncHeaderToListScrollbar()
+{
+    if (headerComponent == nullptr || ! headerComponent->isVisible())
+        return;
+
+    int scrollbarTrim = 0;
+
+    if (listBox.isShowing())
+    {
+        const auto& vBar = listBox.getVerticalScrollBar();
+
+        if (vBar.isVisible())
+            scrollbarTrim = vBar.getWidth();
+    }
+
+    auto headerBounds = headerComponent->getBounds();
+    headerComponent->setBounds (headerBounds.getX(), headerBounds.getY(),
+                                std::max (0, listBox.getWidth() - scrollbarTrim),
+                                headerBounds.getHeight());
+}
+
 void CueListPanel::resized()
 {
     auto area = getLocalBounds();
-    const bool showHeader = cueListHasLoadedContent (cues);
+    const bool showHeader = shouldShowColumnHeader();
+
+    juce::Rectangle<int> headerArea;
+
+    if (showHeader)
+        headerArea = area.removeFromTop (kHeaderH);
+
+    if (showHeader)
+        area.removeFromTop (kHeaderGap);
+
+    listBox.setBounds (std::max (0, area.getX()),
+                       std::max (0, area.getY()),
+                       std::max (0, area.getWidth()),
+                       std::max (0, area.getHeight()));
 
     if (headerComponent != nullptr)
     {
         headerComponent->setVisible (showHeader);
 
         if (showHeader)
-            headerComponent->setBounds (area.removeFromTop (kHeaderH));
+        {
+            headerComponent->setBounds (headerArea);
+            headerComponent->toFront (false);
+        }
     }
 
-    if (showHeader)
-        area.removeFromTop (kHeaderGap);
-
-    listBox.setBounds (area);
+    syncHeaderToListScrollbar();
     updateCueReorderOverlayBounds();
 
     if (renamingTrackIndex >= 0)
@@ -686,42 +1112,90 @@ void CueListPanel::updateCueReorderOverlayBounds()
     if (reorderOverlay == nullptr)
         return;
 
-    reorderOverlay->setBounds (getLocalBounds());
+    reorderOverlay->setBounds (listBox.getBounds());
     reorderOverlay->toFront (false);
+
+    if (headerComponent != nullptr && headerComponent->isVisible())
+        headerComponent->toFront (false);
 }
 
 juce::Rectangle<int> CueListPanel::getCueListInsertLineBounds() const
 {
+    const int rowHeight = listBox.getRowHeight();
+
+    if (rowHeight <= 0)
+        return {};
+
     const int n = cues.size();
     const int target = juce::jlimit (0, n, cueRowReorderInsertIndex);
-    const int width = getWidth();
-
-    if (target == n)
-    {
-        if (n > 0)
-        {
-            const auto rowPos = listBox.getRowPosition (n - 1, true);
-            const auto listBounds = listBox.getBounds();
-            return { 0, listBounds.getY() + rowPos.getBottom(), width, 0 };
-        }
-
-        return {};
-    }
-
-    const auto rowPos = listBox.getRowPosition (target, true);
     const auto listBounds = listBox.getBounds();
-    return { 0, listBounds.getY() + rowPos.getY(), width, 0 };
+
+    int scrollY = 0;
+
+    if (auto* viewport = listBox.getViewport())
+        scrollY = viewport->getViewPositionY();
+
+    const int lineY = listBounds.getY() + target * rowHeight - scrollY;
+    return { 0, lineY, getWidth(), 0 };
+}
+
+void CueListPanel::repaintReorderInsertLineStrip (int insertIndex) const
+{
+    if (insertIndex < 0)
+        return;
+
+    const int rowHeight = listBox.getRowHeight();
+
+    if (rowHeight <= 0)
+        return;
+
+    const auto listBounds = listBox.getBounds();
+    int scrollY = 0;
+
+    if (auto* viewport = listBox.getViewport())
+        scrollY = viewport->getViewPositionY();
+
+    const int lineY = listBounds.getY() + insertIndex * rowHeight - scrollY;
+    constexpr int margin = 12;
+    const_cast<CueListPanel*> (this)->repaint (0, lineY - margin, getWidth(), margin * 2);
+}
+
+void CueListPanel::repaintReorderInsertLineStrips (int prevIndex, int nextIndex) const
+{
+    if (prevIndex >= 0)
+        repaintReorderInsertLineStrip (prevIndex);
+
+    if (nextIndex >= 0 && nextIndex != prevIndex)
+        repaintReorderInsertLineStrip (nextIndex);
+}
+
+void CueListPanel::repaintDragCapsuleProxyStrip (juce::Point<int> centreInPanel) const
+{
+    constexpr int halfW = 120;
+    constexpr int halfH = 19;
+    const_cast<CueListPanel*> (this)->repaint (centreInPanel.x - halfW,
+                                               centreInPanel.y - halfH,
+                                               halfW * 2,
+                                               halfH * 2);
 }
 
 void CueListPanel::paintCueReorderOverlay (juce::Graphics& g) const
 {
     paintMarquee (g);
 
-    if (! cueRowReorderActive || cueRowReorderInsertIndex < 0)
+    if (! cueRowReorderActive || cueJuceDragStarted)
         return;
 
-    paintReorderInsertLine (g);
-    paintCueRowReorderGhost (g);
+    const int anchorRow = dragSourceAnchorRow >= 0
+                              ? dragSourceAnchorRow
+                              : (dragSourceRows.isEmpty() ? -1 : dragSourceRows[0]);
+    const int itemCount = juce::jmax (1, dragSourceRows.size());
+
+    paintPremiumCueDragCapsuleAt (g,
+                                  (float) cueRowReorderPointerPos.x,
+                                  (float) cueRowReorderPointerPos.y,
+                                  getCueTitleRowAtIndex (anchorRow),
+                                  itemCount);
 }
 
 bool CueListPanel::keyPressed (const juce::KeyPress& key)
@@ -729,17 +1203,13 @@ bool CueListPanel::keyPressed (const juce::KeyPress& key)
     if (handleTransportKey (key))
         return true;
 
-    const int keyCode = key.getKeyCode();
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
 
-    if (keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey)
+    if ((keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey)
+        && key.getModifiers().isCommandDown())
     {
-        if (onDeleteKeyPressed)
-        {
-            onDeleteKeyPressed();
-            return true;
-        }
-
-        return false;
+        deleteSelectedCues();
+        return true;
     }
 
     const int arrowCode = HotkeyManager::normalizeArrowKeyCode (keyCode);
@@ -763,10 +1233,33 @@ bool CueListPanel::keyPressed (const juce::KeyPress& key)
 
 void CueListPanel::timerCallback()
 {
-    if (anyRowTransportActive())
-        listBox.repaint();
-    else
+    if (! padAccessor)
+    {
         stopTimer();
+        return;
+    }
+
+    bool anyActive = false;
+
+    for (int i = 0; i < cues.size(); ++i)
+    {
+        if (auto* pad = padAccessor (i); pad != nullptr && pad->isTransportActive())
+            anyActive = true;
+    }
+
+    if (! anyActive)
+    {
+        stopTimer();
+        return;
+    }
+
+    syncRowLiveTextCaches();
+
+    for (int i = 0; i < cues.size(); ++i)
+    {
+        if (auto* pad = padAccessor (i); pad != nullptr && pad->isTransportActive())
+            listBox.repaintRow (i);
+    }
 }
 
 void CueListPanel::syncLiveTimer()
@@ -805,8 +1298,8 @@ void CueListPanel::paintHeader (juce::Graphics& g, juce::Rectangle<int> bounds) 
     g.setColour (pal.border);
     g.drawHorizontalLine (bounds.getBottom() - 1, (float) bounds.getX(), (float) bounds.getRight());
 
-    g.setColour (pal.textSecondary);
-    g.setFont (ShowTheme::fontBold (13.0f));
+    g.setColour (showcontrol::bgmList::playlistHeaderTextColour (cols.isDark));
+    g.setFont (showcontrol::bgmList::playlistHeaderFont());
 
     const auto titleRect     = showcontrol::bgmList::titleBounds (bounds.getWidth(), bounds.getHeight())
                                    .translated (bounds.getX(), bounds.getY());
@@ -816,13 +1309,40 @@ void CueListPanel::paintHeader (juce::Graphics& g, juce::Rectangle<int> bounds) 
                                    .translated (bounds.getX(), bounds.getY());
 
     g.drawText (showcontrol::localization::tr (u8"TÊN CUE KỊCH BẢN"), titleRect, juce::Justification::centredLeft);
-    g.drawText (showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect, juce::Justification::centred);
-    g.drawText (showcontrol::localization::tr (u8"ĐÃ CHẠY"), elapsedRect, juce::Justification::centred);
+    showcontrol::bgmList::drawPlaylistTimeCell (g, showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect);
+    showcontrol::bgmList::drawPlaylistTimeCell (g, showcontrol::localization::tr (u8"ĐÃ CHẠY"), elapsedRect);
 }
 
 void CueListPanel::showTrackContextMenu (int cueIndex)
 {
+    if (! juce::isPositiveAndBelow (cueIndex, cues.size()))
+        return;
+
+    const bool canSort = ((canSortRows == nullptr) || canSortRows()) && cues.size() > 1;
+
     juce::PopupMenu menu;
+    auto& colourRef = cues.getReference (cueIndex).tagColour;
+
+    menu.addCustomItem (1,
+                        showcontrol::colours::makeTagColourMenuRow (
+                            colourRef,
+                            [this, cueIndex] (juce::Colour picked)
+                            {
+                                if (onCueColorChanged)
+                                    onCueColorChanged (cueIndex, picked);
+
+                                repaintCueRow (cueIndex);
+                            }),
+                        nullptr,
+                        juce::String::fromUTF8 (u8" "));
+
+    if (canSort)
+    {
+        menu.addItem ((int) TrackMenuId::sortAscending,
+                      juce::String::fromUTF8 (u8"Sắp xếp hàng kịch bản tăng dần (A-Z) 🔤"));
+        menu.addSeparator();
+    }
+
     menu.addItem ((int) TrackMenuId::renameTrack,  showcontrol::localization::tr (u8"Đổi tên bài hát"));
     menu.addItem ((int) TrackMenuId::replaceFile, showcontrol::localization::tr (u8"Thay đổi file nhạc..."));
     menu.addItem ((int) TrackMenuId::duplicate,   showcontrol::localization::tr (u8"Nhân bản"));
@@ -835,6 +1355,12 @@ void CueListPanel::showTrackContextMenu (int cueIndex)
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&listBox).withMousePosition(),
                         [this, cueIndex] (int result)
                         {
+                            if (result == (int) TrackMenuId::sortAscending)
+                            {
+                                sortCueRowsAscending();
+                                return;
+                            }
+
                             if (result == (int) TrackMenuId::renameTrack)
                             {
                                 beginTrackRename (cueIndex);
@@ -844,6 +1370,42 @@ void CueListPanel::showTrackContextMenu (int cueIndex)
                             if (onTrackMenuResult)
                                 onTrackMenuResult (cueIndex, result);
                         });
+}
+
+void CueListPanel::showListBackgroundSortMenu (const juce::MouseEvent& e)
+{
+    juce::ignoreUnused (e);
+
+    if (canSortRows != nullptr && ! canSortRows())
+        return;
+
+    juce::PopupMenu menu;
+    menu.addItem (1, juce::String::fromUTF8 (u8"Sắp xếp hàng kịch bản tăng dần (A-Z) 🔤"));
+
+    juce::Component::SafePointer<CueListPanel> safeThis (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&listBox).withMousePosition(),
+                        [safeThis] (int result)
+                        {
+                            if (safeThis == nullptr || result != 1)
+                                return;
+
+                            safeThis->sortCueRowsAscending();
+                        });
+}
+
+void CueListPanel::sortCueRowsAscending()
+{
+    if (canSortRows != nullptr && ! canSortRows())
+        return;
+
+    if (onSortRowsAscending != nullptr)
+        onSortRowsAscending();
+
+    listBox.deselectAllRows();
+    selectedIndex = -1;
+    fireSelectionFromListBox();
+    updateTableContent();
 }
 
 bool CueListPanel::isPointInTrackNameColumn (int rowIndex, int localXInListBox) const
@@ -862,8 +1424,9 @@ bool CueListPanel::isPointInTrackNameColumn (int rowIndex, int localXInListBox) 
         }
     }
 
-    const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (listBox.getWidth(), textX);
-    return localXInListBox >= textX && localXInListBox < textX + nameMaxW;
+    const auto nameLayout = showcontrol::bgmList::layoutListNameRow (listBox.getWidth(), listBox.getRowHeight(),
+                                                                     textX, reserveLoopSlotForRow (rowIndex));
+    return nameLayout.nameArea.contains (localXInListBox, listBox.getRowHeight() / 2);
 }
 
 void CueListPanel::layoutTrackNameLabelForRow (int rowIndex)
@@ -885,8 +1448,13 @@ void CueListPanel::layoutTrackNameLabelForRow (int rowIndex)
         }
     }
 
-    const int nameMaxW = showcontrol::bgmList::nameColumnMaxWidth (listBox.getWidth(), textX);
-    trackNameLabel.setBounds (rowBounds.getX() + textX, rowBounds.getY(), nameMaxW, rowBounds.getHeight());
+    const auto nameLayout = showcontrol::bgmList::layoutListNameRow (listBox.getWidth(), rowBounds.getHeight(),
+                                                                     textX, reserveLoopSlotForRow (rowIndex));
+    trackNameLabel.setBounds (rowBounds.getX() + nameLayout.nameArea.getX(),
+                              rowBounds.getY(),
+                              nameLayout.nameArea.getWidth(),
+                              rowBounds.getHeight());
+    trackNameLabel.setJustificationType (juce::Justification::centredLeft);
 }
 
 void CueListPanel::beginTrackRename (int rowIndex)
@@ -927,6 +1495,9 @@ void CueListPanel::beginTrackRename (int rowIndex)
 
 bool CueListPanel::commitTrackRenameFromLabel (int rowIndex)
 {
+    if (shouldSilenceListenersForStateOp())
+        return false;
+
     if (! juce::isPositiveAndBelow (rowIndex, cues.size()))
         return false;
 
@@ -968,6 +1539,9 @@ bool CueListPanel::commitTrackRenameFromLabel (int rowIndex)
 
 void CueListPanel::labelTextChanged (juce::Label* labelThatHasChanged)
 {
+    if (shouldSilenceListenersForStateOp())
+        return;
+
     if (labelThatHasChanged != &trackNameLabel)
         return;
 
@@ -995,6 +1569,9 @@ void CueListPanel::editorHidden (juce::Label* label, juce::TextEditor& editor)
 {
     juce::ignoreUnused (editor);
 
+    if (shouldSilenceListenersForStateOp())
+        return;
+
     if (label != &trackNameLabel)
         return;
 
@@ -1017,6 +1594,9 @@ void CueListPanel::applySelectionForRowClick (int clickedIndex, const juce::Modi
 {
     juce::ignoreUnused (mods);
 
+    if (shouldSilenceListenersForStateOp())
+        return;
+
     // JUCE ListBox đã xử lý Cmd/Shift + giữ multi-select khi click dòng đã chọn (chuẩn BGM drag-block).
     const int last = listBox.getLastRowSelected();
     selectedIndex = last >= 0 ? last : clickedIndex;
@@ -1026,7 +1606,6 @@ void CueListPanel::applySelectionForRowClick (int clickedIndex, const juce::Modi
 void CueListPanel::applyListBoxSelectedRows (const juce::SparseSet<int>& newRows)
 {
     listBox.setSelectedRows (newRows, juce::NotificationType::dontSendNotification);
-    listBox.repaint();
 }
 
 juce::Array<int> CueListPanel::collectSelectedRowIndices() const
@@ -1038,6 +1617,11 @@ juce::Array<int> CueListPanel::collectSelectedRowIndices() const
 
     selected.sort();
     return selected;
+}
+
+juce::Array<int> CueListPanel::getSelectedRowIndices() const
+{
+    return collectSelectedRowIndices();
 }
 
 //==============================================================================
@@ -1107,8 +1691,7 @@ void CueListPanel::listBoxItemsDropped (int dragSourceRow,
     listBox.setSelectedRows (newSelectedRowsIndices, juce::NotificationType::dontSendNotification);
     selectedIndex = adjustedInsert + itemsToMove.size() - 1;
 
-    listBox.updateContent();
-    listBox.repaint();
+    updateListBoxContentIfLaidOut();
     repaint();
 
     fireSelectionFromListBox();
@@ -1116,113 +1699,73 @@ void CueListPanel::listBoxItemsDropped (int dragSourceRow,
 
 void CueListPanel::paintReorderInsertLine (juce::Graphics& g) const
 {
+    if (cueRowReorderInsertIndex < 0)
+        return;
+
     const auto line = getCueListInsertLineBounds();
 
     if (line.getWidth() <= 0)
         return;
 
-    const auto& pal = ShowTheme::get (isDarkMode);
-    const int lineY = line.getY();
-
-    // Sao chép paintPadReorderOverlay — nhánh BGM list mode (MainComponent.cpp).
-    g.setColour (pal.accent.withAlpha (0.55f));
-    g.fillEllipse (18.0f, (float) lineY - 4.0f, 8.0f, 8.0f);
-    g.fillEllipse ((float) getWidth() - 26.0f, (float) lineY - 4.0f, 8.0f, 8.0f);
-    g.setColour (pal.accent);
-    g.fillRect (22, lineY - 1, getWidth() - 44, 2);
+    const float lineY = (float) line.getY();
+    showcontrol::crossdrag::paintNeonRoundedCapInsertLine (g, lineY, (float) getWidth());
 }
 
 void CueListPanel::paintCueRowReorderGhost (juce::Graphics& g) const
 {
-    if (! cueRowReorderActive)
+    if (! cueRowReorderActive || cueJuceDragStarted)
         return;
 
-    const auto& pal = ShowTheme::get (isDarkMode);
-    const auto selected = collectSelectedRowIndices();
-    const int draggedCount = juce::jmax (1, selected.size());
-    const int anchorRow = dragSourceAnchorRow >= 0 ? dragSourceAnchorRow
-                                                     : (selected.isEmpty() ? -1 : selected.getFirst());
+    const int anchorRow = dragSourceAnchorRow >= 0
+                              ? dragSourceAnchorRow
+                              : (dragSourceRows.isEmpty() ? -1 : dragSourceRows[0]);
+    const int itemCount = juce::jmax (1, dragSourceRows.size());
 
+    paintPremiumCueDragCapsuleAt (g,
+                                  (float) cueRowReorderPointerPos.x,
+                                  (float) cueRowReorderPointerPos.y,
+                                  getCueTitleRowAtIndex (anchorRow),
+                                  itemCount);
+}
+
+juce::Image CueListPanel::createPremiumCueDragImage (const juce::String& cueTitle, int selectedItemsCount)
+{
+    return showcontrol::crossdrag::createPremiumDragImage (cueTitle, selectedItemsCount);
+}
+
+juce::String CueListPanel::getCueTitleRowAtIndex (int rowIndex) const
+{
     juce::String title;
-    if (juce::isPositiveAndBelow (anchorRow, cues.size()))
-        title = cues.getReference (anchorRow).name;
+
+    if (juce::isPositiveAndBelow (rowIndex, cues.size()))
+        title = cues.getReference (rowIndex).name;
+
+    if (title.isEmpty() && padAccessor != nullptr)
+    {
+        if (auto* pad = padAccessor (rowIndex))
+            title = pad->getPadName();
+    }
 
     if (title.isEmpty())
         title = juce::String::fromUTF8 (u8"Di chuyển CUE...");
 
-    const float animDurationMs = 120.0f;
-    const float elapsedMs = (float) (juce::Time::getMillisecondCounter() - cueRowReorderStackAnimStartMs);
-    const float animT = juce::jlimit (0.0f, 1.0f, elapsedMs / animDurationMs);
-    const float easeOut = 1.0f - std::pow (1.0f - animT, 3.0f);
-    const bool draggingGroup = draggedCount > 1;
-    const bool stackIntroActive = draggingGroup && cueRowReorderStackAnimActive && animT < 1.0f;
+    return title;
+}
 
-    const auto titleFont = ShowTheme::fontBold (12.0f);
-    g.setFont (titleFont);
-    juce::GlyphArrangement glyphs;
-    glyphs.addLineOfText (titleFont, title, 0.0f, 0.0f);
-    const float textW = glyphs.getBoundingBox (0, -1, true).getWidth();
-    const float pillW = juce::jmin (420.0f, textW + 28.0f);
-    const float pillH = 32.0f;
+void CueListPanel::paintPremiumCueDragCapsuleAt (juce::Graphics& g,
+                                                 float centreX,
+                                                 float centreY,
+                                                 const juce::String& cueTitle,
+                                                 int selectedItemsCount) const
+{
+    const auto dragImg = createPremiumCueDragImage (cueTitle, selectedItemsCount);
 
-    const int pointerX = cueRowReorderPointerPos.x;
-    const int pointerY = cueRowReorderPointerPos.y;
+    if (! dragImg.isValid())
+        return;
 
-    juce::Rectangle<float> ghost ((float) pointerX - pillW * 0.5f,
-                                  (float) pointerY - pillH * 0.5f,
-                                  pillW, pillH);
-
-    if (stackIntroActive && juce::isPositiveAndBelow (anchorRow, cues.size()))
-    {
-        const auto rowPos = listBox.getRowPosition (anchorRow, true);
-        const auto listBounds = listBox.getBounds();
-        ghost.setCentre ((float) listBounds.getCentreX(),
-                         (float) (listBounds.getY() + rowPos.getCentreY()));
-    }
-
-    if (stackIntroActive)
-        ghost = ghost.withSizeKeepingCentre (ghost.getWidth() * (1.0f + 0.04f * std::sin (easeOut * juce::MathConstants<float>::pi)),
-                                               ghost.getHeight() * (1.0f + 0.04f * std::sin (easeOut * juce::MathConstants<float>::pi)));
-
-    if (draggingGroup)
-    {
-        const int layers = juce::jmin (4, draggedCount - 1);
-
-        for (int i = layers; i >= 1; --i)
-        {
-            const float introMul = stackIntroActive ? easeOut : 1.0f;
-            auto layer = ghost.translated ((float) i * 12.0f * introMul, (float) i * 7.0f * introMul)
-                              .withSizeKeepingCentre (ghost.getWidth() * (1.0f - 0.04f * (float) i),
-                                                      ghost.getHeight() * (1.0f - 0.03f * (float) i));
-            g.setColour (pal.dragGhostFill.withAlpha (0.42f - (float) (i - 1) * 0.08f));
-            g.fillRoundedRectangle (layer, pillH * 0.5f);
-            g.setColour (pal.accent.withAlpha (0.42f - (float) (i - 1) * 0.08f));
-            g.drawRoundedRectangle (layer, pillH * 0.5f, 1.5f);
-        }
-    }
-
-    g.setColour (juce::Colours::black.withAlpha (0.28f));
-    g.fillRoundedRectangle (ghost.translated (0.0f, 2.0f), pillH * 0.5f);
-
-    g.setColour (pal.dragGhostFill);
-    g.fillRoundedRectangle (ghost, pillH * 0.5f);
-
-    g.setColour (pal.dragGhostText);
-    g.drawText (title, ghost.reduced (12.0f, 4.0f), juce::Justification::centredLeft, true);
-
-    g.setColour (pal.accent.withAlpha (0.75f));
-    g.drawRoundedRectangle (ghost, pillH * 0.5f, 1.5f);
-
-    if (draggingGroup)
-    {
-        const juce::String countText = "x" + juce::String (draggedCount);
-        juce::Rectangle<float> badge (ghost.getRight() - 34.0f, ghost.getY() - 12.0f, 30.0f, 18.0f);
-        g.setColour (pal.accent);
-        g.fillRoundedRectangle (badge, 8.0f);
-        g.setColour (juce::Colours::white);
-        g.setFont (ShowTheme::fontBold (10.5f));
-        g.drawText (countText, badge, juce::Justification::centred);
-    }
+    g.drawImageAt (dragImg,
+                   juce::roundToInt (centreX - (float) dragImg.getWidth() * 0.5f),
+                   juce::roundToInt (centreY - (float) dragImg.getHeight() * 0.5f));
 }
 
 void CueListPanel::paintMarquee (juce::Graphics& g) const
@@ -1353,7 +1896,60 @@ void CueListPanel::beginCueRowReorder (const juce::MouseEvent& e)
         reorderOverlay->repaint();
     }
 
-    listBox.repaint();
+    repaintReorderSourceRows();
+    startCueJuceCrossDrag (e);
+}
+
+int CueListPanel::computeRowInsertionIndexAtListY (int localYInListBox) const noexcept
+{
+    const int rowHeight = listBox.getRowHeight();
+    const int totalTracks = cues.size();
+
+    if (rowHeight <= 0)
+        return 0;
+
+    int yInContent = localYInListBox;
+
+    if (auto* viewport = listBox.getViewport())
+        yInContent += viewport->getViewPositionY();
+
+    return showcontrol::crossdrag::computeRoundedRowInsertionIndex (yInContent, rowHeight, totalTracks);
+}
+
+void CueListPanel::startCueJuceCrossDrag (const juce::MouseEvent& e)
+{
+    if (cueJuceDragStarted)
+        return;
+
+    juce::SparseSet<int> selectedRows = listBox.getSelectedRows();
+
+    if (selectedRows.isEmpty())
+        selectedRows = dragSourceRows;
+
+    if (selectedRows.isEmpty())
+        return;
+
+    if (auto* dragContainer = juce::DragAndDropContainer::findParentDragContainerFor (this))
+    {
+        const int anchorRow = selectedRows[0];
+        const juce::String firstCueTitle = getCueTitleRowAtIndex (anchorRow);
+        const int itemCount = juce::jmax (1, selectedRows.size());
+        juce::Image premiumDragProxy = createPremiumCueDragImage (firstCueTitle, itemCount);
+
+        if (! premiumDragProxy.isValid())
+            return;
+
+        juce::Point<int> offset (premiumDragProxy.getWidth() / 2, premiumDragProxy.getHeight() / 2);
+        const juce::var description = showcontrol::crossdrag::buildLocalRowReorderDragToken (anchorRow);
+
+        dragContainer->startDragging (description,
+                                      &listBox,
+                                      juce::ScaledImage (premiumDragProxy),
+                                      true,
+                                      &offset);
+        cueJuceDragStarted = true;
+        juce::ignoreUnused (e);
+    }
 }
 
 void CueListPanel::updateCueRowReorder (const juce::MouseEvent& e)
@@ -1361,15 +1957,32 @@ void CueListPanel::updateCueRowReorder (const juce::MouseEvent& e)
     if (! cueRowReorderActive)
         return;
 
+    const int prevInsertIndex = cueRowReorderInsertIndex;
+    const auto prevPointerPos = cueRowReorderPointerPos;
+
     const auto local = listBox.getLocalPoint (e.eventComponent, e.getPosition());
     cueRowReorderPointerPos = getLocalPoint (e.eventComponent, e.getPosition());
-    cueRowReorderInsertIndex = listBox.getInsertionIndexForPosition (local.x, local.y);
+    cueRowReorderInsertIndex = computeRowInsertionIndexAtListY (local.y);
 
     autoScrollListBoxForReorder (local);
-    listBox.repaint();
+    repaintReorderSourceRows();
 
-    if (reorderOverlay != nullptr)
-        reorderOverlay->repaint();
+    if (prevInsertIndex != cueRowReorderInsertIndex)
+        repaintReorderInsertLineStrips (prevInsertIndex, cueRowReorderInsertIndex);
+
+    if (prevPointerPos != cueRowReorderPointerPos && reorderOverlay != nullptr)
+    {
+        const auto repaintCapsuleOnOverlay = [this] (juce::Point<int> panelPt)
+        {
+            const auto local = reorderOverlay->getLocalPoint (this, panelPt);
+            constexpr int halfW = 120;
+            constexpr int halfH = 19;
+            reorderOverlay->repaint (local.x - halfW, local.y - halfH, halfW * 2, halfH * 2);
+        };
+
+        repaintCapsuleOnOverlay (prevPointerPos);
+        repaintCapsuleOnOverlay (cueRowReorderPointerPos);
+    }
 }
 
 void CueListPanel::endCueRowReorder()
@@ -1377,12 +1990,70 @@ void CueListPanel::endCueRowReorder()
     if (! cueRowReorderActive)
         return;
 
+    if (cueJuceDragStarted)
+    {
+        stashCueRowReorderForJuceDrop();
+        return;
+    }
+
     const int insertRowPosition = cueRowReorderInsertIndex;
     const int anchorRow = dragSourceAnchorRow;
     const auto rowsToMove = dragSourceRows;
+    const bool dropInsideList = listBox.getBounds().contains (cueRowReorderPointerPos);
 
     cancelCueRowReorder();
-    listBoxItemsDropped (anchorRow, rowsToMove, insertRowPosition);
+
+    if (dropInsideList)
+        listBoxItemsDropped (anchorRow, rowsToMove, insertRowPosition);
+}
+
+void CueListPanel::stashCueRowReorderForJuceDrop()
+{
+    if (! cueRowReorderActive)
+        return;
+
+    cueRowReorderAwaitingJuceDrop = true;
+    cueRowReorderActive = false;
+    cueRowReorderPressLocked = false;
+    cueRowReorderStackAnimActive = false;
+    cueRowReorderStackAnimStartMs = 0;
+
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+
+    if (reorderOverlay != nullptr)
+    {
+        reorderOverlay->setBufferedToImage (false);
+
+        if (! marqueeActive)
+            reorderOverlay->setVisible (false);
+
+        reorderOverlay->repaint();
+    }
+
+    repaintReorderSourceRows();
+}
+
+void CueListPanel::commitCueRowReorderFromJuceDrop (int insertRowPosition)
+{
+    if (! cueRowReorderAwaitingJuceDrop)
+        return;
+
+    const int anchorRow = dragSourceAnchorRow;
+    const auto rowsToMove = dragSourceRows;
+
+    clearCueRowReorderJuceDropPending();
+
+    if (listBox.getBounds().contains (cueRowReorderPointerPos))
+        listBoxItemsDropped (anchorRow, rowsToMove, insertRowPosition);
+}
+
+void CueListPanel::clearCueRowReorderJuceDropPending() noexcept
+{
+    cueRowReorderAwaitingJuceDrop = false;
+    cueJuceDragStarted = false;
+    cueRowReorderInsertIndex = -1;
+    dragSourceAnchorRow = -1;
+    dragSourceRows.clear();
 }
 
 void CueListPanel::cancelCueRowReorder()
@@ -1394,6 +2065,7 @@ void CueListPanel::cancelCueRowReorder()
     cueRowReorderInsertIndex = -1;
     cueRowReorderStackAnimActive = false;
     cueRowReorderStackAnimStartMs = 0;
+    cueJuceDragStarted = false;
 
     if (wasActive)
     {
@@ -1409,7 +2081,7 @@ void CueListPanel::cancelCueRowReorder()
             reorderOverlay->repaint();
         }
 
-        listBox.repaint();
+        repaintReorderSourceRows();
     }
 }
 
@@ -1564,6 +2236,9 @@ void CueListPanel::mouseUp (const juce::MouseEvent& e)
 
 void CueListPanel::fireSelectionFromListBox()
 {
+    if (shouldSilenceListenersForStateOp())
+        return;
+
     const auto selected = collectSelectedRowIndices();
 
     if (! selected.isEmpty())
@@ -1574,6 +2249,134 @@ void CueListPanel::fireSelectionFromListBox()
 
     if (onCueSelected && selectedIndex >= 0)
         onCueSelected (selectedIndex);
+}
 
+void CueListPanel::setCrossCopyDropHighlight (bool active)
+{
+    juce::ignoreUnused (active);
+}
+
+void CueListPanel::paintOverChildren (juce::Graphics& g)
+{
+    juce::Component::paintOverChildren (g);
+
+    const bool isDraggingRowActive = cueRowReorderActive || localRowReorderDragActive;
+
+    if (isDraggingRowActive && cueRowReorderInsertIndex >= 0)
+        paintReorderInsertLine (g);
+}
+
+bool CueListPanel::isInterestedInDragSource (const SourceDetails& dragSourceDetails)
+{
+    if (dragSourceDetails.sourceComponent.get() != &listBox)
+        return false;
+
+    return showcontrol::crossdrag::isLocalRowReorderDrag (dragSourceDetails.description);
+}
+
+void CueListPanel::itemDragEnter (const SourceDetails& dragSourceDetails)
+{
+    if (! showcontrol::crossdrag::isLocalRowReorderDrag (dragSourceDetails.description))
+        return;
+
+    localRowReorderDragActive = true;
+    dragSourceRows = listBox.getSelectedRows();
+
+    if (dragSourceRows.isEmpty())
+    {
+        const int sourceRow = showcontrol::crossdrag::parseLocalRowReorderSourceIndex (dragSourceDetails.description);
+
+        if (sourceRow >= 0)
+            dragSourceRows.addRange (juce::Range<int> (sourceRow, sourceRow + 1));
+    }
+
+    dragSourceAnchorRow = dragSourceRows.isEmpty()
+                              ? showcontrol::crossdrag::parseLocalRowReorderSourceIndex (dragSourceDetails.description)
+                              : dragSourceRows[0];
+
+    const auto listLocal = listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+    const int prevInsertIndex = cueRowReorderInsertIndex;
+    cueRowReorderInsertIndex = computeRowInsertionIndexAtListY (listLocal.y);
+
+    if (reorderOverlay != nullptr)
+    {
+        updateCueReorderOverlayBounds();
+        reorderOverlay->setVisible (true);
+        reorderOverlay->toFront (false);
+    }
+
+    repaintReorderInsertLineStrips (prevInsertIndex, cueRowReorderInsertIndex);
+}
+
+void CueListPanel::itemDragMove (const SourceDetails& dragSourceDetails)
+{
+    if (! showcontrol::crossdrag::isLocalRowReorderDrag (dragSourceDetails.description))
+        return;
+
+    localRowReorderDragActive = true;
+
+    const auto listLocal = listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+    const int prevInsertIndex = cueRowReorderInsertIndex;
+    cueRowReorderInsertIndex = computeRowInsertionIndexAtListY (listLocal.y);
+
+    autoScrollListBoxForReorder (listLocal);
+
+    if (prevInsertIndex != cueRowReorderInsertIndex)
+        repaintReorderInsertLineStrips (prevInsertIndex, cueRowReorderInsertIndex);
+}
+
+void CueListPanel::itemDragExit (const SourceDetails& dragSourceDetails)
+{
+    juce::ignoreUnused (dragSourceDetails);
+    const int prevInsertIndex = cueRowReorderInsertIndex;
+    cueRowReorderInsertIndex = -1;
+    localRowReorderDragActive = false;
+
+    if (reorderOverlay != nullptr && ! cueRowReorderActive && ! marqueeActive)
+        reorderOverlay->setVisible (false);
+
+    if (prevInsertIndex >= 0)
+        repaintReorderInsertLineStrip (prevInsertIndex);
+}
+
+void CueListPanel::itemDropped (const SourceDetails& dragSourceDetails)
+{
+    localRowReorderDragActive = false;
+
+    if (! showcontrol::crossdrag::isLocalRowReorderDrag (dragSourceDetails.description))
+    {
+        cueRowReorderInsertIndex = -1;
+        listBox.repaint();
+        repaint();
+        return;
+    }
+
+    const int sourceRowIndex = showcontrol::crossdrag::parseLocalRowReorderSourceIndex (dragSourceDetails.description);
+    const int destRowIndex = cueRowReorderInsertIndex;
+
+    if (sourceRowIndex >= 0 && destRowIndex >= 0 && sourceRowIndex != destRowIndex)
+    {
+        juce::SparseSet<int> rowsToMove = dragSourceRows;
+
+        if (rowsToMove.isEmpty())
+            rowsToMove.addRange (juce::Range<int> (sourceRowIndex, sourceRowIndex + 1));
+
+        listBoxItemsDropped (sourceRowIndex, rowsToMove, destRowIndex);
+    }
+
+    cueRowReorderInsertIndex = -1;
+    dragSourceRows.clear();
+    dragSourceAnchorRow = -1;
+    cueJuceDragStarted = false;
+    cueRowReorderAwaitingJuceDrop = false;
+
+    if (reorderOverlay != nullptr && ! cueRowReorderActive && ! marqueeActive)
+        reorderOverlay->setVisible (false);
+
+    refreshListBoxData();
     listBox.repaint();
+    repaint();
+
+    if (auto* mainComp = findParentComponentOfClass<MainComponent>())
+        mainComp->triggerSave();
 }

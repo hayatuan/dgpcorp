@@ -4,6 +4,8 @@
 #include "SoundPad.h"
 #include "ShowTheme.h"
 #include "ShowControlLookAndFeel.h"
+#include "ShowTagColors.h"
+#include "ShowCrossComponentDrag.h"
 
 class CueListPanel;
 
@@ -17,9 +19,14 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp   (const juce::MouseEvent& e) override;
 
+    bool keyPressed (const juce::KeyPress& key) override;
+
     /** Vị trí dòng tại (x,y) — có padding 15px mép dưới hàng cuối. */
     int hitRowIndexAt (int x, int y) const;
     void triggerCueDragSession (const juce::MouseEvent& e);
+
+    /** Thay snapshot hàng dọc mặc định — Capsule Pill đồng bộ BGM List. */
+    juce::ScaledImage createSnapshotOfRows (const juce::SparseSet<int>& rows, int& x, int& y) override;
 
 private:
     CueListPanel& owner;
@@ -29,7 +36,7 @@ struct CueItem
 {
     juce::String name;
     juce::String filePath;
-    juce::Colour tagColour = ShowTheme::darkPalette().textMuted;
+    juce::Colour tagColour = showcontrol::colours::defaultTagColour();
     double preWaitMs  = 0.0;
     double postWaitMs = 0.0;
     bool   isEnabled  = true;
@@ -40,13 +47,14 @@ struct CueItem
 //==============================================================================
 /** Danh sách CUE QLab-style — multi-select + kéo thả đồng bộ BGM list. */
 class CueListPanel : public juce::Component,
+                     public juce::DragAndDropTarget,
                      private juce::Timer,
                      private juce::Label::Listener
 {
 public:
-    static constexpr int kHeaderH  = 28;
-    static constexpr int kHeaderGap = 4;
-    static constexpr int kRowH     = 44;
+    static constexpr int kHeaderH  = showcontrol::bgmList::kPlaylistHeaderHeight;
+    static constexpr int kHeaderGap = showcontrol::bgmList::kPlaylistHeaderGap;
+    static constexpr int kRowH     = showcontrol::bgmList::kPlaylistRowHeight;
 
     CueListPanel();
     ~CueListPanel() override;
@@ -56,6 +64,8 @@ public:
     std::function<void(int)>                         onCueSelected;
     std::function<void(int)>                         onCueTriggered;
     std::function<void(int, int)>                    onCueReordered;
+    std::function<void()>                            onSortRowsAscending;
+    std::function<bool()>                            canSortRows;
     std::function<void(const juce::Array<int>&, int)> onCuesBlockReordered;
     std::function<void(int, juce::Colour)>           onCueColorChanged;
     std::function<void(int, int)>                    onTrackMenuResult;
@@ -69,13 +79,14 @@ public:
 
     enum class TrackMenuId : int
     {
-        replaceFile = 1,
-        duplicate   = 2,
-        trimEditor  = 3,
-        revealFile  = 4,
-        deleteItem  = 5,
-        resetFade   = 6,
-        renameTrack = 7
+        replaceFile  = 1,
+        duplicate    = 2,
+        trimEditor   = 3,
+        revealFile   = 4,
+        deleteItem   = 5,
+        resetFade    = 6,
+        renameTrack  = 7,
+        sortAscending = 8
     };
 
     void lookAndFeelChanged() override;
@@ -99,23 +110,48 @@ public:
 
     int getPreferredHeight() const;
 
+    /** Đồng bộ màu tag một dòng — live từ Inspector mà không reset scroll. */
+    void syncCueTagColourAt (int index, juce::Colour colour);
+
     /** Ép ListBox đọc lại mảng cues và vẽ lại tức thì (live rename). */
     void refreshListBoxData();
+
+    /** Vẽ lại một dòng (loop icon, highlight) — không repaint toàn list. */
+    void repaintCueRow (int rowIndex);
 
     /** Khóa thanh cuộn nội bộ ListBox về dòng 0 — sau load/migration. */
     void resetListScrollToTop();
 
+    void deleteSelectedCues();
+    /** Xóa hàng loạt — duyệt index giảm dần, một giao dịch undo (BGM/CUE qua MainComponent). */
+    void removeSelectedCues();
+    void updateTableContent();
+
+    juce::Array<int> getSelectedRowIndices() const;
+
     void paint (juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
+
+    bool isInterestedInDragSource (const SourceDetails& dragSourceDetails) override;
+    void itemDragEnter (const SourceDetails& dragSourceDetails) override;
+    void itemDragMove (const SourceDetails& dragSourceDetails) override;
+    void itemDragExit (const SourceDetails& dragSourceDetails) override;
+    void itemDropped (const SourceDetails& dragSourceDetails) override;
+
+    void setCrossCopyDropHighlight (bool active);
 
 private:
     friend class CueListBox;
     friend class CueListBoxModel;
 
     class CueListBoxModel;
+    class CueListRowCell;
     class CueReorderOverlay;
     class CueListHeaderComponent;
+
+    friend class CueListRowCell;
 
     void timerCallback() override;
     void labelTextChanged (juce::Label* labelThatHasChanged) override;
@@ -123,14 +159,26 @@ private:
     void editorHidden (juce::Label* label, juce::TextEditor& editor) override;
     void syncLiveTimer();
     bool anyRowTransportActive() const;
+    void rebuildRowPaintFonts();
+    void syncRowLiveTextCaches();
+    bool reserveLoopSlotForRow (int rowIndex) const noexcept;
+    bool shouldSilenceListenersForStateOp() const noexcept;
+    bool shouldShowColumnHeader() const noexcept;
+    void repaintReorderSourceRows();
     void paintHeader (juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void syncHeaderToListScrollbar();
+    void updateListBoxContentIfLaidOut() noexcept;
     void showTrackContextMenu (int cueIndex);
+    void showListBackgroundSortMenu (const juce::MouseEvent& e);
+    void sortCueRowsAscending();
     void beginTrackRename (int rowIndex);
     /** Ghi tên mới vào cues + pad; refresh list — idempotent. */
     bool commitTrackRenameFromLabel (int rowIndex);
     bool isPointInTrackNameColumn (int rowIndex, int localXInListBox) const;
     void layoutTrackNameLabelForRow (int rowIndex);
     void fireSelectionFromListBox();
+    void removeCueFromDataModelAtIndex (int rowIndex);
+    void applySelectionAnchorAfterRowRemoval (int firstDeletedRow);
     void applySelectionForRowClick (int clickedIndex, const juce::ModifierKeys& mods);
     void applyListBoxSelectedRows (const juce::SparseSet<int>& newRows);
     juce::Array<int> collectSelectedRowIndices() const;
@@ -145,6 +193,17 @@ private:
     void paintReorderInsertLine (juce::Graphics& g) const;
     void paintCueRowReorderGhost (juce::Graphics& g) const;
     void paintMarquee (juce::Graphics& g) const;
+    /** Capsule Glassmorphism — bóng lướt CUE độc quyền (đồng bộ thẩm mỹ BGM). */
+    static juce::Image createPremiumCueDragImage (const juce::String& cueTitle, int selectedItemsCount);
+    juce::String getCueTitleRowAtIndex (int rowIndex) const;
+    void paintPremiumCueDragCapsuleAt (juce::Graphics& g,
+                                       float centreX,
+                                       float centreY,
+                                       const juce::String& cueTitle,
+                                       int selectedItemsCount) const;
+    void repaintReorderInsertLineStrip (int insertIndex) const;
+    void repaintReorderInsertLineStrips (int prevIndex, int nextIndex) const;
+    void repaintDragCapsuleProxyStrip (juce::Point<int> centreInPanel) const;
     void updateCueReorderOverlayBounds();
     juce::Rectangle<int> getCueListInsertLineBounds() const;
 
@@ -162,7 +221,12 @@ private:
     void updateCueRowReorder (const juce::MouseEvent& e);
     void endCueRowReorder();
     void cancelCueRowReorder();
+    void stashCueRowReorderForJuceDrop();
+    void commitCueRowReorderFromJuceDrop (int insertRowPosition);
+    void clearCueRowReorderJuceDropPending() noexcept;
     void autoScrollListBoxForReorder (juce::Point<int> posInListBox);
+    int computeRowInsertionIndexAtListY (int localYInListBox) const noexcept;
+    void startCueJuceCrossDrag (const juce::MouseEvent& e);
 
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
@@ -183,6 +247,20 @@ private:
     int  armedIndex    = -1;
     bool isDarkMode    = true;
 
+    struct RowPaintFonts
+    {
+        juce::Font indexBold  { juce::FontOptions() };
+        juce::Font namePlain  { juce::FontOptions() };
+        juce::Font nameBold   { juce::FontOptions() };
+        juce::Font timer      { juce::FontOptions() };
+        juce::Font timerBold  { juce::FontOptions() };
+        juce::Font autoFollow { juce::FontOptions() };
+    };
+
+    RowPaintFonts rowFonts;
+    juce::Array<juce::String> rowRemainingText;
+    juce::Array<juce::String> rowElapsedText;
+
     juce::SparseSet<int> dragSourceRows;
     int  dragSourceAnchorRow   = -1;
     int  cueRowReorderInsertIndex = -1;
@@ -200,6 +278,10 @@ private:
     juce::Array<int> marqueeBaseSelection;
     juce::Point<int> marqueeStartPos { 0, 0 };
     juce::Point<int> marqueeEndPos   { 0, 0 };
+
+    bool localRowReorderDragActive = false;
+    bool cueJuceDragStarted   = false;
+    bool cueRowReorderAwaitingJuceDrop = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CueListPanel)
 };

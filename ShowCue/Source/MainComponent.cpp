@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include "GlobalPreferencesDialog.h"
@@ -12,6 +13,27 @@
 
 namespace
 {
+class StateOperationScope
+{
+public:
+    explicit StateOperationScope (std::atomic<bool>& flagIn)
+        : flag (flagIn), entered (! flag.exchange (true, std::memory_order_acq_rel))
+    {
+    }
+
+    bool enteredSuccessfully() const noexcept { return entered; }
+
+    ~StateOperationScope()
+    {
+        if (entered)
+            flag.store (false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool>& flag;
+    bool entered = false;
+};
+
 #if JUCE_MAC
 constexpr int kMacUnifiedTitleBarInset = 14;
 #else
@@ -54,12 +76,29 @@ static std::atomic<juce::uint32> g_lastGlobalSpacebarPressTime { 0 };
 static std::atomic<juce::uint32> g_gateQuietUntilMs { 0 };
 static constexpr juce::uint32 kGlobalSpacebarDebounceMs = 350;
 
+/** Debounce Cmd+Delete / Cmd+Backspace — tránh kích đúp hộp thoại xóa. */
+static int g_lastDeleteKeyCode = 0;
+static juce::uint32 g_lastDeleteKeyMs = 0;
+static constexpr juce::uint32 kDeleteKeyDebounceMs = 120;
+
+bool shouldDebounceDeleteKey (int deleteKeyCode, juce::uint32 nowMs) noexcept
+{
+    if (deleteKeyCode == g_lastDeleteKeyCode
+        && g_lastDeleteKeyMs != 0
+        && (nowMs - g_lastDeleteKeyMs) < kDeleteKeyDebounceMs)
+        return true;
+
+    g_lastDeleteKeyCode = deleteKeyCode;
+    g_lastDeleteKeyMs   = nowMs;
+    return false;
+}
+
 /** JUCE 8 không expose isKeyRepeat — lọc burst KeyDown <45ms cùng keyCode (OS auto-repeat). */
 bool swallowLikelyOsKeyRepeat (const juce::KeyPress& key) noexcept
 {
     static int lastCode = 0;
     static juce::uint32 lastMs = 0;
-    const int code = key.getKeyCode();
+    const int code = showcontrol::keyboard::physicalKeyCode (key);
     const auto now = juce::Time::getMillisecondCounter();
     const bool isRepeat = (code != 0 && code == lastCode && lastMs != 0 && (now - lastMs) < 45);
     lastCode = code;
@@ -73,15 +112,39 @@ bool swallowLikelyOsKeyRepeat (const juce::KeyPress& key) noexcept
 namespace
 {
     /** Giới hạn cứng ma trận PAD — chỉ áp dụng nhánh CUE (isGrid). BGM không giới hạn. */
-    constexpr int kMaxCuePadsPerList = 48;
+    constexpr int kMaxCuePadsPerList = 80;
 
     void showCueListCapacityAlert()
     {
         juce::AlertWindow::showMessageBoxAsync (
             juce::AlertWindow::WarningIcon,
             "Giới hạn danh sách CUE",
-            "Mỗi bộ Nhạc CUE chỉ cho phép chứa tối đa 48 ô PAD biểu diễn để đảm bảo hiệu năng và bố cục hiển thị.",
+            "Mỗi bộ Nhạc CUE chỉ cho phép chứa tối đa "
+                + juce::String (kMaxCuePadsPerList)
+                + " ô PAD biểu diễn để đảm bảo hiệu năng và bố cục hiển thị.",
             "Đã hiểu");
+    }
+
+    void showCueGridFullAlert()
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            juce::String::fromUTF8 (u8"Thông báo hệ thống"),
+            juce::String::fromUTF8 (u8"Bàn cờ ShowCue đã đầy! Không còn vị trí trống để thực hiện lệnh nhân bản."),
+            juce::String::fromUTF8 (u8"Xác nhận"));
+    }
+
+    void showCueBatchDuplicatePartialAlert (int successCount, int failCount)
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            juce::String::fromUTF8 (u8"Thông báo hệ thống"),
+            juce::String::fromUTF8 (u8"Đã nhân bản thành công ")
+                + juce::String (successCount)
+                + juce::String::fromUTF8 (u8" ô PAD. Có ")
+                + juce::String (failCount)
+                + juce::String::fromUTF8 (u8" ô bị bỏ qua do bàn cờ đã đầy khít khao."),
+            juce::String::fromUTF8 (u8"Xác nhận"));
     }
 
     /** Grid CUE động: chỉ đếm slot còn lại đến trần 48 (không ô trống cố định). */
@@ -98,6 +161,8 @@ namespace
 
 static void writeCueMetaToPadElem (juce::XmlElement& padElem, const CueItem& cue);
 static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad);
+static void readCueMetaFromPadElem (const juce::XmlElement& padElem, CueItem& cue);
+static SoundPad::PadProjectState readPadProjectState (const juce::XmlElement& padElem);
 
 //==============================================================================
 /** Timer pre-wait QLab — chỉ chạy trên message thread. */
@@ -183,84 +248,6 @@ private:
 };
 
 //==============================================================================
-class ScrollableContainer : public juce::Component
-{
-public:
-    enum class EmptyListHint
-    {
-        none,
-        cueGrid,
-        bgmRows
-    };
-
-    ScrollableContainer() {}
-
-    std::function<void(const juce::MouseEvent&)> onBackgroundRightClick;
-    std::function<void(const juce::MouseEvent&)> onBackgroundMouseDown;
-    std::function<void(const juce::MouseEvent&)> onBackgroundMouseDrag;
-    std::function<void(const juce::MouseEvent&)> onBackgroundMouseUp;
-
-    void mouseDown (const juce::MouseEvent& e) override {
-        if (e.mods.isRightButtonDown() && onBackgroundRightClick)
-            onBackgroundRightClick(e);
-        else if (onBackgroundMouseDown)
-            onBackgroundMouseDown (e);
-    }
-
-    void mouseDrag (const juce::MouseEvent& e) override
-    {
-        if (onBackgroundMouseDrag)
-            onBackgroundMouseDrag (e);
-    }
-
-    void mouseUp (const juce::MouseEvent& e) override
-    {
-        if (onBackgroundMouseUp)
-            onBackgroundMouseUp (e);
-    }
-
-    void setDarkMode (bool dark)
-    {
-        isDarkMode = dark;
-        repaint();
-    }
-
-    void setEmptyListHint (EmptyListHint hint)
-    {
-        if (emptyListHint != hint)
-        {
-            emptyListHint = hint;
-            repaint();
-        }
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        const auto pal = ShowTheme::get (isDarkMode);
-        g.fillAll (pal.centerBg);
-
-        if (emptyListHint == EmptyListHint::none)
-            return;
-
-        g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::font (15.0f));
-
-        const juce::String message = (emptyListHint == EmptyListHint::cueGrid)
-            ? showcontrol::localization::tr (u8"Danh sách CUE trống. Hãy kéo thả file âm thanh vào đây để tự động cấu hình các ô PAD biểu diễn.")
-            : showcontrol::localization::tr (u8"Danh sách BGM trống. Hãy kéo thả file nhạc nền vào phân vùng này để thiết lập danh sách phát.");
-
-        g.drawFittedText (message,
-                          getLocalBounds().reduced (32),
-                          juce::Justification::centred,
-                          4);
-    }
-
-private:
-    bool isDarkMode = true;
-    EmptyListHint emptyListHint = EmptyListHint::none;
-};
-
-//==============================================================================
 class MainComponent::EmptyProjectPlaceholder : public juce::Component
 {
 public:
@@ -292,28 +279,32 @@ private:
 class ListHeaderComponent : public juce::Component
 {
 public:
-    ListHeaderComponent() : isDarkMode(true) {}
+    ListHeaderComponent() : isDarkMode (true)
+    {
+        setOpaque (true);
+        setInterceptsMouseClicks (false, false);
+    }
 
-    void setDarkMode(bool dark) { isDarkMode = dark; repaint(); }
+    void setDarkMode (bool dark) { isDarkMode = dark; repaint(); }
 
-    void paint (juce::Graphics& g) override {
+    void paint (juce::Graphics& g) override
+    {
         const auto pal = ShowTheme::get (isDarkMode);
         g.setColour (pal.panelElevated);
         g.fillRect (getLocalBounds());
 
         g.setColour (pal.border);
-        g.drawHorizontalLine (getHeight() - 1, 0.0f, (float)getWidth());
-        g.setColour (pal.textSecondary);
+        g.drawHorizontalLine ((float) getHeight() - 1.0f, 0.0f, (float) getWidth());
+        g.setColour (showcontrol::bgmList::playlistHeaderTextColour (isDarkMode));
+        g.setFont (showcontrol::bgmList::playlistHeaderFont());
 
-        g.setFont (ShowTheme::fontBold (13.0f));
-        
         const auto titleRect     = showcontrol::bgmList::titleBounds (getWidth(), getHeight());
         const auto remainingRect = showcontrol::bgmList::timeRemainingBounds (getWidth(), getHeight());
         const auto totalRect     = showcontrol::bgmList::totalDurationBounds (getWidth(), getHeight());
 
         g.drawText (showcontrol::localization::tr (u8"TÊN BÀI HÁT BGM"), titleRect, juce::Justification::centredLeft);
-        g.drawText (showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect, juce::Justification::centred);
-        g.drawText (showcontrol::localization::tr (u8"THỜI LƯỢNG"), totalRect, juce::Justification::centred);
+        showcontrol::bgmList::drawPlaylistTimeCell (g, showcontrol::localization::tr (u8"CÒN LẠI"), remainingRect);
+        showcontrol::bgmList::drawPlaylistTimeCell (g, showcontrol::localization::tr (u8"THỜI LƯỢNG"), totalRect);
     }
 
 private:
@@ -588,6 +579,14 @@ public:
         cueListModeBtn.repaint();
     }
 
+    /** Layout lại thanh đáy ngay lập tức (0 ms). */
+    void setViewMode (bool isPadGridMode)
+    {
+        juce::ignoreUnused (isPadGridMode);
+        resized();
+        repaint();
+    }
+
     void setDarkMode (bool dark)
     {
         isDarkMode = dark;
@@ -604,14 +603,22 @@ public:
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (8, 6);
-        constexpr int btnW = 52;
-        constexpr int gap = 8;
-        const int clusterW = btnW * 2 + gap;
-        auto cluster = area.withSizeKeepingCentre (clusterW, area.getHeight());
-        padModeBtn.setBounds (cluster.removeFromLeft (btnW));
-        cluster.removeFromLeft (gap);
-        cueListModeBtn.setBounds (cluster);
+        constexpr int buttonW = 44;
+        constexpr int buttonH = 26;
+        constexpr int buttonGap = 4;
+        constexpr int rightMargin = 12;
+
+        auto area = getLocalBounds();
+
+        area.removeFromRight (rightMargin);
+
+        auto listBtnBounds = area.removeFromRight (buttonW);
+        cueListModeBtn.setBounds (listBtnBounds.withSizeKeepingCentre (buttonW, buttonH));
+
+        area.removeFromRight (buttonGap);
+
+        auto padBtnBounds = area.removeFromRight (buttonW);
+        padModeBtn.setBounds (padBtnBounds.withSizeKeepingCentre (buttonW, buttonH));
     }
 
 private:
@@ -887,7 +894,7 @@ void MainComponent::syncSidebarFromAllLists (const juce::Array<juce::String>& na
                                               : (list->isGrid ? showcontrol::localization::defaultCueListName()
                                                               : showcontrol::localization::defaultBgmListName());
             sidebarPanel.addSet (listName, list->pads.size(), list->isGrid,
-                                 list->useCueListPanel, list->isLocked);
+                                 list->useCueListPanel, list->isLocked, list->themeColour);
             sidebarPanel.setListLooping (i, list->isLooping);
         }
     }
@@ -918,8 +925,8 @@ void MainComponent::enterEmptyProjectState()
 
     if (scrollContent != nullptr)
     {
-        if (auto* scrollContainer = dynamic_cast<ScrollableContainer*> (scrollContent.get()))
-            scrollContainer->setEmptyListHint (ScrollableContainer::EmptyListHint::none);
+        if (auto* scrollContainer = getPadPanel())
+            scrollContainer->setEmptyListHint (PadPanel::EmptyListHint::none);
 
         for (int i = 0; i < scrollContent->getNumChildComponents(); ++i)
         {
@@ -937,7 +944,6 @@ void MainComponent::enterEmptyProjectState()
     if (listHeaderComponent != nullptr)
         listHeaderComponent->setVisible (false);
 
-    gridSizeSlider.setVisible (false);
     viewScroller.setVisible (false);
 
     if (playoutModeBar != nullptr)
@@ -948,6 +954,7 @@ void MainComponent::enterEmptyProjectState()
 
     resized();
     repaint();
+    updateMainDeskDisplay();
 }
 
 MainComponent::ListData* MainComponent::getActiveListSafe() noexcept
@@ -1066,7 +1073,13 @@ void MainComponent::prepareForApplicationShutdown()
     if (updateChecker != nullptr)
         updateChecker.reset();
 
-    saveApplicationState();
+    cancelPendingUpdate();
+
+    const bool wasBusy = isPerformingStateOperation.exchange (true, std::memory_order_acq_rel);
+    saveApplicationStateInternal();
+
+    if (! wasBusy)
+        isPerformingStateOperation.store (false, std::memory_order_release);
 }
 
 
@@ -1076,14 +1089,6 @@ MainComponent::~MainComponent()
     updateChecker.reset();
 
     juce::Desktop::getInstance().removeDarkModeSettingListener (this);
-
-    removeKeyListener (this);
-
-    if (topLevelKeyListenerHost != nullptr)
-    {
-        topLevelKeyListenerHost->removeKeyListener (this);
-        topLevelKeyListenerHost = nullptr;
-    }
 
     if (soloPad != nullptr)
         setSoloPad (nullptr, false);
@@ -1139,30 +1144,39 @@ void MainComponent::wireSoundPad (SoundPad* pad)
         if (! isDirectMouseSelection)
             return;
         applySelectionForPadClick (selected->getPadIndex(), mods);
-        inspectorPanel.selectPad (selected);
 
         if (activeListIndex >= 0 && activeListIndex < allLists.size())
         {
-            auto* list = allLists[activeListIndex];
-
-            if (list != nullptr && list->isGrid)
+            if (auto* list = allLists[activeListIndex])
             {
-                if (list->autoArmOnSelect)
-                    armPad (selected);
+                syncPadTagColourFromCueMeta (*list, selected);
 
-                if (cueListPanel != nullptr)
+                if (list->isGrid)
                 {
-                    cueListPanel->setSelectedIndex (selectedBgmIndex);
-                    cueListPanel->repaint();
+                    if (list->autoArmOnSelect)
+                        armPad (selected);
+
+                    if (cueListPanel != nullptr)
+                    {
+                        cueListPanel->setSelectedIndex (selectedBgmIndex);
+                        cueListPanel->repaint();
+                    }
                 }
             }
         }
+
+        presentPadInInspector (selected);
 
         if (isShowing())
             grabKeyboardFocus();
     };
 
     pad->isPlaybackCommandBlocked = [this] { return isPlaybackCommandBlocked(); };
+
+    pad->isActivePlaybackUiOwner = [this, pad]
+    {
+        return uiPlaybackFocusPad == nullptr || uiPlaybackFocusPad == pad;
+    };
 
     pad->onRequestGo = [this] (SoundPad* p)
     {
@@ -1178,17 +1192,30 @@ void MainComponent::wireSoundPad (SoundPad* pad)
         juce::Component::SafePointer<SoundPad> safePad (pad);
         const auto refreshUi = [this, safePad]
         {
+            if (isOperatingState())
+                return;
+
             if (auto* p = safePad.getComponent())
             {
-                if (p->isTransportActive())
-                    syncUiToPlayingPad (p, false);
-            }
+                // Pad fade-out cũ — im lặng hoàn toàn, không kéo con trỏ/UI ngược.
+                if (! shouldAcceptPlaybackUiEventFromPad (p)
+                    && (p->isFadeOutInProgress() || p->isStopping()))
+                    return;
 
-            masterDeckPanel.refreshTransportLabels();
-            masterDeckPanel.repaint();
-            inspectorPanel.refreshTransportUi();
-            refreshSidebarPlayingStatus();
-            updateCuePlaybackIndicators();
+                const int listIdx = findListIndexForPad (allLists, p);
+
+                if (listIdx == activeListIndex && listIdx >= 0)
+                {
+                    if ((p->isPlaying() || p->isPaused()) && shouldAcceptPlaybackUiEventFromPad (p))
+                        syncUiToPlayingPad (p, false);
+                }
+
+                masterDeckPanel.refreshTransportLabels();
+                masterDeckPanel.repaint();
+                inspectorPanel.refreshTransportUi();
+                refreshSidebarPlayingStatus();
+                updateCuePlaybackIndicators();
+            }
         };
 
         if (juce::MessageManager::getInstance()->isThisTheMessageThread())
@@ -1209,8 +1236,8 @@ void MainComponent::wireSoundPad (SoundPad* pad)
 
         if (list->isGrid)
         {
-            // Polyphony: không fade/stop pad khác khi một pad bắt đầu phát.
-            syncUiToPlayingPad (starter, false);
+            // Polyphony: không fade/stop pad khác — chỉ dạt highlight UI sang pad mới ngay lập tức.
+            forwardUiSelectionToPad (starter, false);
             return;
         }
 
@@ -1227,6 +1254,9 @@ void MainComponent::wireSoundPad (SoundPad* pad)
 
     pad->onTrackNameChanged = [this] (SoundPad* p)
     {
+        if (isOperatingState())
+            return;
+
         const int listIdx = findListIndexForPad (allLists, p);
         if (listIdx < 0 || listIdx >= allLists.size())
             return;
@@ -1245,7 +1275,7 @@ void MainComponent::wireSoundPad (SoundPad* pad)
         if (listIdx == activeListIndex)
         {
             if (inspectorPanel.getCurrentPad() == p)
-                inspectorPanel.selectPad (p);
+                inspectorPanel.refreshPadDisplayName();
 
             refreshCueListPanel();
         }
@@ -1256,6 +1286,79 @@ void MainComponent::wireSoundPad (SoundPad* pad)
     pad->onPadReorderBegin = [this] (SoundPad* p) { beginPadReorder (p); };
     pad->onPadReorderMove = [this] (SoundPad* p, juce::Point<int> pos) { juce::ignoreUnused (p); updatePadReorder (pos); };
     pad->onPadReorderEnd = [this] (SoundPad* p) { juce::ignoreUnused (p); endPadReorder(); };
+    pad->onBuildPadDragDescription = [this, pad] () -> juce::var
+    {
+        if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            return juce::var();
+
+        auto* list = allLists[activeListIndex];
+        if (list == nullptr)
+            return juce::var();
+
+        const int anchorIndex = list->pads.indexOf (pad);
+        if (anchorIndex < 0)
+            return juce::var();
+
+        juce::Array<int> dragIndices = selectedPadIndices;
+
+        if (dragIndices.isEmpty() || ! dragIndices.contains (anchorIndex))
+        {
+            dragIndices.clear();
+            dragIndices.add (anchorIndex);
+        }
+
+        return buildPadPanelDragPayload (dragIndices, anchorIndex);
+    };
+
+    pad->onBuildSidebarListDragDescription = [this, pad] () -> juce::var
+    {
+        if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            return juce::var();
+
+        auto* list = allLists[activeListIndex];
+        if (list == nullptr)
+            return juce::var();
+
+        const int anchorIndex = list->pads.indexOf (pad);
+        if (anchorIndex < 0)
+            return juce::var();
+
+        juce::Array<int> dragIndices = selectedPadIndices;
+
+        if (dragIndices.isEmpty() || ! dragIndices.contains (anchorIndex))
+        {
+            dragIndices.clear();
+            dragIndices.add (anchorIndex);
+        }
+
+        return buildSidebarListDragPayload (dragIndices);
+    };
+
+    pad->onGetRowReorderDragCount = [this] () -> int
+    {
+        return juce::jmax (1, selectedPadIndices.isEmpty() ? 1 : selectedPadIndices.size());
+    };
+
+    pad->onCreateMultiItemDragImage = [this] (int itemCount) -> juce::Image
+    {
+        juce::String title;
+
+        if (auto* list = getActiveListSafe())
+        {
+            const int titleIdx = padReorderActive ? padReorderFromIndex : selectedBgmIndex;
+
+            if (juce::isPositiveAndBelow (titleIdx, list->pads.size()))
+            {
+                if (auto* p = list->pads[titleIdx])
+                    title = p->getPadName();
+            }
+        }
+
+        if (title.isEmpty())
+            title = juce::String::fromUTF8 (u8"Di chuyển...");
+
+        return showcontrol::crossdrag::createPremiumDragImage (title, itemCount);
+    };
 
     pad->onTrackFinished = [this] (SoundPad* finished)
     {
@@ -1426,92 +1529,30 @@ static juce::String cleanVietnameseString (const juce::String& input)
 
 void MainComponent::timerCallback()
 {
-    SoundPad* playingPad = findPlayingPadInActiveBgmList();
+    if (isOperatingState())
+        return;
 
-    if (playingPad == nullptr)
+    const SoundPad* prioritizedPad = findGloballyPrioritizedPlayingPad();
+
+    if (prioritizedPad != nullptr
+        && prioritizedPad != lastUiSyncedPlayingPad
+        && shouldAcceptPlaybackUiEventFromPad (const_cast<SoundPad*> (prioritizedPad)))
     {
-        for (int i = 0; i < allLists.size(); ++i)
-        {
-            auto* current = allLists[i];
-            if (current == nullptr)
-                continue;
-
-            for (auto* pad : current->pads)
-            {
-                if (pad != nullptr && pad->isTransportActive())
-                {
-                    playingPad = pad;
-                    break;
-                }
-            }
-
-            if (playingPad != nullptr)
-                break;
-        }
+        syncUiToPlayingPad (const_cast<SoundPad*> (prioritizedPad), false);
     }
-
-    if (playingPad != nullptr && playingPad != lastUiSyncedPlayingPad)
-        syncUiToPlayingPad (playingPad, true);
-    else if (playingPad == nullptr)
+    else if (prioritizedPad == nullptr)
+    {
         lastUiSyncedPlayingPad = nullptr;
-
-    masterDeckPanel.setActivePad (playingPad);
-    if (playingPad != nullptr)
-    {
-        playingPad->supplementBpmFromFileIfMissing();
-        masterDeckPanel.setTrackMetadata (playingPad->getMetadata());
-    }
-    else
-    {
-        masterDeckPanel.setTrackMetadata ({});
-    }
-    refreshSidebarPlayingStatus();
-    updateCuePlaybackIndicators();
-
-    // Cập nhật trạng thái BGM transport buttons (play/stop icon, prev/next enabled).
-    if (activeListIndex >= 0 && activeListIndex < allLists.size())
-    {
-        if (auto* bgmList = allLists[activeListIndex])
-        {
-            if (! bgmList->isGrid)
-            {
-                auto* bgmPlaying = findPlayingPadInActiveBgmList();
-                const bool isPlaying = (bgmPlaying != nullptr);
-                const int curIdx = isPlaying
-                                       ? bgmList->pads.indexOf (bgmPlaying)
-                                       : selectedBgmIndex;
-                const bool hasPrev = (findPrevBgmTrackIndex (*bgmList, curIdx) >= 0);
-                const bool hasNext = (findNextBgmTrackIndex (*bgmList, curIdx) >= 0);
-                masterDeckPanel.setBgmState (isPlaying, hasPrev, hasNext);
-            }
-        }
     }
 
-    if (! padReorderActive)
-        repaint();
+    updateMainDeskDisplay();
 
     pushStageMonitorUpdate();
 }
 
 SoundPad* MainComponent::findAnyActivePlayingPad() const
 {
-    if (auto* pad = findPlayingPadInActiveBgmList())
-        return pad;
-
-    for (int i = 0; i < allLists.size(); ++i)
-    {
-        auto* list = allLists[i];
-        if (list == nullptr)
-            continue;
-
-        for (auto* pad : list->pads)
-        {
-            if (pad != nullptr && pad->isTransportActive())
-                return pad;
-        }
-    }
-
-    return nullptr;
+    return findGloballyPrioritizedPlayingPad();
 }
 
 StageMonitorSnapshot MainComponent::buildStageMonitorSnapshot (SoundPad* pad) const
@@ -1558,7 +1599,6 @@ void MainComponent::toggleStageMonitorWindow()
 {
     if (stageMonitorWindow != nullptr)
     {
-        stageMonitorWindow->removeKeyListener (this);
         stageMonitorWindow.reset();
         return;
     }
@@ -1573,17 +1613,13 @@ void MainComponent::toggleStageMonitorWindow()
                 return;
 
             if (safeThis->stageMonitorWindow != nullptr)
-            {
-                safeThis->stageMonitorWindow->removeKeyListener (safeThis.getComponent());
                 safeThis->stageMonitorWindow.reset();
-            }
         });
     });
 
     if (stageMonitorWindow == nullptr)
         return;
 
-    stageMonitorWindow->addKeyListener (this);
     stageMonitorWindow->positionToSecondaryDisplay();
     stageMonitorWindow->setVisible (true);
 
@@ -1692,6 +1728,195 @@ SoundPad* MainComponent::findPlayingPadInActiveBgmList() const
     return nullptr;
 }
 
+bool MainComponent::shouldAcceptPlaybackUiEventFromPad (SoundPad* pad) const noexcept
+{
+    if (pad == nullptr)
+        return false;
+
+    if (uiPlaybackFocusPad != nullptr && pad != uiPlaybackFocusPad)
+    {
+        if (pad->isFadeOutInProgress())
+            return false;
+    }
+
+    return true;
+}
+
+SoundPad* MainComponent::findPrimaryPlaybackPadForActiveList() const noexcept
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return nullptr;
+
+    auto* list = allLists[activeListIndex];
+    if (list == nullptr)
+        return nullptr;
+
+    if (uiPlaybackFocusPad != nullptr && list->pads.contains (uiPlaybackFocusPad))
+    {
+        if (uiPlaybackFocusPad->isPlaying() || uiPlaybackFocusPad->isPaused())
+            return uiPlaybackFocusPad;
+    }
+
+    for (auto* pad : list->pads)
+    {
+        if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
+            return pad;
+    }
+
+    return nullptr;
+}
+
+SoundPad* MainComponent::getAllActivePlayingPadTrackGlobal() const noexcept
+{
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (auto* activeList = allLists[activeListIndex];
+            activeList != nullptr && activeList->isGrid && activeList->clickPadToTrigger)
+        {
+            if (auto* panel = getPadPanel())
+            {
+                if (auto* activePadTrack = panel->getCurrentlyPlayingPadTrack())
+                    return activePadTrack;
+            }
+        }
+    }
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr || ! list->isGrid || ! list->clickPadToTrigger)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isTransportActive())
+                return pad;
+        }
+    }
+
+    return nullptr;
+}
+
+SoundPad* MainComponent::getAllActivePlayingCueTrackGlobal() const noexcept
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr || ! list->isGrid || list->clickPadToTrigger)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isTransportActive())
+                return pad;
+        }
+    }
+
+    return nullptr;
+}
+
+SoundPad* MainComponent::getAllActivePlayingBGMTrackGlobal() const noexcept
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr || list->isGrid)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isTransportActive())
+                return pad;
+        }
+    }
+
+    return nullptr;
+}
+
+SoundPad* MainComponent::findGloballyPrioritizedPlayingPad() const noexcept
+{
+    if (auto* pad = getAllActivePlayingPadTrackGlobal())
+        return pad;
+
+    if (auto* pad = getAllActivePlayingCueTrackGlobal())
+        return pad;
+
+    return getAllActivePlayingBGMTrackGlobal();
+}
+
+void MainComponent::updateTrackPlayingInfo (SoundPad* pad)
+{
+    if (pad == nullptr)
+    {
+        showNoTrackPlayingState();
+        return;
+    }
+
+    const int listIdx = findListIndexForPad (allLists, pad);
+
+    if (listIdx >= 0 && listIdx < allLists.size())
+    {
+        if (auto* list = allLists[listIdx])
+            masterDeckPanel.setListMode (! list->isGrid);
+    }
+
+    masterDeckPanel.setActivePad (pad);
+    pad->supplementBpmFromFileIfMissing();
+    masterDeckPanel.setTrackMetadata (pad->getMetadata());
+    masterDeckPanel.refreshTransportLabels();
+    refreshMasterDeckBgmTransportState();
+    refreshSidebarPlayingStatus();
+    updateCuePlaybackIndicators();
+}
+
+void MainComponent::showNoTrackPlayingState()
+{
+    masterDeckPanel.setActivePad (nullptr);
+    masterDeckPanel.setTrackMetadata ({});
+    refreshMasterDeckBgmTransportState();
+}
+
+void MainComponent::refreshMasterDeckBgmTransportState()
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return;
+
+    if (auto* bgmList = allLists[activeListIndex])
+    {
+        if (! bgmList->isGrid)
+        {
+            auto* bgmPlaying = findPlayingPadInActiveBgmList();
+            const bool isPlaying = (bgmPlaying != nullptr);
+            const int curIdx = isPlaying
+                                   ? bgmList->pads.indexOf (bgmPlaying)
+                                   : selectedBgmIndex;
+            const bool hasPrev = (findPrevBgmTrackIndex (*bgmList, curIdx) >= 0);
+            const bool hasNext = (findNextBgmTrackIndex (*bgmList, curIdx) >= 0);
+            masterDeckPanel.setBgmState (isPlaying, hasPrev, hasNext);
+        }
+    }
+}
+
+void MainComponent::updateMainDeskDisplay()
+{
+    if (auto* activePadTrack = getAllActivePlayingPadTrackGlobal())
+    {
+        updateTrackPlayingInfo (activePadTrack);
+        return;
+    }
+
+    if (auto* activeCueTrack = getAllActivePlayingCueTrackGlobal())
+    {
+        updateTrackPlayingInfo (activeCueTrack);
+        return;
+    }
+
+    if (auto* activeBgmTrack = getAllActivePlayingBGMTrackGlobal())
+    {
+        updateTrackPlayingInfo (activeBgmTrack);
+        return;
+    }
+
+    showNoTrackPlayingState();
+}
+
 bool MainComponent::allowTransportCommand (TransportCommandKind next,
                                            TransportCommandKind& lastKind,
                                            juce::uint32& lastCommandMs) noexcept
@@ -1768,11 +1993,13 @@ void MainComponent::triggerBgmPlayPause()
                                      lastBgmTransportCommandMs))
             return;
 
+        forwardUiSelectionToPad (targetPad, true);
+
         if (! playing->isFadeOutInProgress())
             playing->startFadeOut();
 
         targetPad->triggerPlay();
-        syncUiToPlayingPad (targetPad, true);
+        syncUiToPlayingPad (targetPad, false);
         return;
     }
 
@@ -1828,13 +2055,14 @@ void MainComponent::triggerBgmNext()
         return;
 
     nextPad->prepareForInstantPlay();
+    forwardUiSelectionToPad (nextPad, true);
 
     for (auto* pad : list->pads)
         if (pad != nullptr && pad != nextPad)
             pad->triggerStop();
 
     nextPad->triggerPlay();
-    syncUiToPlayingPad (nextPad, true);
+    syncUiToPlayingPad (nextPad, false);
 }
 
 void MainComponent::triggerBgmPrev()
@@ -1860,16 +2088,17 @@ void MainComponent::triggerBgmPrev()
         return;
 
     prevPad->prepareForInstantPlay();
+    forwardUiSelectionToPad (prevPad, true);
 
     for (auto* pad : list->pads)
         if (pad != nullptr && pad != prevPad)
             pad->triggerStop();
 
     prevPad->triggerPlay();
-    syncUiToPlayingPad (prevPad, true);
+    syncUiToPlayingPad (prevPad, false);
 }
 
-void MainComponent::syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView)
+void MainComponent::forwardUiSelectionToPad (SoundPad* pad, bool scrollIntoView)
 {
     if (pad == nullptr)
         return;
@@ -1886,18 +2115,19 @@ void MainComponent::syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView)
     if (padIdx < 0)
         return;
 
-    pad->setThumbnailLoadAllowed (true);
-    pad->setNormalizationLoadAllowed (true);
-    pad->requestPreloadForPlayback();
+    uiPlaybackFocusPad = pad;
 
-    if (listIdx == activeListIndex && ! list->isGrid)
+    if (listIdx == activeListIndex)
     {
         selectedBgmIndex = padIdx;
         selectedPadIndices.clear();
         selectedPadIndices.add (padIdx);
         applyPadSelectionVisualState();
 
-        if (scrollIntoView)
+        if (cueListPanel != nullptr && list->isGrid && list->useCueListPanel)
+            cueListPanel->setSelectedIndex (padIdx);
+
+        if (scrollIntoView && ! list->isGrid)
         {
             resized();
 
@@ -1916,6 +2146,33 @@ void MainComponent::syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView)
             }
         }
     }
+}
+
+void MainComponent::syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView)
+{
+    if (pad == nullptr)
+        return;
+
+    if (! shouldAcceptPlaybackUiEventFromPad (pad))
+        return;
+
+    const int listIdx = findListIndexForPad (allLists, pad);
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return;
+
+    const int padIdx = list->pads.indexOf (pad);
+    if (padIdx < 0)
+        return;
+
+    pad->setThumbnailLoadAllowed (true);
+    pad->setNormalizationLoadAllowed (true);
+    pad->requestPreloadForPlayback();
+
+    forwardUiSelectionToPad (pad, scrollIntoView);
 
     inspectorPanel.selectPad (pad);
     masterDeckPanel.setActivePad (pad);
@@ -1992,7 +2249,7 @@ void MainComponent::importListsFromDroppedFolders (const juce::StringArray& fold
         if (isGrid)
             syncCueMetadataFromPads (*list);
 
-        sidebarPanel.addSet (folderName, list->pads.size(), isGrid, false, list->isLocked);
+        sidebarPanel.addSet (folderName, list->pads.size(), isGrid, false, list->isLocked, list->themeColour);
         lastImportedIdx = idx;
 
         if (cueTruncated)
@@ -2037,7 +2294,7 @@ void MainComponent::rebuildSidebarFromAllLists()
             : (allLists[i]->isGrid ? juce::String::fromUTF8 (u8"Bộ Cue ") : juce::String::fromUTF8 (u8"Bộ BGM ")) + juce::String (i + 1);
 
         sidebarPanel.addSet (name, allLists[i]->pads.size(), allLists[i]->isGrid,
-                             allLists[i]->useCueListPanel, allLists[i]->isLocked);
+                             allLists[i]->useCueListPanel, allLists[i]->isLocked, allLists[i]->themeColour);
         sidebarPanel.setListLooping (i, allLists[i]->isLooping);
     }
 }
@@ -2107,6 +2364,7 @@ void MainComponent::duplicateListAtIndex (int listIndex)
     dup->useCueListPanel   = src->useCueListPanel;
     dup->clickPadToTrigger = src->clickPadToTrigger;
     dup->autoArmOnSelect   = src->autoArmOnSelect;
+    dup->themeColour       = src->themeColour;
     dup->cueMeta           = src->cueMeta;
 
     for (int i = 0; i < src->pads.size(); ++i)
@@ -2138,7 +2396,7 @@ void MainComponent::duplicateListAtIndex (int listIndex)
     for (int i = 0; i < allLists.size(); ++i)
     {
         sidebarPanel.addSet (names[i], allLists[i]->pads.size(), allLists[i]->isGrid,
-                             allLists[i]->useCueListPanel, allLists[i]->isLocked);
+                             allLists[i]->useCueListPanel, allLists[i]->isLocked, allLists[i]->themeColour);
         sidebarPanel.setListLooping (i, allLists[i]->isLooping);
     }
 
@@ -2207,7 +2465,7 @@ void MainComponent::morphSetStructure (int listIndex)
     for (int i = 0; i < allLists.size(); ++i)
     {
         sidebarPanel.addSet (names[i], allLists[i]->pads.size(), allLists[i]->isGrid,
-                             false, allLists[i]->isLocked);
+                             false, allLists[i]->isLocked, allLists[i]->themeColour);
         sidebarPanel.setListLooping (i, allLists[i]->isLooping);
     }
 
@@ -2268,6 +2526,9 @@ void MainComponent::exportSetAtIndex (int listIndex)
         listElem->setAttribute ("isGrid", list->isGrid);
         listElem->setAttribute ("isLooping", list->isLooping);
         listElem->setAttribute ("isLocked", list->isLocked);
+
+        if (! showcontrol::colours::isDefaultTagColour (list->themeColour))
+            listElem->setAttribute ("themeColour", (int) list->themeColour.getARGB());
 
         if (list->isGrid)
         {
@@ -2336,7 +2597,7 @@ void MainComponent::moveListInProject (int fromIdx, int toIdx)
     for (int i = 0; i < allLists.size(); ++i)
     {
         sidebarPanel.addSet (names[i], allLists[i]->pads.size(), allLists[i]->isGrid,
-                             allLists[i]->useCueListPanel, allLists[i]->isLocked);
+                             allLists[i]->useCueListPanel, allLists[i]->isLocked, allLists[i]->themeColour);
         sidebarPanel.setListLooping (i, allLists[i]->isLooping);
     }
 
@@ -2367,8 +2628,52 @@ void MainComponent::movePadInList (int listIdx, int fromPadIdx, int toPadIdx)
     if (fromPadIdx < 0 || fromPadIdx >= n || toPadIdx < 0 || toPadIdx >= n || fromPadIdx == toPadIdx)
         return;
 
+    if (isPerformingUndoRedo.load (std::memory_order_acquire))
+    {
+        movePadInListImpl (listIdx, fromPadIdx, toPadIdx);
+        return;
+    }
+
+    const auto beforeState = std::make_shared<ListOrderUndoState> (captureListOrderSnapshot (listIdx));
+
+    performUndoableMutation (juce::String::fromUTF8 (u8"Di chuyển track"),
+                             [this, listIdx, fromPadIdx, toPadIdx]()
+                             {
+                                 movePadInListImpl (listIdx, fromPadIdx, toPadIdx);
+                                 refreshListOrderAfterMutation (listIdx);
+                                 triggerSave();
+                             },
+                             [this, listIdx, beforeState]()
+                             {
+                                 restoreListOrderSnapshot (listIdx, *beforeState);
+                                 refreshListOrderAfterMutation (listIdx);
+                                 triggerSave();
+                             });
+}
+
+void MainComponent::movePadInListImpl (int listIdx, int fromPadIdx, int toPadIdx)
+{
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked)
+        return;
+
+    const int n = list->pads.size();
+    if (fromPadIdx < 0 || fromPadIdx >= n || toPadIdx < 0 || toPadIdx >= n || fromPadIdx == toPadIdx)
+        return;
+
     auto* pad = list->pads.removeAndReturn (fromPadIdx);
     list->pads.insert (toPadIdx, pad);
+
+    // Sticky PAD layout: chỉ hoán đổi thứ tự tuyến tính — gridRow/gridCol trên SoundPad giữ nguyên.
+    if (juce::isPositiveAndBelow (fromPadIdx, list->cueMeta.size()))
+    {
+        auto meta = list->cueMeta.removeAndReturn (fromPadIdx);
+        const int metaInsert = juce::jlimit (0, list->cueMeta.size(), toPadIdx);
+        list->cueMeta.insert (metaInsert, meta);
+    }
 
     for (int i = 0; i < list->pads.size(); ++i)
         if (list->pads[i] != nullptr)
@@ -2385,13 +2690,777 @@ void MainComponent::movePadInList (int listIdx, int fromPadIdx, int toPadIdx)
 
         selectedPadIndices.clear();
         selectedPadIndices.add (selectedBgmIndex);
+    }
+}
+
+bool MainComponent::isSearchWindowFocused() noexcept
+{
+    if (auto* focused = juce::Component::getCurrentlyFocusedComponent())
+    {
+        if (dynamic_cast<juce::TextEditor*> (focused) != nullptr)
+            return true;
+    }
+
+    return false;
+}
+
+void MainComponent::forceStopActiveAudioForSafety()
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isTransportActive())
+                pad->triggerStop();
+        }
+    }
+}
+
+void MainComponent::clearAllPanelsSelectionLive()
+{
+    if (padReorderActive)
+        cancelPadReorder();
+
+    endMarqueeSelection();
+
+    selectedPadIndices.clear();
+    selectedBgmIndex = -1;
+
+    if (cueListPanel != nullptr)
+    {
+        cueListPanel->setSelectedIndices ({});
+        cueListPanel->setSelectedIndex (-1);
+    }
+
+    applyPadSelectionVisualState();
+    inspectorPanel.selectPad (nullptr);
+    masterDeckPanel.setActivePad (nullptr);
+}
+
+void MainComponent::refreshAllPanelsAfterDataMutation (int listIdx)
+{
+    rebuildSidebarFromAllLists();
+
+    if (juce::isPositiveAndBelow (listIdx, allLists.size()))
+        sidebarPanel.setSelectedIndex (listIdx);
+
+    if (listIdx != activeListIndex)
+    {
+        updateMainDeskDisplay();
+        return;
+    }
+
+    if (auto* list = getActiveListSafe())
+    {
+        layoutActiveListPads();
+
+        if (list->isGrid && list->useCueListPanel)
+            refreshCueListPanel();
+        else if (list->isGrid)
+            updateCuePlaybackIndicators();
+
+        applyPadSelectionVisualState();
+        refreshSidebarPlayingStatus();
+        pushStageMonitorUpdate();
+    }
+
+    updateMainDeskDisplay();
+    repaint();
+}
+
+void MainComponent::refreshGridLayoutAfterMutation (int listIdx)
+{
+    if (auto* list = allLists[listIdx])
+    {
+        rebuildHotkeyBindings();
+        syncCueMetadataFromPads (*list);
+    }
+
+    if (listIdx == activeListIndex)
+    {
+        layoutActiveListPads();
+
+        if (auto* panel = getPadPanel())
+            panel->resyncAndLayout();
+    }
+
+    refreshAllPanelsAfterDataMutation (listIdx);
+}
+
+void MainComponent::refreshPadGridLayoutFast (int listIdx)
+{
+    if (listIdx == activeListIndex)
+    {
+        if (auto* panel = getPadPanel())
+            panel->resyncAndLayout();
+    }
+}
+
+void MainComponent::refreshListOrderAfterMutation (int listIdx)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return;
+
+    if (activeListIndex == listIdx)
+    {
         applyPadSelectionVisualState();
         resized();
+
+        if (list->isGrid && list->useCueListPanel)
+            refreshCueListPanel();
+        else if (cueListPanel != nullptr && list->isGrid)
+            cueListPanel->setSelectedIndex (selectedBgmIndex);
     }
 
     rebuildSidebarFromAllLists();
     sidebarPanel.setSelectedIndex (listIdx);
-    saveProject();
+}
+
+void MainComponent::performUndoableMutation (const juce::String& transactionName,
+                                           std::function<void()> performMutation,
+                                           std::function<void()> undoMutation)
+{
+    if (isPerformingUndoRedo.load (std::memory_order_acquire))
+    {
+        if (performMutation)
+            performMutation();
+
+        return;
+    }
+
+    auto performShared = std::make_shared<std::function<void()>> (std::move (performMutation));
+    auto undoShared    = std::make_shared<std::function<void()>> (std::move (undoMutation));
+
+    undoManager.beginNewTransaction (transactionName);
+    undoManager.perform (new GlobalStateUndoAction (
+        [performShared]
+        {
+            if (performShared != nullptr && *performShared)
+                (*performShared)();
+        },
+        [undoShared]
+        {
+            if (undoShared != nullptr && *undoShared)
+                (*undoShared)();
+        }));
+}
+
+MainComponent::ListOrderUndoState MainComponent::captureListOrderSnapshot (int listIdx) const
+{
+    ListOrderUndoState state;
+
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return state;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return state;
+
+    for (auto* pad : list->pads)
+        state.padOrder.add (pad);
+
+    state.cueMeta = list->cueMeta;
+    return state;
+}
+
+void MainComponent::restoreListOrderSnapshot (int listIdx, const ListOrderUndoState& state)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return;
+
+    list->pads.clearQuick (false);
+
+    for (auto* pad : state.padOrder)
+        list->pads.add (pad);
+
+    list->cueMeta = state.cueMeta;
+
+    for (int i = 0; i < list->pads.size(); ++i)
+    {
+        if (auto* pad = list->pads[i])
+            pad->setPadIndex (i);
+    }
+}
+
+MainComponent::GridPositionsUndoState MainComponent::captureGridPositionsSnapshot (int listIdx) const
+{
+    GridPositionsUndoState state;
+
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return state;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return state;
+
+    for (auto* pad : list->pads)
+    {
+        if (pad == nullptr || ! pad->occupiesCueGridSlot())
+            continue;
+
+        GridPositionsUndoState::Entry entry;
+        entry.pad  = pad;
+        entry.row  = pad->getGridRow();
+        entry.col  = pad->getGridCol();
+        state.entries.add (entry);
+    }
+
+    return state;
+}
+
+void MainComponent::restoreGridPositionsSnapshot (int listIdx, const GridPositionsUndoState& state)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    for (const auto& entry : state.entries)
+    {
+        if (entry.pad == nullptr)
+            continue;
+
+        entry.pad->setGridPosition (entry.row, entry.col, true);
+        entry.pad->refreshHotkeyLabel();
+    }
+
+    refreshPadGridLayoutFast (listIdx);
+}
+
+MainComponent::PlaylistSnapshotUndoState MainComponent::capturePlaylistSnapshot (int listIdx) const
+{
+    PlaylistSnapshotUndoState state;
+    state.listIdx = listIdx;
+    state.activeListIndexAtCapture = activeListIndex;
+
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return state;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return state;
+
+    state.sidebarName       = sidebarPanel.getListName (listIdx);
+    state.isGrid            = list->isGrid;
+    state.isLooping         = list->isLooping;
+    state.useCueListPanel   = list->useCueListPanel;
+    state.clickPadToTrigger = list->clickPadToTrigger;
+    state.autoArmOnSelect   = list->autoArmOnSelect;
+    state.isLocked          = list->isLocked;
+    state.themeColour       = list->themeColour;
+    state.cueMeta           = list->cueMeta;
+
+    for (int i = 0; i < list->pads.size(); ++i)
+    {
+        auto* padXml = new juce::XmlElement ("Pad");
+
+        if (auto* pad = list->pads[i])
+        {
+            padXml->setAttribute ("file", pad->getFilePath());
+            padXml->setAttribute ("index", i);
+            writePadProjectState (*padXml, *pad);
+
+            if (juce::isPositiveAndBelow (i, list->cueMeta.size()))
+                writeCueMetaToPadElem (*padXml, list->cueMeta.getReference (i));
+        }
+
+        state.padXmls.add (padXml);
+    }
+
+    return state;
+}
+
+void MainComponent::applyUndoXmlToPad (ListData& list, SoundPad* pad, const juce::XmlElement& padElem)
+{
+    if (pad == nullptr)
+        return;
+
+    const juce::String filePath = padElem.getStringAttribute ("file", "");
+    CueItem cueMeta;
+    readCueMetaFromPadElem (padElem, cueMeta);
+
+    if (filePath.isNotEmpty())
+    {
+        const auto projectState = readPadProjectState (padElem);
+        const bool loopTrack = padElem.getBoolAttribute ("loopTrack", false);
+        const bool loop = list.isGrid ? list.isLooping : loopTrack;
+
+        pad->setPendingProjectState (projectState);
+        pad->configurePad (filePath, projectState.outputGain, loop);
+        pad->updateTheme (isDarkMode);
+        pad->setRenderMode (list.isGrid);
+        pad->setClickToTrigger (list.clickPadToTrigger);
+        pad->setCueListPlayback (list.isGrid);
+
+        if (list.isGrid)
+            pad->setLooping (list.isLooping);
+        else if (loopTrack)
+            pad->setLooping (true);
+    }
+    else
+    {
+        pad->setClickToTrigger (list.clickPadToTrigger);
+    }
+
+    pad->setTagColour (cueMeta.tagColour);
+
+    if (list.isGrid && padElem.hasAttribute ("gridRow"))
+    {
+        pad->setGridPosition (padElem.getIntAttribute ("gridRow", 0),
+                              padElem.getIntAttribute ("gridCol", 0));
+    }
+}
+
+SoundPad* MainComponent::insertPadFromUndoXml (ListData& list, int index, const juce::XmlElement& padElem)
+{
+    auto* pad = createSoundPad();
+    scrollContent->addChildComponent (pad);
+
+    const int insertIdx = juce::jlimit (0, list.pads.size(), index);
+    list.pads.insert (insertIdx, pad);
+
+    applyUndoXmlToPad (list, pad, padElem);
+    wireSoundPad (pad);
+    pad->setVisible (true);
+    return pad;
+}
+
+void MainComponent::restorePlaylistSnapshot (const PlaylistSnapshotUndoState& state)
+{
+    const int idx = juce::jlimit (0, allLists.size(), state.listIdx);
+
+    auto* newList = new ListData();
+    newList->isGrid            = state.isGrid;
+    newList->isLooping         = state.isLooping;
+    newList->useCueListPanel   = state.useCueListPanel;
+    newList->clickPadToTrigger = state.clickPadToTrigger;
+    newList->autoArmOnSelect   = state.autoArmOnSelect;
+    newList->isLocked          = state.isLocked;
+    newList->themeColour       = state.themeColour;
+    newList->cueMeta           = state.cueMeta;
+
+    for (int i = 0; i < state.padXmls.size(); ++i)
+    {
+        auto* pad = createSoundPad();
+        scrollContent->addChildComponent (pad);
+        newList->pads.add (pad);
+
+        if (auto* padXml = state.padXmls[i])
+            applyUndoXmlToPad (*newList, pad, *padXml);
+        else
+            applyProjectDefaultsToPad (pad);
+
+        wireSoundPad (pad);
+        pad->setPadIndex (i);
+        pad->setVisible (false);
+    }
+
+    juce::Array<juce::String> names;
+    for (int i = 0; i < sidebarPanel.getListCount(); ++i)
+        names.add (sidebarPanel.getListName (i));
+
+    names.insert (idx, state.sidebarName);
+    allLists.insert (idx, newList);
+
+    rebuildDefaultHotkeysForList (idx);
+
+    for (int i = idx + 1; i < allLists.size(); ++i)
+        rebuildDefaultHotkeysForList (i);
+
+    syncSidebarFromAllLists (names);
+
+    int targetActive = state.activeListIndexAtCapture;
+    if (targetActive < 0 || targetActive >= allLists.size())
+        targetActive = idx;
+
+    sidebarPanel.setSelectedIndex (targetActive);
+    loadList (targetActive, allLists[targetActive]->pads.size(), allLists[targetActive]->isGrid);
+    refreshAllPanelsAfterDataMutation (targetActive);
+}
+
+void MainComponent::deleteListAtIndexImpl (int idx)
+{
+    if (idx < 0 || idx >= allLists.size())
+        return;
+
+    if (auto* removed = allLists[idx])
+    {
+        // Chỉ dừng các pad đang transport-active TRONG list bị xóa — không đụng list khác.
+        surgicalStopTransportActivePadsInList (*removed);
+
+        detachInspectorFromPadsInList (removed);
+        detachDeckUiReferencesIfPadInList (*removed);
+
+        if (soloPad != nullptr)
+        {
+            for (auto* p : removed->pads)
+            {
+                if (p == soloPad)
+                {
+                    setSoloPad (nullptr, false);
+                    break;
+                }
+            }
+        }
+
+        for (auto* p : removed->pads)
+            unregisterPadFromMixer (p);
+    }
+
+    juce::Array<juce::String> names;
+    for (int i = 0; i < sidebarPanel.getListCount(); ++i)
+        names.add (sidebarPanel.getListName (i));
+
+    allLists.remove (idx);
+    names.remove (idx);
+
+    syncSidebarFromAllLists (names);
+
+    if (allLists.isEmpty())
+    {
+        sidebarPanel.setSelectedIndex (-1);
+        loadList (-1, 0, true);
+    }
+    else
+    {
+        const int next = juce::jlimit (0, allLists.size() - 1, idx);
+        sidebarPanel.setSelectedIndex (next);
+        loadList (next, sidebarPanel.getListTrackCount (next), allLists[next]->isGrid);
+    }
+}
+
+MainComponent::ListDeletionUndoState MainComponent::captureListDeletionSnapshot (
+    int listIdx, const juce::Array<int>& padIndices) const
+{
+    ListDeletionUndoState state;
+    state.listIdx = listIdx;
+
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return state;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return state;
+
+    auto sorted = padIndices;
+    sorted.sort();
+
+    for (const int idx : sorted)
+    {
+        if (! juce::isPositiveAndBelow (idx, list->pads.size()))
+            continue;
+
+        auto* pad = list->pads[idx];
+        if (pad == nullptr)
+            continue;
+
+        DeletedPadUndoEntry entry;
+        entry.index = idx;
+        entry.padXml = std::make_unique<juce::XmlElement> ("Pad");
+        entry.padXml->setAttribute ("file", pad->getFilePath());
+        entry.padXml->setAttribute ("index", idx);
+        writePadProjectState (*entry.padXml, *pad);
+
+        if (juce::isPositiveAndBelow (idx, list->cueMeta.size()))
+            writeCueMetaToPadElem (*entry.padXml, list->cueMeta.getReference (idx));
+
+        state.removedPads.add (std::move (entry));
+    }
+
+    return state;
+}
+
+SoundPad* MainComponent::restorePadFromUndoXml (ListData& list, int index, const juce::XmlElement& padElem)
+{
+    if (list.isGrid && index >= kMaxCuePadsPerList)
+        return nullptr;
+
+    auto* pad = ensurePadSlotAtIndex (list, index);
+    if (pad == nullptr)
+        return nullptr;
+
+    applyUndoXmlToPad (list, pad, padElem);
+    wireSoundPad (pad);
+    pad->setVisible (true);
+    return pad;
+}
+
+void MainComponent::restoreListDeletionSnapshot (const ListDeletionUndoState& state)
+{
+    if (! juce::isPositiveAndBelow (state.listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[state.listIdx];
+    if (list == nullptr || list->isLocked)
+        return;
+
+    juce::Array<int> restoreOrder;
+    for (int i = 0; i < state.removedPads.size(); ++i)
+        restoreOrder.add (i);
+
+    struct RestoreIndexDescending
+    {
+        const juce::Array<DeletedPadUndoEntry>* entries = nullptr;
+
+        int compareElements (int a, int b) const
+        {
+            return entries->getReference (b).index - entries->getReference (a).index;
+        }
+    };
+
+    RestoreIndexDescending restoreSorter;
+    restoreSorter.entries = &state.removedPads;
+    restoreOrder.sort (restoreSorter);
+
+    for (const int entryIdx : restoreOrder)
+    {
+        const auto& entry = state.removedPads.getReference (entryIdx);
+        if (entry.padXml == nullptr)
+            continue;
+
+        auto* restored = insertPadFromUndoXml (*list, entry.index, *entry.padXml);
+
+        if (restored == nullptr)
+            continue;
+
+        CueItem meta;
+        readCueMetaFromPadElem (*entry.padXml, meta);
+        meta.cueNumber = entry.index + 1;
+
+        if (meta.name.isEmpty())
+            meta.name = restored->getPadName();
+
+        while (list->cueMeta.size() <= entry.index)
+            list->cueMeta.add ({});
+
+        list->cueMeta.set (entry.index, meta);
+    }
+
+    for (int i = 0; i < list->pads.size(); ++i)
+    {
+        if (auto* pad = list->pads[i])
+            pad->setPadIndex (i);
+    }
+
+    if (list->isGrid)
+    {
+        syncCueMetadataFromPads (*list);
+        rebuildDefaultHotkeysForList (state.listIdx);
+    }
+
+    if (state.listIdx == activeListIndex)
+    {
+        if (list->isGrid)
+            updateCueGridUIFromData (*list);
+        else
+            resized();
+    }
+
+    refreshAllPanelsAfterDataMutation (state.listIdx);
+}
+
+void MainComponent::performPadGridMutationWithUndo (int listIdx,
+                                                  const juce::String& actionName,
+                                                  std::function<void()> mutation)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()) || mutation == nullptr)
+        return;
+
+    auto gridBefore = std::make_shared<GridPositionsUndoState> (captureGridPositionsSnapshot (listIdx));
+
+    performUndoableMutation (actionName,
+                           [this, listIdx, mutation, gridBefore]()
+                           {
+                               mutation();
+                               refreshPadGridLayoutFast (listIdx);
+                               triggerSave();
+                           },
+                           [this, listIdx, gridBefore]()
+                           {
+                               restoreGridPositionsSnapshot (listIdx, *gridBefore);
+                               triggerSave();
+                           });
+}
+
+void MainComponent::applyListSortAscending (int listIdx)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked || list->pads.size() <= 1)
+        return;
+
+    if (list->isGrid && ! list->useCueListPanel)
+        return;
+
+    const auto displayNameForIndex = [list] (int index) -> juce::String
+    {
+        if (auto* pad = list->pads[index])
+        {
+            const juce::String padName = pad->getPadName();
+            if (padName.isNotEmpty())
+                return padName;
+        }
+
+        if (juce::isPositiveAndBelow (index, list->cueMeta.size()))
+        {
+            const auto& metaName = list->cueMeta.getReference (index).name;
+            if (metaName.isNotEmpty())
+                return metaName;
+        }
+
+        return juce::String();
+    };
+
+    juce::Array<int> order;
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        order.add (i);
+
+    std::sort (order.begin(), order.end(),
+               [&displayNameForIndex] (int a, int b)
+               {
+                   return displayNameForIndex (a).compareNatural (displayNameForIndex (b)) < 0;
+               });
+
+    juce::Array<SoundPad*> sortedPtrs;
+
+    for (const int srcIdx : order)
+        sortedPtrs.add (list->pads[srcIdx]);
+
+    list->pads.clearQuick (false);
+
+    for (auto* pad : sortedPtrs)
+        list->pads.add (pad);
+
+    // Sticky layout: chỉ đổi thứ tự tuyến tính cueMeta — gridRow/gridCol trên SoundPad không đổi.
+    if (list->isGrid && list->useCueListPanel)
+        syncCueMetadataFromPads (*list);
+
+    for (int i = 0; i < list->pads.size(); ++i)
+    {
+        if (auto* pad = list->pads[i])
+            pad->setPadIndex (i);
+    }
+}
+
+void MainComponent::sortListTracksAscending (int listIdx)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked || list->pads.size() <= 1)
+        return;
+
+    if (list->isGrid && ! list->useCueListPanel)
+        return;
+
+    const auto displayNameForIndex = [list] (int index) -> juce::String
+    {
+        if (auto* pad = list->pads[index])
+        {
+            const juce::String padName = pad->getPadName();
+            if (padName.isNotEmpty())
+                return padName;
+        }
+
+        if (juce::isPositiveAndBelow (index, list->cueMeta.size()))
+        {
+            const auto& metaName = list->cueMeta.getReference (index).name;
+            if (metaName.isNotEmpty())
+                return metaName;
+        }
+
+        return juce::String();
+    };
+
+    juce::Array<int> order;
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        order.add (i);
+
+    std::sort (order.begin(), order.end(),
+               [&displayNameForIndex] (int a, int b)
+               {
+                   return displayNameForIndex (a).compareNatural (displayNameForIndex (b)) < 0;
+               });
+
+    for (int i = 0; i < order.size(); ++i)
+    {
+        if (order.getUnchecked (i) != i)
+        {
+            const auto beforeState = std::make_shared<ListOrderUndoState> (captureListOrderSnapshot (listIdx));
+
+            performUndoableMutation (juce::String::fromUTF8 (u8"Sắp xếp A-Z"),
+                                     [this, listIdx]()
+                                     {
+                                         applyListSortAscending (listIdx);
+                                         clearAllPanelsSelectionLive();
+                                         refreshAllPanelsAfterDataMutation (listIdx);
+                                         triggerSave();
+                                     },
+                                     [this, listIdx, beforeState]()
+                                     {
+                                         restoreListOrderSnapshot (listIdx, *beforeState);
+                                         clearAllPanelsSelectionLive();
+                                         refreshAllPanelsAfterDataMutation (listIdx);
+                                         triggerSave();
+                                     });
+            return;
+        }
+    }
+}
+
+void MainComponent::surgicalStopPadIfTransportActive (SoundPad* pad) noexcept
+{
+    if (pad == nullptr || ! pad->isTransportActive())
+        return;
+
+    audioEngine.stopCue (pad);
+}
+
+void MainComponent::surgicalStopTransportActivePadsInList (const ListData& list) noexcept
+{
+    for (auto* pad : list.pads)
+        surgicalStopPadIfTransportActive (pad);
+}
+
+void MainComponent::detachDeckUiReferencesIfPadInList (const ListData& list) noexcept
+{
+    if (auto* playing = findGloballyPrioritizedPlayingPad())
+    {
+        for (auto* p : list.pads)
+        {
+            if (p == playing)
+            {
+                masterDeckPanel.setActivePad (nullptr);
+                break;
+            }
+        }
+    }
+
+    if (lastUiSyncedPlayingPad != nullptr)
+    {
+        for (auto* p : list.pads)
+        {
+            if (p == lastUiSyncedPlayingPad)
+            {
+                lastUiSyncedPlayingPad = nullptr;
+                break;
+            }
+        }
+    }
 }
 
 void MainComponent::safelyPreparePadForDeletion (SoundPad* pad)
@@ -2401,8 +3470,8 @@ void MainComponent::safelyPreparePadForDeletion (SoundPad* pad)
 
     pad->cancelPendingAsyncWork();
 
-    if (pad->isTransportActive())
-        pad->triggerStop();
+    // Phẫu thuật đích danh: chỉ dừng CHÍNH pad bị xóa nếu đang phát ra loa.
+    surgicalStopPadIfTransportActive (pad);
 
     unregisterPadFromMixer (pad);
     pad->releaseThumbnailResources();
@@ -2439,6 +3508,14 @@ juce::Array<int> MainComponent::collectActiveListDeletionIndices() const
     auto* list = allLists[activeListIndex];
     if (list == nullptr)
         return indices;
+
+    if (isCueListViewActive() && cueListPanel != nullptr)
+    {
+        indices = cueListPanel->getSelectedRowIndices();
+
+        if (! indices.isEmpty())
+            return indices;
+    }
 
     indices = selectedPadIndices;
 
@@ -2519,21 +3596,23 @@ void MainComponent::promptDeleteSelectedPadsConfirmation()
                                                   if (confirmed && safeThis != nullptr)
                                                       safeThis->deleteSelectedPadsFromActiveList();
                                               },
-                                              this);
+                                              nullptr);
 }
 
 bool MainComponent::tryHandleDeleteOrBackspaceKey (const juce::KeyPress& key)
 {
-    const int keyCode = key.getKeyCode();
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
 
     if (keyCode != juce::KeyPress::deleteKey && keyCode != juce::KeyPress::backspaceKey)
         return false;
 
-    if (auto* focused = juce::Component::getCurrentlyFocusedComponent())
-    {
-        if (dynamic_cast<juce::TextEditor*> (focused) != nullptr)
-            return false;
-    }
+    if (! key.getModifiers().isCommandDown())
+        return false;
+
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+
+    if (shouldDebounceDeleteKey (keyCode, nowMs))
+        return true;
 
     return handleDeleteKeyForActiveSelection();
 }
@@ -2600,7 +3679,63 @@ void MainComponent::updateCueGridUIFromData (ListData& list)
     repaint();
 }
 
+juce::Array<int> MainComponent::buildBulkDeleteIndicesDescending (const juce::Array<int>& indices, int listSize)
+{
+    juce::SparseSet<int> uniqueRows;
+
+    for (const int idx : indices)
+    {
+        if (juce::isPositiveAndBelow (idx, listSize))
+            uniqueRows.addRange (juce::Range<int> (idx, idx + 1));
+    }
+
+    juce::Array<int> descending;
+
+    for (int rangeIdx = uniqueRows.getNumRanges(); --rangeIdx >= 0;)
+    {
+        const auto range = uniqueRows.getRange (rangeIdx);
+
+        for (int idx = range.getEnd() - 1; idx >= range.getStart(); --idx)
+            descending.add (idx);
+    }
+
+    return descending;
+}
+
 void MainComponent::deletePadsFromList (int listIdx, const juce::Array<int>& padIndices)
+{
+    if (listIdx < 0 || listIdx >= allLists.size() || padIndices.isEmpty())
+        return;
+
+    if (isPerformingUndoRedo.load (std::memory_order_acquire))
+    {
+        deletePadsFromListImpl (listIdx, padIndices);
+        return;
+    }
+
+    const auto deletionSnap = std::make_shared<ListDeletionUndoState> (
+        captureListDeletionSnapshot (listIdx, padIndices));
+    const auto indicesCopy = padIndices;
+
+    const juce::String undoLabel = indicesCopy.size() > 1
+                                       ? juce::String::fromUTF8 (u8"Xóa nhiều track")
+                                       : juce::String::fromUTF8 (u8"Xóa track");
+
+    performUndoableMutation (undoLabel,
+                             [this, listIdx, indicesCopy]()
+                             {
+                                 deletePadsFromListImpl (listIdx, indicesCopy);
+                                 triggerSave();
+                             },
+                             [this, deletionSnap]()
+                             {
+                                 restoreListDeletionSnapshot (*deletionSnap);
+                                 refreshAllPanelsAfterDataMutation (deletionSnap->listIdx);
+                                 triggerSave();
+                             });
+}
+
+void MainComponent::deletePadsFromListImpl (int listIdx, const juce::Array<int>& padIndices)
 {
     if (listIdx < 0 || listIdx >= allLists.size() || padIndices.isEmpty())
         return;
@@ -2609,15 +3744,15 @@ void MainComponent::deletePadsFromList (int listIdx, const juce::Array<int>& pad
     if (list == nullptr || list->isLocked)
         return;
 
-    juce::SparseSet<int> selectedRows;
-    for (auto idx : padIndices)
-    {
-        if (idx >= 0 && idx < list->pads.size())
-            selectedRows.addRange (juce::Range<int> (idx, idx + 1));
-    }
+    const auto rowsToRemove = buildBulkDeleteIndicesDescending (padIndices, list->pads.size());
 
-    if (selectedRows.isEmpty())
+    if (rowsToRemove.isEmpty())
         return;
+
+    juce::SparseSet<int> selectedRows;
+
+    for (const int idx : rowsToRemove)
+        selectedRows.addRange (juce::Range<int> (idx, idx + 1));
 
     if (listIdx == activeListIndex && padReorderActive)
     {
@@ -2632,33 +3767,49 @@ void MainComponent::deletePadsFromList (int listIdx, const juce::Array<int>& pad
             setSoloPad (nullptr, false);
     }
 
-    // Chặt đứt mọi con trỏ UI trước khi remove — tránh heap-use-after-free trên waveform.
-    inspectorPanel.selectPad (nullptr);
-    masterDeckPanel.setActivePad (nullptr);
-    lastUiSyncedPlayingPad = nullptr;
-
-    const int selectionAnchor = selectedRows.getTotalRange().getStart();
-
-    // Duyệt ngược từ dải cuối về đầu — xóa không làm lệch index còn lại.
-    for (int rangeIdx = selectedRows.getNumRanges(); --rangeIdx >= 0;)
+    // Chỉ ngắt Inspector/Deck nếu pad bị xóa đang được UI tham chiếu — không reset khi xóa track khác.
+    if (auto* currentInspectorPad = inspectorPanel.getCurrentPad())
     {
-        const auto range = selectedRows.getRange (rangeIdx);
+        const int inspIdx = list->pads.indexOf (currentInspectorPad);
 
-        for (int index = range.getEnd() - 1; index >= range.getStart(); --index)
+        if (inspIdx >= 0 && selectedRows.contains (inspIdx))
+            inspectorPanel.selectPad (nullptr);
+    }
+
+    if (auto* playing = findGloballyPrioritizedPlayingPad())
+    {
+        const int playingIdx = list->pads.indexOf (playing);
+
+        if (playingIdx >= 0 && selectedRows.contains (playingIdx))
+            masterDeckPanel.setActivePad (nullptr);
+    }
+
+    if (lastUiSyncedPlayingPad != nullptr)
+    {
+        const int syncedIdx = list->pads.indexOf (lastUiSyncedPlayingPad);
+
+        if (syncedIdx >= 0 && selectedRows.contains (syncedIdx))
+            lastUiSyncedPlayingPad = nullptr;
+    }
+
+    const int lowestDeletedRow = rowsToRemove.getLast();
+    const int targetRowAfterDelete = juce::jmax (0, lowestDeletedRow - 1);
+
+    // Bulk delete — vòng lặp đảo ngược: xóa từ đáy lên đỉnh, không lệch index.
+    for (const int index : rowsToRemove)
+    {
+        if (! juce::isPositiveAndBelow (index, list->pads.size()))
+            continue;
+
+        if (auto* pad = list->pads[index])
         {
-            if (index < 0 || index >= list->pads.size())
-                continue;
+            safelyPreparePadForDeletion (pad);
 
-            if (auto* pad = list->pads[index])
-            {
-                safelyPreparePadForDeletion (pad);
-
-                if (scrollContent != nullptr)
-                    scrollContent->removeChildComponent (pad);
-            }
-
-            list->pads.remove (index);
+            if (scrollContent != nullptr)
+                scrollContent->removeChildComponent (pad);
         }
+
+        list->pads.remove (index);
     }
 
     for (int i = 0; i < list->pads.size(); ++i)
@@ -2676,7 +3827,7 @@ void MainComponent::deletePadsFromList (int listIdx, const juce::Array<int>& pad
 
         if (! list->pads.isEmpty())
         {
-            selectedBgmIndex = juce::jlimit (0, list->pads.size() - 1, selectionAnchor);
+            selectedBgmIndex = juce::jmin (targetRowAfterDelete, list->pads.size() - 1);
             selectedPadIndices.add (selectedBgmIndex);
 
             if (auto* selectedPad = list->pads[selectedBgmIndex])
@@ -2684,15 +3835,30 @@ void MainComponent::deletePadsFromList (int listIdx, const juce::Array<int>& pad
         }
         else
         {
-            selectedBgmIndex = 0;
+            selectedBgmIndex = -1;
         }
 
         applyPadSelectionVisualState();
 
-        if (list->isGrid)
+        if (list->isGrid && list->useCueListPanel)
+        {
+            syncCueMetadataFromPads (*list);
+            refreshCueListPanel (false);
+            layoutActiveListPads();
+            repaint();
+        }
+        else if (list->isGrid)
+        {
             updateCueGridUIFromData (*list);
+        }
         else
+        {
             resized();
+
+            if (juce::isPositiveAndBelow (selectedBgmIndex, list->pads.size()))
+                if (auto* selectedPad = list->pads[selectedBgmIndex])
+                    forwardUiSelectionToPad (selectedPad, true);
+        }
 
         refreshSidebarPlayingStatus();
         pushStageMonitorUpdate();
@@ -2715,7 +3881,7 @@ MainComponent::PadGridLayout MainComponent::getPadGridLayout (int mainViewWidth,
     const int kMaxColsByWidth = juce::jmax (1, availableWidth / juce::jmax (1, 56 + layout.gap));
     const int kMaxCols = juce::jmax (1, juce::jmin (count, kMaxColsByWidth));
 
-    const int preferredPadW = juce::jlimit (56, 220, (int) std::round (gridSizeSlider.getValue()));
+    const int preferredPadW = 180;
     int cols = juce::jmax (1, availableWidth / juce::jmax (1, preferredPadW + layout.gap));
     cols = juce::jlimit (1, kMaxCols, cols);
 
@@ -2775,6 +3941,7 @@ void MainComponent::resetPadReorderVisualState()
         if (p == nullptr)
             continue;
 
+        p->setIsCurrentlyDragged (false);
         p->setAlpha (1.0f);
         p->setVisible (true);
     }
@@ -2794,6 +3961,779 @@ bool MainComponent::listHasLoadedAudio (const ListData& list) noexcept
     return false;
 }
 
+PadPanel* MainComponent::getPadPanel() const noexcept
+{
+    return dynamic_cast<PadPanel*> (scrollContent.get());
+}
+
+bool MainComponent::assignNextFreeGridCell (ListData& list, SoundPad* pad)
+{
+    if (pad == nullptr)
+        return false;
+
+    for (int r = 0; r < showcontrol::padgrid::kRows; ++r)
+    {
+        for (int c = 0; c < showcontrol::padgrid::kCols; ++c)
+        {
+            bool taken = false;
+
+            for (auto* p : list.pads)
+            {
+                if (p == nullptr || p == pad || ! p->occupiesCueGridSlot())
+                    continue;
+
+                if (p->getGridRow() == r && p->getGridCol() == c)
+                {
+                    taken = true;
+                    break;
+                }
+            }
+
+            if (! taken)
+            {
+                pad->setGridPosition (r, c);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+void MainComponent::movePadToGridCell (int listIdx, SoundPad* pad, int row, int col)
+{
+    if (pad == nullptr)
+        return;
+
+    performPadGridMutationWithUndo (listIdx,
+                                    juce::String::fromUTF8 (u8"Di chuyển PAD"),
+                                    [this, listIdx, pad, row, col]()
+                                    {
+                                        movePadToGridCellImpl (listIdx, pad, row, col);
+                                    });
+}
+
+void MainComponent::applyPadGridDropAt (int listIdx, SoundPad* sourcePad, int targetRow, int targetCol)
+{
+    movePadToGridCell (listIdx, sourcePad, targetRow, targetCol);
+}
+
+void MainComponent::movePadToGridCellImpl (int listIdx, SoundPad* pad, int row, int col)
+{
+    if (pad == nullptr || listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked || ! list->isGrid)
+        return;
+
+    if (! showcontrol::padgrid::isValidGridCell (row, col))
+        return;
+
+    SoundPad* occupant = nullptr;
+
+    for (auto* p : list->pads)
+    {
+        if (p == nullptr || p == pad || ! p->occupiesCueGridSlot())
+            continue;
+
+        if (p->getGridRow() == row && p->getGridCol() == col)
+        {
+            occupant = p;
+            break;
+        }
+    }
+
+    if (occupant != nullptr)
+    {
+        occupant->setGridPosition (pad->getGridRow(), pad->getGridCol());
+        occupant->refreshHotkeyLabel();
+    }
+
+    pad->setGridPosition (row, col);
+    pad->refreshHotkeyLabel();
+
+    if (auto* panel = getPadPanel())
+        panel->resyncAndLayout();
+}
+
+void MainComponent::movePadsToGridCell (int listIdx,
+                                        const juce::Array<int>& padIndices,
+                                        int anchorIndex,
+                                        int targetRow,
+                                        int targetCol)
+{
+    performPadGridMutationWithUndo (listIdx,
+                                    juce::String::fromUTF8 (u8"Di chuyển PAD"),
+                                    [this, listIdx, padIndices, anchorIndex, targetRow, targetCol]()
+                                    {
+                                        movePadsToGridCellImpl (listIdx, padIndices, anchorIndex, targetRow, targetCol);
+                                    });
+}
+
+void MainComponent::movePadsToGridCellImpl (int listIdx,
+                                        const juce::Array<int>& padIndices,
+                                        int anchorIndex,
+                                        int targetRow,
+                                        int targetCol)
+{
+    if (listIdx < 0 || listIdx >= allLists.size() || padIndices.isEmpty())
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked || ! list->isGrid)
+        return;
+
+    if (! showcontrol::padgrid::isValidGridCell (targetRow, targetCol))
+        return;
+
+    if (anchorIndex < 0 || anchorIndex >= list->pads.size())
+        return;
+
+    auto* anchorPad = list->pads[anchorIndex];
+    if (anchorPad == nullptr)
+        return;
+
+    juce::Array<SoundPad*> movingPads;
+    for (const auto idx : padIndices)
+    {
+        if (idx < 0 || idx >= list->pads.size())
+            continue;
+
+        if (auto* pad = list->pads[idx])
+            if (! movingPads.contains (pad))
+                movingPads.add (pad);
+    }
+
+    if (! movingPads.contains (anchorPad))
+        movingPads.add (anchorPad);
+
+    if (movingPads.size() <= 1)
+    {
+        movePadToGridCell (listIdx, anchorPad, targetRow, targetCol);
+        return;
+    }
+
+    const int deltaRow = targetRow - anchorPad->getGridRow();
+    const int deltaCol = targetCol - anchorPad->getGridCol();
+
+    struct PendingMove
+    {
+        SoundPad* pad = nullptr;
+        int fromRow = 0, fromCol = 0, toRow = 0, toCol = 0;
+    };
+
+    juce::Array<PendingMove> moves;
+
+    for (auto* pad : movingPads)
+    {
+        const int toRow = pad->getGridRow() + deltaRow;
+        const int toCol = pad->getGridCol() + deltaCol;
+
+        if (! showcontrol::padgrid::isValidGridCell (toRow, toCol))
+            return;
+
+        PendingMove move;
+        move.pad     = pad;
+        move.fromRow = pad->getGridRow();
+        move.fromCol = pad->getGridCol();
+        move.toRow   = toRow;
+        move.toCol   = toCol;
+        moves.add (move);
+    }
+
+    for (const auto& move : moves)
+    {
+        SoundPad* blocker = nullptr;
+
+        for (auto* p : list->pads)
+        {
+            if (p == nullptr || p == move.pad || ! p->occupiesCueGridSlot())
+                continue;
+
+            if (p->getGridRow() == move.toRow && p->getGridCol() == move.toCol)
+            {
+                blocker = p;
+                break;
+            }
+        }
+
+        if (blocker != nullptr && ! movingPads.contains (blocker))
+        {
+            blocker->setGridPosition (move.fromRow, move.fromCol);
+            blocker->refreshHotkeyLabel();
+        }
+    }
+
+    for (const auto& move : moves)
+    {
+        move.pad->setGridPosition (move.toRow, move.toCol);
+        move.pad->refreshHotkeyLabel();
+    }
+
+    if (auto* panel = getPadPanel())
+        panel->resyncAndLayout();
+}
+
+int MainComponent::findListIndexByName (const juce::String& name) const
+{
+    if (name.isEmpty())
+        return activeListIndex;
+
+    for (int i = 0; i < sidebarPanel.getListCount(); ++i)
+    {
+        if (sidebarPanel.getListName (i) == name)
+            return i;
+    }
+
+    return activeListIndex;
+}
+
+juce::var MainComponent::buildSidebarListDragPayload (const juce::Array<int>& itemIds) const
+{
+    juce::String listName;
+
+    if (activeListIndex >= 0 && activeListIndex < sidebarPanel.getListCount())
+        listName = sidebarPanel.getListName (activeListIndex);
+
+    juce::Array<showcontrol::crossdrag::TrackCopyRecord> tracks;
+
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (auto* list = allLists[activeListIndex])
+        {
+            for (const auto idx : itemIds)
+            {
+                if (idx < 0 || idx >= list->pads.size())
+                    continue;
+
+                auto* pad = list->pads[idx];
+
+                if (pad == nullptr)
+                    continue;
+
+                const juce::String path = pad->getConfiguredFilePath().isNotEmpty()
+                                              ? pad->getConfiguredFilePath()
+                                              : pad->getFilePath();
+
+                if (path.isEmpty())
+                    continue;
+
+                showcontrol::crossdrag::TrackCopyRecord rec;
+                rec.filePath    = path;
+                rec.customName  = pad->getPadName();
+                rec.tagColour   = pad->getTagColour();
+                rec.outputGain  = pad->getOutputGain();
+                rec.looping     = pad->isLooping();
+                tracks.add (rec);
+            }
+        }
+    }
+
+    return showcontrol::crossdrag::buildCrossComponentCopyPayload (listName, tracks);
+}
+
+juce::var MainComponent::buildPadPanelDragPayload (const juce::Array<int>& padIndices,
+                                                     int anchorIndex) const
+{
+    return showcontrol::crossdrag::buildPadPanelPayload (padIndices, anchorIndex, false);
+}
+
+void MainComponent::copyTracksToPadGrid (int targetRow,
+                                         int targetCol,
+                                         const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks)
+{
+    const int targetListIdx = activeListIndex;
+
+    if (targetListIdx < 0 || targetListIdx >= allLists.size() || tracks.isEmpty())
+        return;
+
+    auto* targetList = allLists[targetListIdx];
+
+    if (targetList == nullptr || targetList->isLocked || ! targetList->isGrid)
+        return;
+
+    if (! showcontrol::padgrid::isValidGridCell (targetRow, targetCol))
+        return;
+
+    crossComponentDragConsumed = true;
+
+    auto grid = buildGridOccupancyFromList (*targetList);
+    int curRow = targetRow;
+    int curCol = targetCol;
+    juce::Array<SoundPad*> createdPads;
+    const bool onActiveList = true;
+
+    for (const auto& track : tracks)
+    {
+        if (track.filePath.isEmpty())
+            continue;
+
+        if (targetList->pads.size() >= kMaxCuePadsPerList)
+        {
+            showCueGridFullAlert();
+            break;
+        }
+
+        const auto slot = findProximitySlotInGrid (grid, curRow, curCol);
+
+        if (slot.x < 0)
+            break;
+
+        auto* dup = createSoundPad();
+        scrollContent->addChildComponent (dup);
+        applyProjectDefaultsToPad (dup);
+        dup->configurePad (track.filePath, track.outputGain, track.looping);
+        dup->setCustomName (track.customName);
+        dup->setPadThemeColour (track.tagColour);
+        dup->updateTheme (isDarkMode);
+        dup->setRenderMode (true);
+        dup->setCueListPlayback (true);
+        dup->setGridPosition (slot.y, slot.x, true);
+        dup->refreshHotkeyLabel();
+        dup->setVisible (onActiveList);
+        wireSoundPad (dup);
+
+        targetList->pads.add (dup);
+        createdPads.add (dup);
+        markGridCellOccupied (grid, slot.y, slot.x);
+        curRow = slot.y;
+        curCol = slot.x + 1;
+    }
+
+    if (createdPads.isEmpty())
+        return;
+
+    finishBatchDuplicatedPads (createdPads);
+
+    for (int i = 0; i < targetList->pads.size(); ++i)
+        if (targetList->pads[i] != nullptr)
+            targetList->pads[i]->setPadIndex (i);
+
+    rebuildHotkeyBindings();
+    syncCueMetadataFromPads (*targetList);
+    layoutActiveListPads();
+
+    if (auto* panel = getPadPanel())
+        panel->resyncAndLayout();
+
+    rebuildSidebarFromAllLists();
+    persistApplicationStateNow();
+}
+
+void MainComponent::copyLegacySidebarItemsToPadGrid (int targetRow,
+                                                     int targetCol,
+                                                     const juce::Array<int>& itemIds,
+                                                     const juce::String& sourceListName)
+{
+    const int sourceListIdx = findListIndexByName (sourceListName);
+    juce::Array<showcontrol::crossdrag::TrackCopyRecord> tracks;
+
+    if (sourceListIdx >= 0 && sourceListIdx < allLists.size())
+    {
+        if (auto* sourceList = allLists[sourceListIdx])
+        {
+            for (const auto idx : itemIds)
+            {
+                if (idx < 0 || idx >= sourceList->pads.size())
+                    continue;
+
+                auto* pad = sourceList->pads[idx];
+
+                if (pad == nullptr)
+                    continue;
+
+                const juce::String path = pad->getConfiguredFilePath().isNotEmpty()
+                                              ? pad->getConfiguredFilePath()
+                                              : pad->getFilePath();
+
+                if (path.isEmpty())
+                    continue;
+
+                showcontrol::crossdrag::TrackCopyRecord rec;
+                rec.filePath    = path;
+                rec.customName  = pad->getPadName();
+                rec.tagColour   = pad->getTagColour();
+                rec.outputGain  = pad->getOutputGain();
+                rec.looping     = pad->isLooping();
+                tracks.add (rec);
+            }
+        }
+    }
+
+    if (! tracks.isEmpty())
+        copyTracksToPadGrid (targetRow, targetCol, tracks);
+}
+
+bool MainComponent::canAcceptCrossCopyToPadGrid() const noexcept
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return false;
+
+    const auto* list = allLists[activeListIndex];
+    return list != nullptr && list->isGrid && ! list->isLocked;
+}
+
+juce::Point<int> MainComponent::mapDropPointToPadGridCell (juce::Point<int> localInMain) const noexcept
+{
+    if (auto* panel = getPadPanel())
+    {
+        const auto inPanel = panel->getLocalPoint (this, localInMain);
+        return panel->gridCellAtPoint (inPanel);
+    }
+
+    return { 0, 0 };
+}
+
+void MainComponent::setPadPanelChildrenMousePassthrough (bool passthrough) noexcept
+{
+    if (auto* panel = getPadPanel())
+        panel->setPadChildrenMousePassthrough (passthrough);
+}
+
+void MainComponent::setCrossCopyDropHighlightActive (bool active)
+{
+    if (crossCopyDropHighlightActive == active)
+        return;
+
+    crossCopyDropHighlightActive = active;
+
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (auto* list = allLists[activeListIndex])
+        {
+            if (list->isGrid && list->useCueListPanel && cueListPanel != nullptr)
+                cueListPanel->setCrossCopyDropHighlight (active);
+        }
+    }
+
+    repaint();
+}
+
+bool MainComponent::handleCrossCopyDropOnPadGrid (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    if (! canAcceptCrossCopyToPadGrid())
+        return false;
+
+    juce::Array<showcontrol::crossdrag::TrackCopyRecord> copyTracks;
+    juce::String sourceListName;
+
+    if (! showcontrol::crossdrag::decodeCrossComponentCopyPayload (dragSourceDetails.description,
+                                                                    copyTracks,
+                                                                    sourceListName))
+    {
+        juce::Array<int> legacyItemIds;
+
+        if (! showcontrol::crossdrag::decodeSidebarListPayload (dragSourceDetails.description,
+                                                                 legacyItemIds,
+                                                                 sourceListName))
+            return false;
+
+        const auto cell = mapDropPointToPadGridCell (dragSourceDetails.localPosition);
+        copyLegacySidebarItemsToPadGrid (cell.y, cell.x, legacyItemIds, sourceListName);
+        crossComponentDragConsumed = true;
+    }
+    else
+    {
+        if (copyTracks.isEmpty())
+            return false;
+
+        const auto cell = mapDropPointToPadGridCell (dragSourceDetails.localPosition);
+        copyTracksToPadGrid (cell.y, cell.x, copyTracks);
+    }
+
+    return true;
+}
+
+bool MainComponent::isInterestedInDragSource (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    if (! showcontrol::crossdrag::isCrossCopyDropInterest (dragSourceDetails.description))
+        return false;
+
+    if (sidebarPanel.isVisible() && sidebarPanel.getBounds().contains (dragSourceDetails.localPosition))
+        return false;
+
+    if (! canAcceptCrossCopyToPadGrid())
+        return false;
+
+    // PadPanel xử lý trực tiếp khi lưới PAD đang hiển thị — MainComponent chỉ bắt khi CueList che vùng đích.
+    if (viewScroller.isVisible())
+    {
+        if (auto* panel = getPadPanel())
+        {
+            if (panel->isMatrixLayoutEnabled())
+                return false;
+        }
+    }
+
+    return true;
+}
+
+void MainComponent::itemDragEnter (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    if (! isInterestedInDragSource (dragSourceDetails))
+        return;
+
+    setCrossCopyDropHighlightActive (true);
+    setPadPanelChildrenMousePassthrough (true);
+}
+
+void MainComponent::itemDragMove (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    if (crossCopyDropHighlightActive)
+        repaint();
+    juce::ignoreUnused (dragSourceDetails);
+}
+
+void MainComponent::itemDragExit (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    juce::ignoreUnused (dragSourceDetails);
+    setCrossCopyDropHighlightActive (false);
+    setPadPanelChildrenMousePassthrough (false);
+}
+
+void MainComponent::itemDropped (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    setCrossCopyDropHighlightActive (false);
+    setPadPanelChildrenMousePassthrough (false);
+    handleCrossCopyDropOnPadGrid (dragSourceDetails);
+}
+
+void MainComponent::appendPadsFromGridToList (int targetListIdx,
+                                              const juce::Array<int>& padIndices)
+{
+    const int sourceListIdx = activeListIndex;
+
+    if (targetListIdx < 0 || targetListIdx >= allLists.size()
+        || sourceListIdx < 0 || sourceListIdx >= allLists.size()
+        || padIndices.isEmpty())
+        return;
+
+    auto* sourceList = allLists[sourceListIdx];
+    auto* targetList = allLists[targetListIdx];
+
+    if (sourceList == nullptr || targetList == nullptr || targetList->isLocked)
+        return;
+
+    juce::Array<SoundPad*> sourcePads;
+
+    for (const auto idx : padIndices)
+    {
+        if (idx < 0 || idx >= sourceList->pads.size())
+            continue;
+
+        if (auto* pad = sourceList->pads[idx])
+            if (! sourcePads.contains (pad))
+                sourcePads.add (pad);
+    }
+
+    if (sourcePads.isEmpty())
+        return;
+
+    crossComponentDragConsumed = true;
+
+    const bool onActiveTarget = (targetListIdx == activeListIndex);
+    juce::Array<SoundPad*> createdPads;
+
+    for (auto* srcPad : sourcePads)
+    {
+        if (srcPad == nullptr)
+            continue;
+
+        if (! targetList->isGrid && targetList->pads.size() >= kMaxCuePadsPerList)
+        {
+            showCueListCapacityAlert();
+            break;
+        }
+
+        if (targetList->isGrid && targetList->pads.size() >= kMaxCuePadsPerList)
+        {
+            showCueGridFullAlert();
+            break;
+        }
+
+        auto* dup = createDuplicatePadFromSource (*targetList, srcPad, onActiveTarget, true);
+
+        if (dup == nullptr)
+            continue;
+
+        if (targetList->isGrid)
+        {
+            if (! assignNextFreeGridCell (*targetList, dup))
+            {
+                delete dup;
+                showCueGridFullAlert();
+                break;
+            }
+
+            dup->refreshHotkeyLabel();
+        }
+
+        targetList->pads.add (dup);
+        createdPads.add (dup);
+    }
+
+    if (createdPads.isEmpty())
+        return;
+
+    finishBatchDuplicatedPads (createdPads);
+
+    for (int i = 0; i < targetList->pads.size(); ++i)
+        if (targetList->pads[i] != nullptr)
+            targetList->pads[i]->setPadIndex (i);
+
+    if (targetList->isGrid)
+        syncCueMetadataFromPads (*targetList);
+
+    if (onActiveTarget)
+    {
+        if (! targetList->isGrid)
+        {
+            selectedPadIndices.clear();
+
+            for (auto* dup : createdPads)
+            {
+                const int idx = targetList->pads.indexOf (dup);
+
+                if (idx >= 0)
+                    selectedPadIndices.add (idx);
+            }
+
+            if (! selectedPadIndices.isEmpty())
+                selectedBgmIndex = selectedPadIndices.getLast();
+
+            applyPadSelectionVisualState();
+        }
+
+        layoutActiveListPads();
+        refreshCueListPanel();
+
+        if (auto* panel = getPadPanel())
+            panel->resyncAndLayout();
+    }
+
+    rebuildHotkeyBindings();
+    rebuildSidebarFromAllLists();
+    persistApplicationStateNow();
+}
+
+void MainComponent::appendCopyTracksToPlaylist (int targetListIdx,
+                                                const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks)
+{
+    if (targetListIdx < 0 || targetListIdx >= allLists.size() || tracks.isEmpty())
+        return;
+
+    auto* targetList = allLists[targetListIdx];
+
+    if (targetList == nullptr || targetList->isLocked)
+        return;
+
+    crossComponentDragConsumed = true;
+
+    const bool onActiveTarget = (targetListIdx == activeListIndex);
+    juce::Array<SoundPad*> createdPads;
+
+    for (const auto& track : tracks)
+    {
+        if (track.filePath.isEmpty())
+            continue;
+
+        if (targetList->pads.size() >= kMaxCuePadsPerList)
+        {
+            if (targetList->isGrid)
+                showCueGridFullAlert();
+            else
+                showCueListCapacityAlert();
+
+            break;
+        }
+
+        auto* dup = createSoundPad();
+        scrollContent->addChildComponent (dup);
+        applyProjectDefaultsToPad (dup);
+        dup->configurePad (track.filePath, track.outputGain, track.looping);
+        dup->setCustomName (track.customName);
+        dup->setPadThemeColour (track.tagColour);
+        dup->updateTheme (isDarkMode);
+        dup->setRenderMode (targetList->isGrid);
+        dup->setCueListPlayback (targetList->isGrid);
+        dup->setVisible (onActiveTarget);
+        wireSoundPad (dup);
+
+        if (targetList->isGrid)
+        {
+            if (! assignNextFreeGridCell (*targetList, dup))
+            {
+                delete dup;
+                showCueGridFullAlert();
+                break;
+            }
+
+            dup->refreshHotkeyLabel();
+        }
+
+        targetList->pads.add (dup);
+        createdPads.add (dup);
+    }
+
+    if (createdPads.isEmpty())
+        return;
+
+    finishBatchDuplicatedPads (createdPads);
+
+    for (int i = 0; i < targetList->pads.size(); ++i)
+        if (targetList->pads[i] != nullptr)
+            targetList->pads[i]->setPadIndex (i);
+
+    if (targetList->isGrid)
+        syncCueMetadataFromPads (*targetList);
+
+    if (onActiveTarget)
+    {
+        if (! targetList->isGrid)
+        {
+            selectedPadIndices.clear();
+
+            for (auto* dup : createdPads)
+            {
+                const int idx = targetList->pads.indexOf (dup);
+
+                if (idx >= 0)
+                    selectedPadIndices.add (idx);
+            }
+
+            if (! selectedPadIndices.isEmpty())
+                selectedBgmIndex = selectedPadIndices.getLast();
+
+            applyPadSelectionVisualState();
+        }
+
+        layoutActiveListPads();
+        refreshCueListPanel();
+
+        if (auto* panel = getPadPanel())
+            panel->resyncAndLayout();
+    }
+
+    rebuildHotkeyBindings();
+    sidebarPanel.setListTrackCount (targetListIdx, targetList->pads.size());
+    persistApplicationStateNow();
+}
+
+void MainComponent::persistApplicationStateNow()
+{
+    if (isOperatingState())
+        return;
+
+    saveApplicationStateInternal();
+}
+
+void MainComponent::rebuildHotkeyBindings()
+{
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+        rebuildDefaultHotkeysForList (activeListIndex);
+}
+
 void MainComponent::layoutActiveListPads()
 {
     if (activeListIndex < 0 || activeListIndex >= allLists.size() || scrollContent == nullptr)
@@ -2809,10 +4749,10 @@ void MainComponent::layoutActiveListPads()
     const int viewH   = viewScroller.getViewHeight();
     constexpr int kPrefetchMarginPx = 220;
     const bool hasLoadedAudio = listHasLoadedAudio (*current);
-    auto* scrollContainer = dynamic_cast<ScrollableContainer*> (scrollContent.get());
+    auto* scrollContainer = getPadPanel();
 
     if (scrollContainer != nullptr)
-        scrollContainer->setEmptyListHint (ScrollableContainer::EmptyListHint::none);
+        scrollContainer->setEmptyListHint (PadPanel::EmptyListHint::none);
 
     if (current->isGrid && current->useCueListPanel && cueListPanel != nullptr)
     {
@@ -2820,11 +4760,7 @@ void MainComponent::layoutActiveListPads()
             if (p != nullptr)
                 p->setVisible (false);
 
-        syncCueMetadataFromPads (*current);
-        cueListPanel->setCues (current->cueMeta);
-        cueListPanel->setSelectedIndex (selectedBgmIndex);
-        cueListPanel->resetListScrollToTop();
-        updateCuePlaybackIndicators();
+        refreshCueListPanel (false);
 
         if (scrollContent != nullptr)
             scrollContent->setSize (mainViewWidth, viewH);
@@ -2846,14 +4782,21 @@ void MainComponent::layoutActiveListPads()
                     p->setVisible (false);
 
             if (scrollContainer != nullptr)
-                scrollContainer->setEmptyListHint (ScrollableContainer::EmptyListHint::cueGrid);
+                scrollContainer->setEmptyListHint (PadPanel::EmptyListHint::cueGrid);
 
             scrollContent->setSize (mainViewWidth, viewScroller.getHeight());
             viewScroller.setViewPosition (0, 0);
             return;
         }
 
-        const auto grid = getPadGridLayout (mainViewWidth, viewScroller.getHeight(), current->pads.size());
+        if (scrollContainer != nullptr)
+        {
+            scrollContainer->setMatrixLayoutEnabled (true);
+            scrollContainer->setPadList (&current->pads);
+        }
+
+        scrollContent->setSize (mainViewWidth, viewScroller.getHeight());
+        viewScroller.setScrollBarsShown (false, false, false, false);
 
         for (int i = 0; i < current->pads.size(); ++i)
         {
@@ -2865,13 +4808,35 @@ void MainComponent::layoutActiveListPads()
 
             p->setRenderMode (true);
             p->setIsSelectedRow (isPadSelectedInActiveList (i));
-            const auto cellBounds = grid.cellBounds (i);
-            p->setBounds (cellBounds);
-            p->setVisible (true);
-            p->setAlpha (isDragSource ? 0.34f : 1.0f);
 
-            const bool inPrefetchRange = (cellBounds.getBottom() >= scrollY - kPrefetchMarginPx)
-                                           && (cellBounds.getY() <= scrollY + viewH + kPrefetchMarginPx);
+            if (p->isCurrentlyDraggedState())
+                p->setAlpha (0.0f);
+            else if (isDragSource)
+                p->setAlpha (0.0f);
+            else
+                p->setAlpha (1.0f);
+        }
+
+        if (scrollContainer != nullptr)
+            scrollContainer->refreshPadGrid();
+
+        PadPanel::BoundedGridLayout gridLayout;
+
+        if (scrollContainer != nullptr)
+            gridLayout = scrollContainer->getBoundedGridLayout();
+
+        for (int i = 0; i < current->pads.size(); ++i)
+        {
+            auto* p = current->pads[i];
+            if (p == nullptr)
+                continue;
+
+            const auto padCellBounds = showcontrol::padgrid::boundedCellBounds (gridLayout.cellW,
+                                                                                  gridLayout.cellH,
+                                                                                  p->getGridRow(),
+                                                                                  p->getGridCol());
+            const bool inPrefetchRange = (padCellBounds.getBottom() >= scrollY - kPrefetchMarginPx)
+                                           && (padCellBounds.getY() <= scrollY + viewH + kPrefetchMarginPx);
             const bool selectedOrActive = isPadSelectedInActiveList (i)
                                               || (p->isPlaying() || p->isTransportActive());
             const bool allowThumb = selectedOrActive || inPrefetchRange;
@@ -2880,10 +4845,15 @@ void MainComponent::layoutActiveListPads()
 
             if (allowThumb && p->getFilePath().isNotEmpty())
                 p->reloadWaveformThumbnail();
-            totalHeightOfContent = std::max (totalHeightOfContent, p->getBottom() + 12);
         }
+
+        return;
     }
-    else
+    else if (scrollContainer != nullptr)
+    {
+        scrollContainer->setMatrixLayoutEnabled (false);
+    }
+
     {
         if (! hasLoadedAudio)
         {
@@ -2892,14 +4862,14 @@ void MainComponent::layoutActiveListPads()
                     p->setVisible (false);
 
             if (scrollContainer != nullptr)
-                scrollContainer->setEmptyListHint (ScrollableContainer::EmptyListHint::bgmRows);
+                scrollContainer->setEmptyListHint (PadPanel::EmptyListHint::bgmRows);
 
             scrollContent->setSize (mainViewWidth, viewScroller.getHeight());
             viewScroller.setViewPosition (0, 0);
             return;
         }
 
-        constexpr int rowHeight = 44;
+        const int rowHeight = showcontrol::bgmList::kPlaylistRowHeight;
         int y = 0;
 
         for (int i = 0; i < current->pads.size(); ++i)
@@ -2912,9 +4882,9 @@ void MainComponent::layoutActiveListPads()
 
             p->setRenderMode (false);
             p->setIsSelectedRow (isPadSelectedInActiveList (i));
-            p->setBounds (0, y, mainViewWidth, rowHeight);
+            p->setBounds (0, y, std::max (0, mainViewWidth), rowHeight);
             p->setVisible (true);
-            p->setAlpha (isDragSource ? 0.30f : 1.0f);
+            p->setAlpha (isDragSource ? 0.0f : 1.0f);
 
             const int padTop = y;
             const int padBottom = y + rowHeight;
@@ -2969,6 +4939,8 @@ void MainComponent::autoScrollViewportForPadReorder (juce::Point<int> posInScrol
 
 void MainComponent::beginPadReorder (SoundPad* source)
 {
+    crossComponentDragConsumed = false;
+
     if (source == nullptr || activeListIndex < 0 || activeListIndex >= allLists.size())
         return;
 
@@ -2992,13 +4964,18 @@ void MainComponent::beginPadReorder (SoundPad* source)
     padReorderStackAnimActive = selectedPadIndices.size() > 1 && selectedPadIndices.contains (padReorderFromIndex);
 
     if (list->isGrid)
-        padReorderGhostImage = source->createComponentSnapshot (source->getLocalBounds(), true, 2.0f);
+    {
+        if (auto* panel = getPadPanel())
+            panel->beginInternalGridDragSession (source);
+    }
     else
+    {
         padReorderGhostImage = {};
+    }
 
     layoutActiveListPads();
 
-    if (padReorderOverlay != nullptr)
+    if (padReorderOverlay != nullptr && ! list->isGrid)
     {
         updatePadReorderOverlayBounds();
         padReorderOverlay->setBufferedToImage (true);
@@ -3014,9 +4991,37 @@ void MainComponent::updatePadReorder (juce::Point<int> posInScrollContent)
     if (! padReorderActive)
         return;
 
+    const int prevInsertIndex = padReorderInsertIndex;
+    const auto prevPointerPos = padReorderPointerPos;
     padReorderPointerPos = posInScrollContent;
 
-    padReorderInsertIndex = hitTestPadInsertIndex (posInScrollContent);
+    if (padReorderIsGridMode && padReorderSource != nullptr)
+    {
+        if (auto* panel = getPadPanel())
+            panel->applyGridDragHoverAtLocalPoint (posInScrollContent, padReorderSource);
+    }
+
+    if (! padReorderIsGridMode)
+        padReorderInsertIndex = hitTestPadInsertIndex (posInScrollContent);
+
+    if (padReorderOverlay != nullptr && ! padReorderIsGridMode)
+    {
+        if (prevInsertIndex != padReorderInsertIndex)
+        {
+            repaintPadReorderInsertStrip (prevInsertIndex);
+            repaintPadReorderInsertStrip (padReorderInsertIndex);
+        }
+
+        if (prevPointerPos != padReorderPointerPos)
+        {
+            repaintPadReorderCapsuleStrip (prevPointerPos);
+            repaintPadReorderCapsuleStrip (padReorderPointerPos);
+        }
+    }
+    else if (padReorderOverlay != nullptr)
+    {
+        padReorderOverlay->repaint();
+    }
 }
 
 void MainComponent::updatePadReorderOverlayBounds()
@@ -3028,8 +5033,21 @@ void MainComponent::updatePadReorderOverlayBounds()
     padReorderOverlay->toFront (false);
 }
 
+void MainComponent::consumeInternalJucePadDrop() noexcept
+{
+    crossComponentDragConsumed = true;
+    cancelPadReorder (true);
+}
+
 void MainComponent::endPadReorder()
 {
+    if (crossComponentDragConsumed)
+    {
+        crossComponentDragConsumed = false;
+        cancelPadReorder();
+        return;
+    }
+
     if (! padReorderActive || padReorderSource == nullptr)
     {
         cancelPadReorder();
@@ -3041,6 +5059,36 @@ void MainComponent::endPadReorder()
     const int listIdx = activeListIndex;
     const int from = padReorderFromIndex;
     const int target = padReorderInsertIndex;
+    auto* draggedPad = padReorderSource;
+    const bool gridMode = padReorderIsGridMode;
+
+    if (gridMode && draggedPad != nullptr && draggedPad->hasActiveJuceSystemDrag())
+        return;
+
+    if (gridMode && draggedPad != nullptr && listIdx >= 0 && listIdx < allLists.size())
+    {
+        if (auto* panel = getPadPanel())
+        {
+            const auto cell = panel->gridCellAtPoint (padReorderPointerPos);
+            juce::Array<int> dragSelection = selectedPadIndices;
+            dragSelection.sort();
+
+            if (dragSelection.isEmpty() || ! dragSelection.contains (from))
+            {
+                dragSelection.clear();
+                dragSelection.add (from);
+            }
+
+            cancelPadReorder();
+
+            if (dragSelection.size() > 1)
+                movePadsToGridCell (listIdx, dragSelection, from, cell.y, cell.x);
+            else
+                movePadToGridCell (listIdx, draggedPad, cell.y, cell.x);
+
+            return;
+        }
+    }
 
     cancelPadReorder();
 
@@ -3065,7 +5113,12 @@ void MainComponent::endPadReorder()
 
     if (dragSelection.size() == 1)
     {
-        const int singleTo = juce::jlimit (0, juce::jmax (0, n - 1), to == n ? n - 1 : to);
+        if (from == to)
+            return;
+
+        int destRowIndex = showcontrol::crossdrag::computeFinalRowIndexAfterMoveDown (from, to);
+        const int singleTo = juce::jlimit (0, juce::jmax (0, n - 1), destRowIndex >= n ? n - 1 : destRowIndex);
+
         if (from == singleTo)
             return;
 
@@ -3076,7 +5129,7 @@ void MainComponent::endPadReorder()
     movePadsBlockInList (listIdx, dragSelection, to);
 }
 
-void MainComponent::cancelPadReorder()
+void MainComponent::cancelPadReorder (bool keepPadGridDragVisual)
 {
     padReorderSource = nullptr;
     padReorderFromIndex = -1;
@@ -3089,6 +5142,14 @@ void MainComponent::cancelPadReorder()
 
     padReorderGhostImage = {};
     resetPadReorderVisualState();
+
+    if (auto* panel = getPadPanel())
+    {
+        if (! keepPadGridDragVisual)
+            panel->setDraggingActive (false);
+
+        panel->repaint();
+    }
 
     if (padReorderOverlay != nullptr)
     {
@@ -3113,38 +5174,31 @@ int MainComponent::hitTestPadInsertIndex (juce::Point<int> local) const
 
     if (! list->isGrid)
     {
-        int lastBottom = 0;
-        for (int i = 0; i < n; ++i)
-            if (const auto* p = list->pads[i])
-                lastBottom = juce::jmax (lastBottom, p->getBottom());
+        const int rowHeight = showcontrol::bgmList::kPlaylistRowHeight;
 
-        if (lastBottom > 0 && local.y >= lastBottom - 2)
-            return n;
+        if (rowHeight <= 0)
+            return 0;
 
-        int bestIdx = 0;
-        float bestDist2 = std::numeric_limits<float>::max();
-
-        for (int i = 0; i < n; ++i)
-        {
-            const auto* p = list->pads[i];
-            if (p == nullptr)
-                continue;
-
-            const auto centre = p->getBounds().getCentre().toFloat();
-            const float d2 = centre.getDistanceSquaredFrom (local.toFloat());
-
-            if (d2 < bestDist2)
-            {
-                bestDist2 = d2;
-                bestIdx = i;
-            }
-        }
-
-        return bestIdx;
+        return showcontrol::crossdrag::computeRoundedRowInsertionIndex (local.y, rowHeight, n);
     }
 
     if (scrollContent == nullptr)
         return 0;
+
+    if (auto* panel = getPadPanel())
+    {
+        if (activeListIndex >= 0 && activeListIndex < allLists.size())
+        {
+            if (auto* list = allLists[activeListIndex])
+            {
+                if (list->isGrid)
+                {
+                    const auto cell = panel->gridCellAtPoint (local);
+                    return showcontrol::padgrid::linearSlotFromGrid (cell.y, cell.x);
+                }
+            }
+        }
+    }
 
     const auto grid = getPadGridLayout (scrollContent->getWidth(), viewScroller.getHeight(), n);
     int bestIdx = 0;
@@ -3177,24 +5231,46 @@ juce::Rectangle<int> MainComponent::getListInsertLineBounds() const
     if (list == nullptr || list->isGrid)
         return {};
 
+    const int rowHeight = showcontrol::bgmList::kPlaylistRowHeight;
+
+    if (rowHeight <= 0)
+        return {};
+
     const int width = scrollContent != nullptr ? scrollContent->getWidth() : viewScroller.getWidth();
     const int n = list->pads.size();
     const int target = juce::jlimit (0, n, padReorderInsertIndex);
+    return { 0, target * rowHeight, width, 0 };
+}
 
-    if (target == n)
-    {
-        if (n > 0)
-        {
-            if (auto* last = list->pads[n - 1])
-                return { 0, last->getBottom(), width, 0 };
-        }
-        return {};
-    }
+void MainComponent::repaintPadReorderInsertStrip (int insertIndex) const
+{
+    if (padReorderOverlay == nullptr || ! padReorderOverlay->isVisible() || insertIndex < 0)
+        return;
 
-    if (auto* p = list->pads[target])
-        return { 0, p->getY(), width, 0 };
+    const int rowHeight = showcontrol::bgmList::kPlaylistRowHeight;
 
-    return {};
+    if (rowHeight <= 0)
+        return;
+
+    const int scrollY = viewScroller.getViewPositionY();
+    const int lineY = insertIndex * rowHeight - scrollY;
+    constexpr int margin = 12;
+    padReorderOverlay->repaint (0, lineY - margin, padReorderOverlay->getWidth(), margin * 2);
+}
+
+void MainComponent::repaintPadReorderCapsuleStrip (juce::Point<int> pointerInScrollContent) const
+{
+    if (padReorderOverlay == nullptr || ! padReorderOverlay->isVisible())
+        return;
+
+    const int scrollY = viewScroller.getViewPositionY();
+    const int localY = pointerInScrollContent.y - scrollY;
+    constexpr int halfW = 120;
+    constexpr int halfH = 19;
+    padReorderOverlay->repaint (pointerInScrollContent.x - halfW,
+                               localY - halfH,
+                               halfW * 2,
+                               halfH * 2);
 }
 
 juce::Rectangle<int> MainComponent::getGridGapCellBounds() const
@@ -3207,16 +5283,16 @@ juce::Rectangle<int> MainComponent::getGridGapCellBounds() const
         return {};
 
     const int n = list->pads.size();
-    const auto grid = getPadGridLayout (scrollContent->getWidth(), viewScroller.getHeight(), n);
-    const int target = juce::jlimit (0, n, padReorderInsertIndex);
+    const int target = juce::jlimit (0, showcontrol::padgrid::kMaxCells - 1, padReorderInsertIndex);
+    const auto cell = showcontrol::padgrid::gridFromLinearSlot (target);
 
-    if (target == n && n > 0)
+    if (auto* panel = getPadPanel())
     {
-        const auto lastCell = grid.cellBounds (n - 1);
-        return lastCell.translated (grid.padW + grid.gap, 0);
+        const auto grid = panel->getBoundedGridLayout();
+        return showcontrol::padgrid::boundedCellBounds (grid.cellW, grid.cellH, cell.y, cell.x);
     }
 
-    return grid.cellBounds (juce::jlimit (0, juce::jmax (0, n - 1), target));
+    return {};
 }
 
 void MainComponent::paintPadReorderOverlay (juce::Graphics& g) const
@@ -3232,7 +5308,13 @@ void MainComponent::paintPadReorderOverlay (juce::Graphics& g) const
         g.drawRect (marquee, 2);
     }
 
-    if (! padReorderActive || padReorderInsertIndex < 0)
+    if (! padReorderActive)
+        return;
+
+    if (padReorderIsGridMode)
+        return;
+
+    if (padReorderInsertIndex < 0)
         return;
 
     if (activeListIndex < 0 || activeListIndex >= allLists.size())
@@ -3251,46 +5333,43 @@ void MainComponent::paintPadReorderOverlay (juce::Graphics& g) const
     const float animT = juce::jlimit (0.0f, 1.0f, elapsedMs / animDurationMs);
     const float easeOut = 1.0f - std::pow (1.0f - animT, 3.0f);
     const bool stackIntroActive = draggingGroup && padReorderStackAnimActive && animT < 1.0f;
+    const int pointerX = padReorderPointerPos.x;
+    const int pointerY = padReorderPointerPos.y - scrollY;
 
     if (! padReorderIsGridMode)
     {
         const auto line = getListInsertLineBounds();
+
         if (line.getWidth() > 0)
         {
-            const int lineY = line.getY() - scrollY;
-            g.setColour (pal.accent.withAlpha (0.55f));
-            g.fillEllipse (18.0f, (float) lineY - 4.0f, 8.0f, 8.0f);
-            g.fillEllipse ((float) getWidth() - 26.0f, (float) lineY - 4.0f, 8.0f, 8.0f);
-            g.setColour (pal.accent);
-            g.fillRect (22, lineY - 1, getWidth() - 44, 2);
+            const float lineY = (float) (line.getY() - scrollY);
+            showcontrol::crossdrag::paintNeonRoundedCapInsertLine (g, lineY, (float) getWidth());
         }
-    }
-    else
-    {
-        auto targetCell = getGridGapCellBounds();
-        targetCell.setY (targetCell.getY() - scrollY);
-        const auto targetF = targetCell.toFloat().expanded (6.0f, 6.0f);
 
-        const float pulse = 0.5f + 0.5f * std::sin ((float) juce::Time::getMillisecondCounter() * 0.009f);
-        g.setColour (pal.dragTargetGlow.withAlpha (0.06f + 0.14f * pulse));
-        g.fillRoundedRectangle (targetF.expanded (4.0f), 12.0f);
-        g.setColour (pal.dragTargetGlow.withAlpha (0.16f + 0.12f * pulse));
-        g.fillRoundedRectangle (targetF, 10.0f);
-        g.setColour (pal.accent.withAlpha (0.90f));
-        g.drawRoundedRectangle (targetF, 10.0f, 2.5f);
+        if (padReorderSource != nullptr && ! padReorderSource->hasActiveJuceSystemDrag())
+        {
+            const bool draggingGroup = selectedPadIndices.size() > 1
+                                       && selectedPadIndices.contains (padReorderFromIndex);
+            const int itemCount = draggingGroup ? selectedPadIndices.size() : 1;
+
+            showcontrol::crossdrag::paintPremiumDragCapsuleProxy (g,
+                                                                  (float) pointerX,
+                                                                  (float) pointerY,
+                                                                  padReorderSource->getPadName(),
+                                                                  itemCount);
+        }
+
+        return;
     }
 
     if (padReorderSource == nullptr)
         return;
 
-    const int pointerX = padReorderPointerPos.x;
-    const int pointerY = padReorderPointerPos.y - scrollY;
-
     if (padReorderIsGridMode)
     {
         const auto srcBounds = padReorderSource->getBounds();
         auto topLeft = padReorderPointerPos - padReorderDragOffset;
-        if (stackIntroActive && padReorderSource != nullptr)
+        if (stackIntroActive)
             topLeft = padReorderSource->getBounds().getPosition();
         topLeft.y -= scrollY;
 
@@ -3299,17 +5378,6 @@ void MainComponent::paintPadReorderOverlay (juce::Graphics& g) const
                                       (float) srcBounds.getHeight());
         const float popScale = stackIntroActive ? (1.0f + 0.08f * std::sin (easeOut * juce::MathConstants<float>::pi)) : 1.04f;
         ghost = ghost.withSizeKeepingCentre (ghost.getWidth() * popScale, ghost.getHeight() * popScale);
-
-        auto targetCell = getGridGapCellBounds();
-        targetCell.setY (targetCell.getY() - scrollY);
-        const auto targetCentre = targetCell.getCentre().toFloat();
-        const auto ghostCentre = ghost.getCentre();
-        const float snap = 0.22f;
-        ghost.setCentre (ghostCentre.x + (targetCentre.x - ghostCentre.x) * snap,
-                         ghostCentre.y + (targetCentre.y - ghostCentre.y) * snap);
-
-        g.setColour (pal.dragTargetGlow.withAlpha (0.20f));
-        g.drawLine ((float) pointerX, (float) pointerY, targetCentre.x, targetCentre.y, 1.5f);
 
         if (draggedCount > 1)
         {
@@ -3337,68 +5405,6 @@ void MainComponent::paintPadReorderOverlay (juce::Graphics& g) const
         g.drawRoundedRectangle (ghost.expanded (1.5f), 8.0f, 3.5f);
         g.setColour (pal.accent.withAlpha (0.55f));
         g.drawRoundedRectangle (ghost.expanded (3.0f), 9.0f, 1.5f);
-
-        if (draggedCount > 1)
-        {
-            const juce::String countText = "x" + juce::String (draggedCount);
-            juce::Rectangle<float> badge (ghost.getRight() - 34.0f, ghost.getY() - 12.0f, 30.0f, 18.0f);
-            g.setColour (pal.accent);
-            g.fillRoundedRectangle (badge, 8.0f);
-            g.setColour (juce::Colours::white);
-            g.setFont (ShowTheme::fontBold (10.5f));
-            g.drawText (countText, badge, juce::Justification::centred);
-        }
-    }
-    else
-    {
-        const juce::String title = padReorderSource->getPadName();
-        const auto titleFont = ShowTheme::fontBold (12.0f);
-        g.setFont (titleFont);
-        juce::GlyphArrangement glyphs;
-        glyphs.addLineOfText (titleFont, title, 0.0f, 0.0f);
-        const float textW = glyphs.getBoundingBox (0, -1, true).getWidth();
-        const float pillW = juce::jmin (420.0f, textW + 28.0f);
-        const float pillH = 32.0f;
-
-        juce::Rectangle<float> ghost ((float) pointerX - pillW * 0.5f,
-                                      (float) pointerY - pillH * 0.5f,
-                                      pillW, pillH);
-        if (stackIntroActive && padReorderSource != nullptr)
-        {
-            const auto src = padReorderSource->getBounds();
-            ghost.setCentre ((float) src.getCentreX(), (float) (src.getCentreY() - scrollY));
-        }
-        if (stackIntroActive)
-            ghost = ghost.withSizeKeepingCentre (ghost.getWidth() * (1.0f + 0.04f * std::sin (easeOut * juce::MathConstants<float>::pi)),
-                                                 ghost.getHeight() * (1.0f + 0.04f * std::sin (easeOut * juce::MathConstants<float>::pi)));
-
-        if (draggedCount > 1)
-        {
-            const int layers = juce::jmin (4, draggedCount - 1);
-            for (int i = layers; i >= 1; --i)
-            {
-                const float introMul = stackIntroActive ? easeOut : 1.0f;
-                auto layer = ghost.translated ((float) i * 12.0f * introMul, (float) i * 7.0f * introMul)
-                                  .withSizeKeepingCentre (ghost.getWidth() * (1.0f - 0.04f * (float) i),
-                                                          ghost.getHeight() * (1.0f - 0.03f * (float) i));
-                g.setColour (pal.dragGhostFill.withAlpha (0.42f - (float) (i - 1) * 0.08f));
-                g.fillRoundedRectangle (layer, pillH * 0.5f);
-                g.setColour (pal.accent.withAlpha (0.42f - (float) (i - 1) * 0.08f));
-                g.drawRoundedRectangle (layer, pillH * 0.5f, 1.5f);
-            }
-        }
-
-        g.setColour (juce::Colours::black.withAlpha (0.28f));
-        g.fillRoundedRectangle (ghost.translated (0.0f, 2.0f), pillH * 0.5f);
-
-        g.setColour (pal.dragGhostFill);
-        g.fillRoundedRectangle (ghost, pillH * 0.5f);
-
-        g.setColour (pal.dragGhostText);
-        g.drawText (title, ghost.reduced (12.0f, 4.0f), juce::Justification::centredLeft, true);
-
-        g.setColour (pal.accent.withAlpha (0.75f));
-        g.drawRoundedRectangle (ghost, pillH * 0.5f, 1.5f);
 
         if (draggedCount > 1)
         {
@@ -3760,6 +5766,40 @@ void MainComponent::movePadsBlockInList (int listIdx, const juce::Array<int>& so
     if (list == nullptr || list->isLocked)
         return;
 
+    if (isPerformingUndoRedo.load (std::memory_order_acquire))
+    {
+        movePadsBlockInListImpl (listIdx, sourceIndices, insertBeforeIndex);
+        return;
+    }
+
+    const auto beforeState = std::make_shared<ListOrderUndoState> (captureListOrderSnapshot (listIdx));
+    const auto indicesCopy = sourceIndices;
+    const int insertCopy = insertBeforeIndex;
+
+    performUndoableMutation (juce::String::fromUTF8 (u8"Di chuyển track"),
+                             [this, listIdx, indicesCopy, insertCopy]()
+                             {
+                                 movePadsBlockInListImpl (listIdx, indicesCopy, insertCopy);
+                                 refreshListOrderAfterMutation (listIdx);
+                                 triggerSave();
+                             },
+                             [this, listIdx, beforeState]()
+                             {
+                                 restoreListOrderSnapshot (listIdx, *beforeState);
+                                 refreshListOrderAfterMutation (listIdx);
+                                 triggerSave();
+                             });
+}
+
+void MainComponent::movePadsBlockInListImpl (int listIdx, const juce::Array<int>& sourceIndices, int insertBeforeIndex)
+{
+    if (listIdx < 0 || listIdx >= allLists.size() || sourceIndices.isEmpty())
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->isLocked)
+        return;
+
     juce::Array<int> sorted;
     for (auto idx : sourceIndices)
     {
@@ -3814,11 +5854,6 @@ void MainComponent::movePadsBlockInList (int listIdx, const juce::Array<int>& so
             pad->setPadIndex (i);
 
     selectedBgmIndex = selectedPadIndices.getFirst();
-    applyPadSelectionVisualState();
-    resized();
-    rebuildSidebarFromAllLists();
-    sidebarPanel.setSelectedIndex (listIdx);
-    saveProject();
 }
 
 bool MainComponent::isPadSelectedInActiveList (int padIndex) const
@@ -4012,18 +6047,24 @@ void MainComponent::ingestVideoFileToPad (const juce::File& videoFile, SoundPad*
                 return;
             }
 
-            juce::File audioPath = wavFile;
-            const juce::File sidecar = videoFile.getSiblingFile (videoFile.getFileNameWithoutExtension()
-                                                                  + ".showcontrol.wav");
-            if (sidecar.getFullPathName() != wavFile.getFullPathName())
-            {
-                sidecar.deleteFile();
-                if (wavFile.copyFileTo (sidecar))
-                    audioPath = sidecar;
-            }
+            const juce::String cleanTrackName = VideoAudioExtractor::displayNameFromVideoFile (videoFile);
 
             applyProjectDefaultsToPad (targetPad);
-            targetPad->configurePad (audioPath.getFullPathName(), 1.0f, false);
+            targetPad->setCustomName (cleanTrackName);
+            targetPad->configurePad (wavFile.getFullPathName(), 1.0f, false);
+
+            const int listIdx = findListIndexForPad (allLists, targetPad);
+            if (listIdx >= 0)
+            {
+                if (auto* list = allLists[listIdx])
+                {
+                    syncCueMetadataFromPads (*list);
+
+                    if (listIdx == activeListIndex)
+                        refreshCueListPanel();
+                }
+            }
+
             saveProject();
 
             if (activeListIndex >= 0)
@@ -4073,14 +6114,42 @@ namespace
 {
     enum class TrackMenuId : int
     {
-        replaceFile = 1,
-        duplicate   = 2,
-        trimEditor  = 3,
-        revealFile  = 4,
-        deleteItem  = 5,
-        resetFade   = 6,
-        renameTrack = 7
+        replaceFile  = 1,
+        duplicate    = 2,
+        trimEditor   = 3,
+        revealFile   = 4,
+        deleteItem   = 5,
+        resetFade    = 6,
+        renameTrack  = 7,
+        sortAscending = 8
     };
+}
+
+void MainComponent::showBgmListBackgroundSortMenu (const juce::MouseEvent& e)
+{
+    juce::ignoreUnused (e);
+
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return;
+
+    auto* list = allLists[activeListIndex];
+    if (list == nullptr || list->isGrid || list->isLocked || list->pads.size() <= 1)
+        return;
+
+    juce::PopupMenu menu;
+    menu.addItem (1, juce::String::fromUTF8 (u8"Sắp xếp danh sách tự động tăng dần (A-Z) 🔤"));
+
+    const int listIdx = activeListIndex;
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (scrollContent.get()).withMousePosition(),
+                        [safeThis, listIdx] (int result)
+                        {
+                            if (safeThis == nullptr || result != 1)
+                                return;
+
+                            safeThis->sortListTracksAscending (listIdx);
+                        });
 }
 
 void MainComponent::syncContextMenuTargetSelection (int listIdx, int padIdx)
@@ -4129,7 +6198,36 @@ void MainComponent::showTrackContextMenu (SoundPad* pad)
 
     syncContextMenuTargetSelection (listIdx, padIdx);
 
+    const int totalTracks = list->pads.size();
+    const bool canSort = ! list->isGrid && ! list->isLocked && totalTracks > 1;
+
     juce::PopupMenu menu;
+
+    menu.addCustomItem (1,
+                        showcontrol::colours::makeTagColourMenuRow (
+                            pad->getTagColourRef(),
+                            [this, listIdx, padIdx] (juce::Colour)
+                            {
+                                if (listIdx < 0 || listIdx >= allLists.size())
+                                    return;
+
+                                auto* colourList = allLists[listIdx];
+                                if (colourList == nullptr || ! juce::isPositiveAndBelow (padIdx, colourList->pads.size()))
+                                    return;
+
+                                if (auto* targetPad = colourList->pads[padIdx])
+                                    applyTagColourToPadAndCue (*colourList, padIdx, targetPad->getTagColour());
+                            }),
+                        nullptr,
+                        juce::String::fromUTF8 (u8" "));
+
+    if (canSort)
+    {
+        menu.addItem ((int) TrackMenuId::sortAscending,
+                      juce::String::fromUTF8 (u8"Sắp xếp toàn bộ danh sách tăng dần (A-Z) 🔤"));
+        menu.addSeparator();
+    }
+
     menu.addItem ((int) TrackMenuId::renameTrack,  showcontrol::localization::tr (u8"Đổi tên bài hát"));
     menu.addItem ((int) TrackMenuId::replaceFile, showcontrol::localization::tr (u8"Thay đổi file nhạc..."), ! list->isLocked);
     menu.addItem ((int) TrackMenuId::duplicate,   showcontrol::localization::tr (u8"Nhân bản"));
@@ -4141,10 +6239,16 @@ void MainComponent::showTrackContextMenu (SoundPad* pad)
 
     juce::Component::SafePointer<SoundPad> safePad (pad);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (pad).withMousePosition(),
-                        [this, safePad] (int result)
+                        [this, safePad, listIdx, padIdx] (int result)
                         {
                             if (safePad == nullptr)
                                 return;
+
+                            if (result == (int) TrackMenuId::sortAscending)
+                            {
+                                sortListTracksAscending (listIdx);
+                                return;
+                            }
 
                             handleTrackMenuResult (safePad.getComponent(), result);
                         });
@@ -4180,7 +6284,12 @@ void MainComponent::handleTrackMenuResult (SoundPad* pad, int result)
 
         case TrackMenuId::duplicate:
             if (! list->isLocked)
-                duplicatePadAtIndex (listIdx, padIdx);
+            {
+                if (list->isGrid && listIdx == activeListIndex && selectedPadIndices.size() > 1)
+                    duplicateSelectedPads();
+                else
+                    duplicatePadAtIndex (listIdx, padIdx);
+            }
             break;
 
         case TrackMenuId::trimEditor:
@@ -4307,44 +6416,225 @@ void MainComponent::handleAudioFileReplacement (SoundPad* pad, const juce::File&
     saveProject();
 }
 
-void MainComponent::duplicatePadAtIndex (int listIdx, int padIdx)
+juce::Point<int> MainComponent::findSmartDuplicateGridSlot (const ListData& list,
+                                                            int sourceRow,
+                                                            int sourceCol) noexcept
 {
-    if (listIdx < 0 || listIdx >= allLists.size())
-        return;
+    const auto grid = buildGridOccupancyFromList (list);
+    return findProximitySlotInGrid (grid, sourceRow, sourceCol);
+}
 
-    auto* list = allLists[listIdx];
-    if (list == nullptr || list->isLocked)
-        return;
+MainComponent::GridOccupancy MainComponent::buildGridOccupancyFromList (const ListData& list) noexcept
+{
+    GridOccupancy grid {};
 
-    if (padIdx < 0 || padIdx >= list->pads.size())
-        return;
-
-    if (list->isGrid && list->pads.size() >= kMaxCuePadsPerList)
+    for (auto* pad : list.pads)
     {
-        showCueListCapacityAlert();
-        return;
+        if (pad == nullptr || ! pad->occupiesCueGridSlot())
+            continue;
+
+        const int row = juce::jlimit (0, showcontrol::padgrid::kRows - 1, pad->getGridRow());
+        const int col = juce::jlimit (0, showcontrol::padgrid::kCols - 1, pad->getGridCol());
+        grid[(size_t) row][(size_t) col] = true;
     }
 
-    auto* src = list->pads[padIdx];
-    if (src == nullptr)
-        return;
+    return grid;
+}
 
-    const int insertAt = padIdx + 1;
+void MainComponent::markGridCellOccupied (GridOccupancy& grid, int row, int col) noexcept
+{
+    row = juce::jlimit (0, showcontrol::padgrid::kRows - 1, row);
+    col = juce::jlimit (0, showcontrol::padgrid::kCols - 1, col);
+    grid[(size_t) row][(size_t) col] = true;
+}
+
+juce::Point<int> MainComponent::findProximitySlotInGrid (const GridOccupancy& grid,
+                                                       int sourceRow,
+                                                       int sourceCol) noexcept
+{
+    sourceRow = juce::jlimit (0, showcontrol::padgrid::kRows - 1, sourceRow);
+    sourceCol = juce::jlimit (0, showcontrol::padgrid::kCols - 1, sourceCol);
+
+    // Tầng 1: ô sát sườn bên phải cùng hàng
+    if ((sourceCol + 1) < showcontrol::padgrid::kCols
+        && ! grid[(size_t) sourceRow][(size_t) (sourceCol + 1)])
+    {
+        return { sourceCol + 1, sourceRow };
+    }
+
+    // Tầng 2: quét dạt phải cùng hàng
+    for (int c = sourceCol + 2; c < showcontrol::padgrid::kCols; ++c)
+    {
+        if (! grid[(size_t) sourceRow][(size_t) c])
+            return { c, sourceRow };
+    }
+
+    // Tầng 3: lấp trống nội bộ hàng bên trái
+    for (int c = 0; c < sourceCol; ++c)
+    {
+        if (! grid[(size_t) sourceRow][(size_t) c])
+            return { c, sourceRow };
+    }
+
+    // Tầng 4: các hàng phía dưới
+    for (int r = sourceRow + 1; r < showcontrol::padgrid::kRows; ++r)
+    {
+        for (int c = 0; c < showcontrol::padgrid::kCols; ++c)
+        {
+            if (! grid[(size_t) r][(size_t) c])
+                return { c, r };
+        }
+    }
+
+    // Tầng 5: các hàng phía trên đỉnh
+    for (int r = 0; r < sourceRow; ++r)
+    {
+        for (int c = 0; c < showcontrol::padgrid::kCols; ++c)
+        {
+            if (! grid[(size_t) r][(size_t) c])
+                return { c, r };
+        }
+    }
+
+    return { -1, -1 };
+}
+
+void MainComponent::finishBatchDuplicatedPads (const juce::Array<SoundPad*>& createdPads) noexcept
+{
+    for (auto* dup : createdPads)
+    {
+        if (dup == nullptr)
+            continue;
+
+        dup->finalizeClonedAudioAttach();
+        dup->setThumbnailLoadAllowed (true, ! dup->isThumbnailLoaded());
+        dup->setNormalizationLoadAllowed (dup->getAutoNormalize(), false);
+
+        if (dup->hasAudioFile())
+            dup->prepareForInstantPlay();
+    }
+}
+
+SoundPad* MainComponent::createDuplicatePadFromSource (const ListData& list, SoundPad* src,
+                                                       bool makeVisible, bool fastRamClone)
+{
+    if (src == nullptr)
+        return nullptr;
+
     auto* dup = createSoundPad();
     scrollContent->addChildComponent (dup);
     applyProjectDefaultsToPad (dup);
 
-    if (src->hasAudioFile())
+    if (fastRamClone)
+    {
+        dup->cloneReadyAudioFrom (*src);
+    }
+    else if (src->hasAudioFile())
+    {
         dup->configurePad (src->getFilePath(), src->getOutputGain(), src->isLooping());
+    }
 
     dup->setCustomName (src->getPadName());
+    dup->setPadThemeColour (src->getTagColour());
     dup->setTrimStart (src->getTrimStart());
     dup->setTrimEnd (src->getTrimEnd());
     dup->setOutputBus (src->getOutputBus());
+    dup->setFadeInMs (src->getFadeInMs());
+    dup->setFadeOutMs (src->getFadeOutMs());
+    dup->setAutoNormalize (src->getAutoNormalize());
+    dup->setNormalizeUseLufs (src->getNormalizeUseLufs());
+    dup->setLooping (src->isLooping());
+    dup->setOutputGain (src->getOutputGain());
     dup->updateTheme (isDarkMode);
-    dup->setRenderMode (list->isGrid);
-    dup->setCueListPlayback (list->isGrid);
-    dup->setVisible (listIdx == activeListIndex);
+    dup->setRenderMode (list.isGrid);
+    dup->setCueListPlayback (list.isGrid);
+    dup->setVisible (makeVisible);
+
+    return dup;
+}
+
+void MainComponent::duplicatePad (SoundPad* sourcePad)
+{
+    if (sourcePad == nullptr)
+        return;
+
+    const int listIdx = findListIndexForPad (allLists, sourcePad);
+
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    auto* list = allLists[listIdx];
+
+    if (list == nullptr || list->isLocked)
+        return;
+
+    const int padIdx = list->pads.indexOf (sourcePad);
+
+    if (padIdx < 0)
+        return;
+
+    if (list->pads.size() >= kMaxCuePadsPerList && list->isGrid)
+    {
+        showCueGridFullAlert();
+        return;
+    }
+
+    const bool onActiveList = (listIdx == activeListIndex);
+
+    if (list->isGrid)
+    {
+        const auto slot = findSmartDuplicateGridSlot (*list,
+                                                        sourcePad->getGridRow(),
+                                                        sourcePad->getGridCol());
+
+        if (slot.x < 0)
+        {
+            showCueGridFullAlert();
+            return;
+        }
+
+        auto* dup = createDuplicatePadFromSource (*list, sourcePad, onActiveList);
+
+        if (dup == nullptr)
+            return;
+
+        list->pads.add (dup);
+        dup->setGridPosition (slot.y, slot.x, true);
+        dup->refreshHotkeyLabel();
+
+        for (int i = 0; i < list->pads.size(); ++i)
+            if (list->pads[i] != nullptr)
+                list->pads[i]->setPadIndex (i);
+
+        syncCueMetadataFromPads (*list);
+
+        if (onActiveList)
+        {
+            const int newIdx = list->pads.indexOf (dup);
+            selectedPadIndices.clear();
+            selectedPadIndices.add (newIdx);
+            selectedBgmIndex = newIdx;
+            applyPadSelectionVisualState();
+            inspectorPanel.selectPad (dup);
+            layoutActiveListPads();
+
+            if (auto* panel = getPadPanel())
+                panel->resyncAndLayout();
+
+            refreshCueListPanel();
+        }
+
+        rebuildHotkeyBindings();
+        rebuildSidebarFromAllLists();
+        triggerSave();
+        return;
+    }
+
+    const int insertAt = padIdx + 1;
+    auto* dup = createDuplicatePadFromSource (*list, sourcePad, onActiveList);
+
+    if (dup == nullptr)
+        return;
 
     list->pads.insert (insertAt, dup);
 
@@ -4352,10 +6642,7 @@ void MainComponent::duplicatePadAtIndex (int listIdx, int padIdx)
         if (list->pads[i] != nullptr)
             list->pads[i]->setPadIndex (i);
 
-    if (list->isGrid)
-        syncCueMetadataFromPads (*list);
-
-    if (listIdx == activeListIndex)
+    if (onActiveList)
     {
         selectedPadIndices.clear();
         selectedPadIndices.add (insertAt);
@@ -4367,7 +6654,151 @@ void MainComponent::duplicatePadAtIndex (int listIdx, int padIdx)
     }
 
     rebuildSidebarFromAllLists();
-    saveProject();
+    triggerSave();
+}
+
+void MainComponent::duplicateSelectedPads()
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return;
+
+    auto* list = allLists[activeListIndex];
+
+    if (list == nullptr || list->isLocked || ! list->isGrid)
+        return;
+
+    juce::Array<SoundPad*> selectedPads;
+
+    for (const auto idx : selectedPadIndices)
+    {
+        if (! juce::isPositiveAndBelow (idx, list->pads.size()))
+            continue;
+
+        if (auto* pad = list->pads[idx])
+            selectedPads.addIfNotAlreadyThere (pad);
+    }
+
+    if (selectedPads.isEmpty())
+        return;
+
+    struct PadGridSortOrder
+    {
+        static int compareElements (SoundPad* a, SoundPad* b)
+        {
+            const int keyA = a->getGridRow() * showcontrol::padgrid::kCols + a->getGridCol();
+            const int keyB = b->getGridRow() * showcontrol::padgrid::kCols + b->getGridCol();
+            return keyA - keyB;
+        }
+    };
+
+    PadGridSortOrder gridOrder;
+    selectedPads.sort (gridOrder);
+
+    auto gridOccupied = buildGridOccupancyFromList (*list);
+
+    int successCount = 0;
+    int failCount    = 0;
+    juce::Array<SoundPad*> createdPads;
+
+    for (auto* sourcePad : selectedPads)
+    {
+        if (sourcePad == nullptr)
+            continue;
+
+        if (list->pads.size() >= kMaxCuePadsPerList)
+        {
+            ++failCount;
+            continue;
+        }
+
+        const auto slot = findProximitySlotInGrid (gridOccupied,
+                                                   sourcePad->getGridRow(),
+                                                   sourcePad->getGridCol());
+
+        if (slot.x < 0)
+        {
+            ++failCount;
+            continue;
+        }
+
+        auto* dup = createDuplicatePadFromSource (*list, sourcePad, false, true);
+
+        if (dup == nullptr)
+        {
+            ++failCount;
+            continue;
+        }
+
+        list->pads.add (dup);
+        dup->assignGridCellSilent (slot.y, slot.x);
+        markGridCellOccupied (gridOccupied, slot.y, slot.x);
+        createdPads.add (dup);
+        ++successCount;
+    }
+
+    if (successCount == 0)
+    {
+        if (failCount > 0)
+            showCueGridFullAlert();
+
+        return;
+    }
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        if (list->pads[i] != nullptr)
+            list->pads[i]->setPadIndex (i);
+
+    syncCueMetadataFromPads (*list);
+    finishBatchDuplicatedPads (createdPads);
+
+    for (auto* dup : createdPads)
+        if (dup != nullptr)
+            dup->setVisible (true);
+
+    selectedPadIndices.clear();
+
+    for (auto* dup : createdPads)
+    {
+        const int newIdx = list->pads.indexOf (dup);
+
+        if (newIdx >= 0)
+            selectedPadIndices.addIfNotAlreadyThere (newIdx);
+    }
+
+    selectedPadIndices.sort();
+
+    if (! selectedPadIndices.isEmpty())
+    {
+        selectedBgmIndex = selectedPadIndices.getFirst();
+        applyPadSelectionVisualState();
+        inspectorPanel.selectPad (list->pads[selectedBgmIndex]);
+    }
+
+    layoutActiveListPads();
+
+    if (auto* panel = getPadPanel())
+        panel->resyncAndLayout();
+
+    refreshCueListPanel();
+    rebuildHotkeyBindings();
+    rebuildSidebarFromAllLists();
+    triggerSave();
+
+    if (failCount > 0)
+        showCueBatchDuplicatePartialAlert (successCount, failCount);
+}
+
+void MainComponent::duplicatePadAtIndex (int listIdx, int padIdx)
+{
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    auto* list = allLists[listIdx];
+
+    if (list == nullptr || padIdx < 0 || padIdx >= list->pads.size())
+        return;
+
+    duplicatePad (list->pads[padIdx]);
 }
 
 void MainComponent::revealPadFileInOS (SoundPad* pad)
@@ -4474,6 +6905,7 @@ void MainComponent::advanceBgmPlaylistOnNaturalEnd (SoundPad* finishedPad)
 //==============================================================================
 MainComponent::MainComponent()
 {
+    setOpaque (true);
     formatManager.registerBasicFormats();
     showcontrol::audio::bindActiveFormatManager (formatManager);
     updateChecker = std::make_unique<showcontrol::update::ShowUpdateChecker>();
@@ -4487,6 +6919,10 @@ MainComponent::MainComponent()
 
     masterDeckPanel.getMasterLevelLeft  = [this] { return multiOutputCallback.getLevelLeft(); };
     masterDeckPanel.getMasterLevelRight = [this] { return multiOutputCallback.getLevelRight(); };
+    masterDeckPanel.resolveLiveTransportPad = [this]() -> SoundPad*
+    {
+        return findGloballyPrioritizedPlayingPad();
+    };
 
     masterDeckPanel.onVolumeChanged = [this] (float volume) {
         multiOutputCallback.setMasterGain (volume);
@@ -4533,8 +6969,6 @@ MainComponent::MainComponent()
     };
 
     masterDeckPanel.onFadeAll = [this] { triggerGlobalPanicFadeAll(); };
-
-    sidebarPanel.setPanicKeyListener (this);
 
     masterDeckPanel.onBgmPrev      = [this] { triggerBgmPrev(); };
     masterDeckPanel.onBgmPlayPause = [this] { triggerBgmPlayPause(); };
@@ -4604,11 +7038,22 @@ MainComponent::MainComponent()
     addAndMakeVisible (viewScroller);
     viewScroller.setWantsKeyboardFocus (false);
     
-    auto* container = new ScrollableContainer();
+    auto* container = new PadPanel();
     scrollContent.reset (container);
     scrollContent->setWantsKeyboardFocus (false);
 
-    container->onBackgroundRightClick = [this] (const juce::MouseEvent&) {
+    container->onBackgroundRightClick = [this] (const juce::MouseEvent& e)
+    {
+        if (activeListIndex >= 0 && activeListIndex < allLists.size())
+        {
+            auto* list = allLists[activeListIndex];
+            if (list != nullptr && ! list->isGrid)
+            {
+                showBgmListBackgroundSortMenu (e);
+                return;
+            }
+        }
+
         triggerManualMusicIngestion();
     };
     container->onBackgroundMouseDown = [this] (const juce::MouseEvent& e)
@@ -4624,27 +7069,67 @@ MainComponent::MainComponent()
     {
         endMarqueeSelection();
     };
+    container->onPadDroppedAtCell = [this] (SoundPad* pad, int row, int col)
+    {
+        if (pad == nullptr || activeListIndex < 0 || activeListIndex >= allLists.size())
+            return;
+
+        movePadToGridCell (activeListIndex, pad, row, col);
+    };
+    container->onGridFocusPadChanged = [this] (SoundPad* pad)
+    {
+        forwardUiSelectionToPad (pad, false);
+
+        if (pad == nullptr || activeListIndex < 0 || activeListIndex >= allLists.size())
+            return;
+
+        auto* list = allLists[activeListIndex];
+
+        if (list == nullptr || ! list->isGrid)
+            return;
+
+        const int deferredIdx = list->pads.indexOf (pad);
+
+        if (deferredIdx < 0)
+            return;
+
+        const bool autoArm = list->autoArmOnSelect;
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+
+        juce::MessageManager::callAsync ([safeThis, deferredIdx, autoArm]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->prefetchBgmPadAtIndex (deferredIdx);
+
+            if (safeThis->activeListIndex < 0 || safeThis->activeListIndex >= safeThis->allLists.size())
+                return;
+
+            auto* activeList = safeThis->allLists[safeThis->activeListIndex];
+
+            if (activeList == nullptr || deferredIdx < 0 || deferredIdx >= activeList->pads.size())
+                return;
+
+            if (auto* focusedPad = activeList->pads[deferredIdx])
+            {
+                if (autoArm)
+                    safeThis->armPad (focusedPad);
+                else
+                    focusedPad->prepareForInstantPlay();
+            }
+        });
+    };
 
     viewScroller.setViewedComponent (scrollContent.get(), false);
     viewScroller.setScrollBarsShown (true, false, true, false);
     viewScroller.setScrollBarThickness (7);
-    viewScroller.setOpaque (false);
+    viewScroller.setOpaque (true);
     container->setOpaque (true);
 
     padReorderOverlay = std::make_unique<PadReorderOverlay> (*this);
     addChildComponent (*padReorderOverlay);
     padReorderOverlay->setVisible (false);
-
-    addAndMakeVisible (gridSizeSlider);
-    gridSizeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    gridSizeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    gridSizeSlider.setRange (56.0, 180.0, 1.0);
-    gridSizeSlider.setValue (180.0); // mặc định ưu tiên khoảng 4 pad/hàng ở layout chuẩn
-    gridSizeSlider.onValueChange = [this]
-    {
-        resized();
-        saveProject();
-    };
 
     addAndMakeVisible (addMusicFloatingBtn);
     addMusicFloatingBtn.setButtonText (juce::String::fromUTF8 (u8"+ THÊM BÀI HÁT VÀO SẢNH"));
@@ -4683,7 +7168,8 @@ MainComponent::MainComponent()
             if (list->autoArmOnSelect)
                 armPad (pad);
 
-            inspectorPanel.selectPad (pad);
+            syncPadTagColourFromCueMeta (*list, pad);
+            presentPadInInspector (pad);
         }
 
         applyPadSelectionVisualState();
@@ -4740,6 +7226,9 @@ MainComponent::MainComponent()
 
     cueListPanel->onCueSelectionChanged = [this] (const juce::Array<int>& indices)
     {
+        if (isOperatingState())
+            return;
+
         selectedPadIndices = indices;
 
         if (indices.isEmpty())
@@ -4781,6 +7270,20 @@ MainComponent::MainComponent()
             movePadInList (activeListIndex, fromIdx, toIdx);
     };
 
+    cueListPanel->onSortRowsAscending = [this]()
+    {
+        if (activeListIndex >= 0)
+            sortListTracksAscending (activeListIndex);
+    };
+
+    cueListPanel->canSortRows = [this]() -> bool
+    {
+        if (auto* list = getActiveListSafe())
+            return ! list->isLocked && list->pads.size() > 1;
+
+        return false;
+    };
+
     cueListPanel->onTrackMenuResult = [this] (int cueIndex, int result)
     {
         if (activeListIndex < 0 || activeListIndex >= allLists.size())
@@ -4794,8 +7297,26 @@ MainComponent::MainComponent()
             handleTrackMenuResult (pad, result);
     };
 
+    cueListPanel->onCueColorChanged = [this] (int cueIndex, juce::Colour colour)
+    {
+        if (isOperatingState())
+            return;
+
+        if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            return;
+
+        auto* list = allLists[activeListIndex];
+        if (list == nullptr)
+            return;
+
+        applyTagColourToPadAndCue (*list, cueIndex, colour);
+    };
+
     cueListPanel->onTrackRenamed = [this] (int cueIndex, const juce::String& newName)
     {
+        if (isOperatingState())
+            return;
+
         if (activeListIndex < 0 || activeListIndex >= allLists.size())
             return;
 
@@ -4811,7 +7332,7 @@ MainComponent::MainComponent()
             pad->repaint();
 
             if (inspectorPanel.getCurrentPad() == pad)
-                inspectorPanel.selectPad (pad);
+                inspectorPanel.refreshPadDisplayName();
         }
 
         saveApplicationState();
@@ -4823,6 +7344,7 @@ MainComponent::MainComponent()
             return;
 
         loadList (idx, count, allLists[idx]->isGrid);
+        updateMainDeskDisplay();
     };
     sidebarPanel.onAddList = [this] (int idx, juce::String name, int count, bool isGrid)
     {
@@ -4833,12 +7355,17 @@ MainComponent::MainComponent()
         list->isGrid = isGrid;
         list->useCueListPanel = false;
 
-        sidebarPanel.addSet (name, list->pads.size(), isGrid, false, list->isLocked);
+        sidebarPanel.addSet (name, list->pads.size(), isGrid, false, list->isLocked, list->themeColour);
         loadList (idx, count, isGrid);
     };
     sidebarPanel.onFoldersSmartImport = [this] (const juce::StringArray& folderPaths, bool targetIsBgm)
     {
         importListsFromDroppedFolders (folderPaths, targetIsBgm);
+    };
+    sidebarPanel.onCrossCopyDroppedToPlaylist = [this] (int listIdx,
+                                                        const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks)
+    {
+        appendCopyTracksToPlaylist (listIdx, tracks);
     };
     sidebarPanel.onModeChanged = [this] (int idx, bool isGrid)
     {
@@ -4856,49 +7383,27 @@ MainComponent::MainComponent()
         if (idx < 0 || idx >= allLists.size())
             return;
 
-        if (auto* removed = allLists[idx])
+        if (isPerformingUndoRedo.load (std::memory_order_acquire))
         {
-            // CHỐT CHẶN: ngắt Inspector khỏi thumbnail TRƯỚC khi OwnedArray hủy SoundPad.
-            detachInspectorFromPadsInList (removed);
-
-            if (soloPad != nullptr)
-            {
-                for (auto* p : removed->pads)
-                {
-                    if (p == soloPad)
-                    {
-                        setSoloPad (nullptr, false);
-                        break;
-                    }
-                }
-            }
-
-            for (auto* p : removed->pads)
-                unregisterPadFromMixer (p);
+            deleteListAtIndexImpl (idx);
+            return;
         }
 
-        juce::Array<juce::String> names;
-        for (int i = 0; i < sidebarPanel.getListCount(); ++i)
-            names.add (sidebarPanel.getListName (i));
+        const auto playlistSnap = std::make_shared<PlaylistSnapshotUndoState> (capturePlaylistSnapshot (idx));
 
-        allLists.remove (idx);
-        names.remove (idx);
-
-        syncSidebarFromAllLists (names);
-
-        if (allLists.isEmpty())
-        {
-            sidebarPanel.setSelectedIndex (-1);
-            loadList (-1, 0, true);
-        }
-        else
-        {
-            const int next = juce::jlimit (0, allLists.size() - 1, idx);
-            sidebarPanel.setSelectedIndex (next);
-            loadList (next, sidebarPanel.getListTrackCount (next), allLists[next]->isGrid);
-        }
-
-        saveProject();
+        performUndoableMutation (juce::String::fromUTF8 (u8"Xóa danh sách"),
+                                 [this, idx]()
+                                 {
+                                     deleteListAtIndexImpl (idx);
+                                     clearAllPanelsSelectionLive();
+                                     triggerSave();
+                                 },
+                                 [this, playlistSnap]()
+                                 {
+                                     restorePlaylistSnapshot (*playlistSnap);
+                                     clearAllPanelsSelectionLive();
+                                     triggerSave();
+                                 });
     };
 
     sidebarPanel.onMoveList = [this] (int fromIdx, int toIdx) { moveListInProject (fromIdx, toIdx); };
@@ -4908,6 +7413,11 @@ MainComponent::MainComponent()
     sidebarPanel.onDuplicateSet   = [this] (int idx) { duplicateListAtIndex (idx); };
     sidebarPanel.onAddSounds      = [this] (int idx) { addSoundsToSet (idx); };
     sidebarPanel.onMorphSetStructure = [this] (int idx) { morphSetStructure (idx); };
+
+    sidebarPanel.onListThemeColourChanged = [this] (int idx, juce::Colour colour)
+    {
+        updateListThemeColour (idx, colour);
+    };
 
     // BGM: isLooping = lặp lại cả danh sách (playlist wrap). CUE: loop từng pad.
     sidebarPanel.onLoopListToggled = [this] (int idx, bool isLooping)
@@ -4996,10 +7506,55 @@ MainComponent::MainComponent()
             syncUiToPlayingPad (pad, false);
     };
 
-    inspectorPanel.onProjectEdited = [this] { saveProject(); };
+    inspectorPanel.onProjectEdited = [this]
+    {
+        if (isOperatingState())
+            return;
+
+        saveProject();
+    };
+
+    inspectorPanel.onTagColourChanged = [this] (SoundPad* pad, juce::Colour colour)
+    {
+        if (isOperatingState() || pad == nullptr)
+            return;
+
+        const int listIdx = findListIndexForPad (allLists, pad);
+        if (listIdx < 0)
+            return;
+
+        auto* list = allLists[listIdx];
+        if (list == nullptr)
+            return;
+
+        const int padIdx = list->pads.indexOf (pad);
+        if (padIdx < 0)
+            return;
+
+        applyTagColourToPadAndCue (*list, padIdx, colour);
+    };
+
+    inspectorPanel.onActivePadChanged = [this] { refreshGlobalTrackAccent(); };
+
+    inspectorPanel.onPadLoopChanged = [this] (SoundPad* pad)
+    {
+        if (cueListPanel == nullptr || pad == nullptr)
+            return;
+
+        if (auto* list = getActiveListSafe())
+        {
+            const int row = list->pads.indexOf (pad);
+
+            if (row >= 0)
+                cueListPanel->repaintCueRow (row);
+        }
+    };
 
     inspectorPanel.onTrackNameChanged = [this]
     {
+        if (isOperatingState())
+            return;
+
         if (cueListPanel != nullptr && cueListPanel->isVisible())
         {
             if (auto* list = getActiveListSafe())
@@ -5039,7 +7594,6 @@ MainComponent::MainComponent()
     juce::Desktop::getInstance().addDarkModeSettingListener (this);
 
     setWantsKeyboardFocus (true);
-    addKeyListener (this);
 
     setSize (1280, 800);
     setSidebarVisible (true);
@@ -5129,79 +7683,56 @@ void MainComponent::finishDeferredStartup()
         updateChecker->checkForUpdatesAsync (false);
 }
 
-void MainComponent::parentHierarchyChanged()
-{
-    juce::Component::parentHierarchyChanged();
-
-    if (topLevelKeyListenerHost == nullptr)
-    {
-        if (auto* top = getTopLevelComponent())
-        {
-            topLevelKeyListenerHost = top;
-            top->addKeyListener (this);
-        }
-    }
-}
-
 void MainComponent::triggerManualMusicIngestion()
 {
-    if (activeListIndex < 0 || activeListIndex >= allLists.size()) return;
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return;
 
     mainFileChooser = std::make_unique<juce::FileChooser> (
         juce::String::fromUTF8 (u8"Nạp bài hát kịch bản..."),
         juce::File::getSpecialLocation (juce::File::userHomeDirectory),
-        ShowAudioFormats::fileChooserWildcard());
+        ShowAudioFormats::mediaFileChooserWildcard());
 
-    mainFileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
-    [this] (const juce::FileChooser& fc) {
-        auto results = fc.getResults(); if (results.size() == 0) return;
+    mainFileChooser->launchAsync (ShowAudioFormats::fileChooserOpenMultipleFlags(),
+    [this] (const juce::FileChooser& fc)
+    {
+        const auto results = fc.getResults();
+
+        if (results.isEmpty())
+            return;
+
         auto* current = allLists[activeListIndex];
-        if (current == nullptr) return;
 
-        const bool isBgm = ! current->isGrid;
-        int filesToAdd = results.size();
+        if (current == nullptr)
+            return;
 
-        if (! isBgm)
+        juce::StringArray audioPaths;
+        juce::StringArray videoPaths;
+
+        for (const auto& file : results)
         {
-            const int slotsLeft = juce::jmax (0, kMaxCuePadsPerList - current->pads.size());
-            if (slotsLeft <= 0)
-            {
-                showCueListCapacityAlert();
-                return;
-            }
-
-            filesToAdd = juce::jmin (slotsLeft, results.size());
-            if (filesToAdd < results.size())
-                showCueListCapacityAlert();
+            if (VideoAudioExtractor::isVideoFile (file))
+                videoPaths.addIfNotAlreadyThere (file.getFullPathName());
+            else if (ShowAudioFormats::isSupportedAudioFile (file))
+                audioPaths.addIfNotAlreadyThere (file.getFullPathName());
         }
 
-        for (int ri = 0; ri < filesToAdd; ++ri) {
-            auto file = results.getReference (ri);
-            int newIdx = current->pads.size(); auto* p = createSoundPad(); scrollContent->addChildComponent (p);
-            p->setPadIndex (newIdx);
-            applyProjectDefaultsToPad (p);
-            p->configurePad (file.getFullPathName(), 1.0f, false); p->updateTheme (isDarkMode); p->setRenderMode (current->isGrid);
-            p->setVisible (true);
-            current->pads.add (p);
-        }
-        
-        juce::Array<juce::String> listNames;
-        for (int i = 0; i < allLists.size(); ++i) { listNames.add (sidebarPanel.getListName (i)); }
-        sidebarPanel.clearAllLists();
-        for (int i = 0; i < allLists.size(); ++i) {
-            sidebarPanel.addSet (listNames[i], allLists[i]->pads.size(), allLists[i]->isGrid,
-                                 allLists[i]->useCueListPanel, allLists[i]->isLocked);
-        }
-        sidebarPanel.setSelectedIndex (activeListIndex);
+        const int totalValid = audioPaths.size() + videoPaths.size();
 
-        saveProject();
-        refreshCueListPanel();
-        rebuildDefaultHotkeysForList (activeListIndex);
-        resized();
-        repaint();
+        if (totalValid == 0)
+            return;
 
-        if (isShowing())
-            grabKeyboardFocus();
+        if (current->isGrid)
+        {
+            ingestDroppedFilesToActiveCuePads (*current, audioPaths, videoPaths);
+        }
+        else
+        {
+            ingestDroppedFilesToActiveBgmList (*current, audioPaths, videoPaths,
+                                               0, std::numeric_limits<int>::max());
+        }
+
+        finalizeAfterFileDropIngest();
     });
 }
 
@@ -5231,7 +7762,7 @@ void MainComponent::finalizeAfterFileDropIngest()
     for (int i = 0; i < allLists.size(); ++i)
     {
         sidebarPanel.addSet (listNames[i], allLists[i]->pads.size(), allLists[i]->isGrid,
-                             allLists[i]->useCueListPanel, allLists[i]->isLocked);
+                             allLists[i]->useCueListPanel, allLists[i]->isLocked, allLists[i]->themeColour);
     }
     sidebarPanel.setSelectedIndex (activeListIndex);
 
@@ -5269,6 +7800,7 @@ void MainComponent::ingestDroppedFilesToActiveCuePads (ListData& list,
         auto* p = createSoundPad();
         scrollContent->addChildComponent (p);
         p->setPadIndex (list.pads.size());
+        assignNextFreeGridCell (list, p);
         applyProjectDefaultsToPad (p);
         p->configurePad (validAudioFiles[fileIdx], 1.0f, false);
         p->updateTheme (isDarkMode);
@@ -5290,6 +7822,7 @@ void MainComponent::ingestDroppedFilesToActiveCuePads (ListData& list,
         auto* p = createSoundPad();
         scrollContent->addChildComponent (p);
         p->setPadIndex (list.pads.size());
+        assignNextFreeGridCell (list, p);
         applyProjectDefaultsToPad (p);
         p->updateTheme (isDarkMode);
         p->setRenderMode (true);
@@ -5458,7 +7991,23 @@ void MainComponent::paint (juce::Graphics& g)
     g.fillRect (centerFrame);
     g.setColour (cols.borderSubtle);
     g.drawRect (centerFrame, 1.0f);
+}
 
+void MainComponent::paintOverChildren (juce::Graphics& g)
+{
+    if (! crossCopyDropHighlightActive)
+        return;
+
+    const auto pal = ShowTheme::get (isDarkMode);
+    const int splitW = 6;
+    const int leftOffset = (sidebarVisible ? sidebarWidth + splitW : 0);
+    const int rightOffset = (inspectorVisible ? inspectorWidth + splitW : 0);
+    const int centerTopY = kMacUnifiedTitleBarInset + 200;
+    auto centerFrame = juce::Rectangle<int> (leftOffset, centerTopY,
+                                             getWidth() - leftOffset - rightOffset,
+                                             getHeight() - centerTopY).toFloat().reduced (3.0f);
+
+    showcontrol::crossdrag::paintNeonDropTargetGlow (g, centerFrame, pal.accent);
 }
 
 void MainComponent::setSidebarVisible (bool shouldShow)
@@ -5632,74 +8181,79 @@ void MainComponent::mouseUp (const juce::MouseEvent& e)
 
 void MainComponent::resized()
 {
-    auto b = getLocalBounds();
+    constexpr int kSplitterW        = 6;
+    constexpr int kTopDeckH         = 186;
+    constexpr int kBottomBarH       = 36;
+    constexpr int kPanelToggleBtnW  = 24;
+    constexpr int kPanelToggleBtnH  = 22;
+
+    // ── Layer 0: toàn bộ client area ─────────────────────────────────────────
+    auto totalArea = getLocalBounds();
 
     if (kMacUnifiedTitleBarInset > 0)
-        b.removeFromTop (kMacUnifiedTitleBarInset);
+        totalArea.removeFromTop (kMacUnifiedTitleBarInset);
 
-    auto topDeck = b.removeFromTop (186).reduced (8, 4);
-    masterDeckPanel.setBounds (topDeck);
+    // ── Layer 1: dải đỉnh (master deck / timer / waveform) ───────────────────
+    auto topArea = totalArea.removeFromTop (kTopDeckH).reduced (8, 4);
+    masterDeckPanel.setBounds (topArea);
     busMixerPanel.setBounds ({});
     busMixerPanel.setVisible (false);
 
-    const int splitW = 6;
-    const int visibleSidebarW = sidebarVisible ? sidebarWidth : 0;
-    const int visibleInspectorW = inspectorVisible ? inspectorWidth : 0;
-
-    if (sidebarVisible)
+    // ── Layer 2: sidebar + inspector kịch sàn (y = đáy top deck → đáy cửa sổ) ─
+    // Tuyệt đối KHÔNG removeFromBottom trên totalArea tại bước này.
+    if (sidebarVisible && sidebarPanel.isVisible())
     {
-        sidebarPanel.setBounds (b.removeFromLeft (visibleSidebarW));
+        sidebarPanel.setBounds (totalArea.removeFromLeft (sidebarWidth));
+
         if (leftSplitter != nullptr)
-            leftSplitter->setBounds (b.removeFromLeft (splitW));
+            leftSplitter->setBounds (totalArea.removeFromLeft (kSplitterW));
     }
-    else if (leftSplitter != nullptr)
+    else
     {
         sidebarPanel.setBounds ({});
-        leftSplitter->setBounds ({});
+        if (leftSplitter != nullptr)
+            leftSplitter->setBounds ({});
     }
 
-    if (inspectorVisible)
+    if (inspectorVisible && inspectorPanel.isVisible())
     {
-        // Đặt inspector ở mép phải, splitter nằm giữa center và inspector (đối xứng với sidebar).
-        inspectorPanel.setBounds (b.removeFromRight (visibleInspectorW));
+        inspectorPanel.setBounds (totalArea.removeFromRight (inspectorWidth));
+
         if (rightSplitter != nullptr)
-            rightSplitter->setBounds (b.removeFromRight (splitW));
+            rightSplitter->setBounds (totalArea.removeFromRight (kSplitterW));
     }
-    else if (rightSplitter != nullptr)
+    else
     {
-        rightSplitter->setBounds ({});
         inspectorPanel.setBounds ({});
+        if (rightSplitter != nullptr)
+            rightSplitter->setBounds ({});
     }
 
-    const int centerTop = masterDeckPanel.getBottom();
-    const int buttonY = getHeight() - 86; // nâng lên tránh đè nút xóa list
-    const int btnW = 24;
-    const int btnH = 22;
+    // Nút ẩn/hiện panel — overlay cố định theo splitter, không cuộn theo content.
+    const int panelToggleY = getHeight() - 86;
+    const int leftToggleX = sidebarVisible && leftSplitter != nullptr && ! leftSplitter->getBounds().isEmpty()
+                              ? leftSplitter->getX() - kPanelToggleBtnW + 6
+                              : 6; // sidebar ẩn: ghim sát mép trái cửa sổ (4–8px)
+    const int rightToggleX = inspectorVisible && rightSplitter != nullptr && ! rightSplitter->getBounds().isEmpty()
+                               ? rightSplitter->getRight() - 6
+                               : getWidth() - kPanelToggleBtnW - 8;
 
-    // Nút dính theo mép splitter như Farrago (không trôi theo content scroll).
-    const int leftBtnX = sidebarVisible && leftSplitter != nullptr && ! leftSplitter->getBounds().isEmpty()
-                           ? leftSplitter->getX() - btnW + 6
-                           : 8;
-    const int rightBtnX = inspectorVisible && rightSplitter != nullptr && ! rightSplitter->getBounds().isEmpty()
-                            ? rightSplitter->getRight() - 6
-                            : getWidth() - btnW - 8;
+    showSidebarBtn.setBounds (leftToggleX, panelToggleY, kPanelToggleBtnW, kPanelToggleBtnH);
+    showInspectorBtn.setBounds (rightToggleX, panelToggleY, kPanelToggleBtnW, kPanelToggleBtnH);
 
-    showSidebarBtn.setBounds (leftBtnX, buttonY, btnW, btnH);
-    showInspectorBtn.setBounds (rightBtnX, buttonY, btnW, btnH);
-    showSidebarBtn.toFront (false);
-    showInspectorBtn.toFront (false);
+    // ── Layer 3: phân khu trung tâm (phần còn lại sau 2 sườn) ────────────────
+    auto centerZone = totalArea;
 
-    const int leftOffset = (sidebarVisible ? sidebarWidth + splitW : 0);
-    const int rightOffset = (inspectorVisible ? inspectorWidth + splitW : 0);
-    auto centerFrame = juce::Rectangle<int> (leftOffset, centerTop,
-                                             getWidth() - leftOffset - rightOffset,
-                                             getHeight() - centerTop);
+    const bool hasActiveList = ! allLists.isEmpty()
+                               && activeListIndex >= 0
+                               && activeListIndex < allLists.size()
+                               && allLists[activeListIndex] != nullptr;
 
-    if (allLists.isEmpty() || activeListIndex < 0 || activeListIndex >= allLists.size())
+    if (! hasActiveList)
     {
         if (emptyStatePanel != nullptr)
         {
-            emptyStatePanel->setBounds (centerFrame);
+            emptyStatePanel->setBounds (centerZone);
             emptyStatePanel->setVisible (true);
             emptyStatePanel->toFront (false);
         }
@@ -5707,99 +8261,104 @@ void MainComponent::resized()
         viewScroller.setBounds ({});
         viewScroller.setVisible (false);
         listHeaderComponent->setVisible (false);
-        gridSizeSlider.setVisible (false);
         addMusicFloatingBtn.setBounds ({});
+
+        if (playoutModeBar != nullptr)
+            playoutModeBar->setVisible (false);
+
+        if (cueListPanel != nullptr)
+            cueListPanel->setVisible (false);
+
+        showSidebarBtn.toFront (false);
+        showInspectorBtn.toFront (false);
         return;
     }
 
     if (emptyStatePanel != nullptr)
         emptyStatePanel->setVisible (false);
 
-    viewScroller.setVisible (true);
+    auto* current = allLists[activeListIndex];
+    const bool isBgmListMode   = ! current->isGrid;
+    const bool isCueGridMode   = current->isGrid;
+    const bool padGridActive   = isCueGridMode && ! current->useCueListPanel;
+    const bool cueListActive   = isCueGridMode && current->useCueListPanel && cueListPanel != nullptr;
+    const bool hasLoadedAudio  = listHasLoadedAudio (*current);
 
-    if (auto* current = allLists[activeListIndex])
+    // ── Layer 3a: thanh đáy CHỈ trong centerZone (36px) ──────────────────────
+    juce::Rectangle<int> bottomBarBounds;
+
+    if (isCueGridMode)
+        bottomBarBounds = centerZone.removeFromBottom (kBottomBarH);
+
+    if (playoutModeBar != nullptr)
     {
-        auto innerBounds = centerFrame;
-        const bool isListMode = ! current->isGrid;
-        const bool hasLoadedAudio = listHasLoadedAudio (*current);
-
-        constexpr int kBottomBarH = 42;
-        auto bottomBarBounds = innerBounds.removeFromBottom (kBottomBarH);
-
-        const bool padGridActive = current->isGrid && ! current->useCueListPanel;
-        constexpr int kPadSliderStripW = 168;
-
-        if (padGridActive)
+        if (isCueGridMode)
         {
-            auto sliderStrip = bottomBarBounds.removeFromLeft (kPadSliderStripW);
-            gridSizeSlider.setVisible (true);
-            gridSizeSlider.setBounds (sliderStrip.reduced (10, 9));
-            gridSizeSlider.toFront (false);
+            playoutModeBar->setVisible (true);
+            syncPlayoutModeBarFromActiveList();
+            playoutModeBar->setBounds (bottomBarBounds);
+            playoutModeBar->setViewMode (padGridActive);
         }
         else
         {
-            gridSizeSlider.setVisible (false);
-            gridSizeSlider.setBounds ({});
+            playoutModeBar->setVisible (false);
         }
+    }
 
-        if (playoutModeBar != nullptr)
+    addMusicFloatingBtn.setBounds ({});
+
+    // ── Layer 4: ruột trung tâm phía trên thanh đáy ──────────────────────────
+    if (cueListActive)
+    {
+        listHeaderComponent->setVisible (false);
+        viewScroller.setBounds ({});
+        viewScroller.setVisible (false);
+        viewScroller.setScrollBarsShown (false, false, false, false);
+
+        cueListPanel->setBounds (centerZone);
+        cueListPanel->setVisible (true);
+        cueListPanel->toFront (false);
+    }
+    else
+    {
+        if (cueListPanel != nullptr)
+            cueListPanel->setVisible (false);
+
+        viewScroller.setVisible (true);
+
+        if (isBgmListMode)
         {
-            const bool showModeBar = current->isGrid;
-            playoutModeBar->setVisible (showModeBar);
+            const bool showBgmHeader = current->pads.size() > 0;
+            listHeaderComponent->setVisible (showBgmHeader);
 
-            if (showModeBar)
+            if (showBgmHeader)
             {
-                playoutModeBar->setBounds (bottomBarBounds);
-                playoutModeBar->toFront (false);
-                syncPlayoutModeBarFromActiveList();
+                listHeaderComponent->setBounds (centerZone.removeFromTop (showcontrol::bgmList::kPlaylistHeaderHeight));
+                centerZone.removeFromTop (showcontrol::bgmList::kPlaylistHeaderGap);
+                listHeaderComponent->toFront (false);
             }
+
+            viewScroller.setBounds (centerZone);
+            viewScroller.setScrollBarsShown (showBgmHeader, false, showBgmHeader, false);
+            syncBgmListHeaderScrollbar();
         }
-
-        if (padGridActive)
-            gridSizeSlider.toFront (false);
-
-        addMusicFloatingBtn.setBounds ({});
-
-        const bool cueListViewActive = current->isGrid && current->useCueListPanel && cueListPanel != nullptr;
-
-        if (cueListViewActive)
+        else
         {
             listHeaderComponent->setVisible (false);
-            viewScroller.setBounds ({});
-            viewScroller.setVisible (false);
+            viewScroller.setBounds (centerZone);
             viewScroller.setScrollBarsShown (false, false, false, false);
-            cueListPanel->setBounds (innerBounds);
-            cueListPanel->setVisible (true);
-            cueListPanel->toFront (false);
         }
-        else
-        {
-            if (cueListPanel != nullptr)
-                cueListPanel->setVisible (false);
-
-            viewScroller.setVisible (true);
-
-            if (isListMode)
-            {
-                listHeaderComponent->setVisible (hasLoadedAudio);
-
-                if (hasLoadedAudio)
-                    listHeaderComponent->setBounds (innerBounds.removeFromTop (28));
-
-                viewScroller.setBounds (innerBounds);
-                viewScroller.setScrollBarsShown (hasLoadedAudio, false, hasLoadedAudio, false);
-            }
-            else
-            {
-                listHeaderComponent->setVisible (false);
-                viewScroller.setBounds (innerBounds);
-                viewScroller.setScrollBarsShown (false, false, false, false);
-            }
-        }
-
-        layoutActiveListPads();
-        updatePadReorderOverlayBounds();
     }
+
+    if (playoutModeBar != nullptr && playoutModeBar->isVisible())
+        playoutModeBar->toFront (false);
+
+    layoutActiveListPads();
+    updatePadReorderOverlayBounds();
+
+    // Z-order: cụm nút ẩn/hiện panel sườn luôn nổi trên CueList / scroller / bottom bar.
+    showSidebarBtn.toFront (false);
+    showInspectorBtn.toFront (false);
 }
 
 bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
@@ -5812,18 +8371,9 @@ bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
         return false;
 
     const bool targetIsGrid = cmdOnly;
+    const int hotkeyIndex = showcontrol::keyboard::hotkeyIndexForKeyPress (key);
 
-    const int code = key.getKeyCode();
-    int slot = 0;
-
-    if (code >= '1' && code <= '9')
-        slot = code - '0';
-    else if (code >= juce::KeyPress::numberPad0 && code <= juce::KeyPress::numberPad9)
-        slot = code - juce::KeyPress::numberPad0;
-    else
-        return false;
-
-    if (slot < 1)
+    if (hotkeyIndex < 0)
         return false;
 
     int count = 0;
@@ -5833,13 +8383,14 @@ bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
         if (list == nullptr || list->isGrid != targetIsGrid)
             continue;
 
-        ++count;
-        if (count == slot)
+        if (count == hotkeyIndex)
         {
             sidebarPanel.setSelectedIndex (i);
             loadList (i, sidebarPanel.getListTrackCount (i), list->isGrid);
             return true;
         }
+
+        ++count;
     }
 
     return false;
@@ -5847,7 +8398,7 @@ bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
 
 bool MainComponent::isShowControlManagedHotkey (const juce::KeyPress& key) const noexcept
 {
-    const int code = key.getKeyCode();
+    const int code = showcontrol::keyboard::physicalKeyCode (key);
 
     if (HotkeyManager::isArrowNavigationKeyCode (code))
     {
@@ -5888,21 +8439,241 @@ bool MainComponent::isShowControlManagedHotkey (const juce::KeyPress& key) const
     return false;
 }
 
-bool MainComponent::keyStateChanged (bool isKeyDown)
+void MainComponent::routePhysicalHotkeyFromKeyCode (int keyCode)
 {
-    if (! isKeyDown)
-        hotkeyManager.notifyKeyReleased (0);
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
 
-    return false;
+    if (isSpacebarKey (juce::KeyPress (keyCode)))
+    {
+        executeSpacebarTransportKey (juce::KeyPress (keyCode));
+        return;
+    }
+
+    if (keyCode == juce::KeyPress::escapeKey)
+    {
+        triggerGlobalPanicFadeAll();
+        return;
+    }
+
+    if (HotkeyManager::isArrowNavigationKeyCode (keyCode))
+    {
+        const juce::KeyPress key (keyCode, juce::ModifierKeys::getCurrentModifiers(), 0);
+        const auto normalized = showcontrol::keyboard::normalizedForHotkeyMatch (key);
+
+        if (! matchesHotkeyBindingForKey (normalized))
+            handleArrowNavigationKey (key);
+
+        return;
+    }
+
+    if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (auto* currentList = getActiveListSafe())
+        {
+            if (keyCode == juce::KeyPress::returnKey)
+            {
+                if (currentList->isGrid)
+                    triggerCueGo (selectedBgmIndex);
+
+                return;
+            }
+
+            if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isVisible())
+            {
+                if (keyCode == (int) 'P' || keyCode == (int) 'p')
+                {
+                    cueListPanel->handleTransportKey (juce::KeyPress (keyCode));
+                    return;
+                }
+
+                if (keyCode == (int) 'S' || keyCode == (int) 's')
+                {
+                    cueListPanel->handleTransportKey (juce::KeyPress (keyCode));
+                    return;
+                }
+            }
+            else if (keyCode == (int) 'S' || keyCode == (int) 's')
+            {
+                for (auto* pad : currentList->pads)
+                    if (pad != nullptr)
+                        pad->triggerStop();
+
+                return;
+            }
+
+            if (! currentList->isGrid && (keyCode == (int) 'N' || keyCode == (int) 'n'))
+            {
+                triggerBgmNext();
+                return;
+            }
+        }
+    }
+
+    tryTriggerPadByPhysicalKeyCode (keyCode, nowMs);
+}
+
+bool MainComponent::triggerPadByKeyCode (int keyCode, juce::ModifierKeys modifiers)
+{
+    if (isPlaybackCommandBlocked())
+        return false;
+
+    if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
+        return false;
+
+    if (showcontrol::keyboard::isKeyboardFocusInTextInput())
+        return false;
+
+    const bool optionOnly = modifiers.isAltDown()
+                         && ! modifiers.isCommandDown()
+                         && ! modifiers.isCtrlDown();
+    const bool plainMatrix = ! modifiers.isCommandDown()
+                          && ! modifiers.isCtrlDown()
+                          && ! modifiers.isAltDown();
+
+    if (! plainMatrix && ! optionOnly)
+        return false;
+
+    if (! showcontrol::padgrid::isMatrixPhysicalKeyCode (keyCode))
+        return false;
+
+    auto* list = getActiveListSafe();
+    if (list == nullptr || ! list->isGrid)
+        return false;
+
+    const auto cell = showcontrol::padgrid::gridCellForPhysicalKey (keyCode, optionOnly);
+
+    if (! showcontrol::padgrid::isValidGridCell (cell.y, cell.x))
+        return false;
+
+    SoundPad* pad = nullptr;
+
+    if (auto* panel = getPadPanel())
+        pad = panel->getPadAtGrid (cell.y, cell.x);
+
+    if (pad == nullptr)
+    {
+        for (auto* p : list->pads)
+        {
+            if (p == nullptr || ! p->occupiesCueGridSlot())
+                continue;
+
+            if (p->getGridRow() == cell.y && p->getGridCol() == cell.x)
+            {
+                pad = p;
+                break;
+            }
+        }
+    }
+
+    if (pad == nullptr || ! pad->hasAudioFile())
+        return false;
+
+    const int padIndex = list->pads.indexOf (pad);
+    if (padIndex < 0)
+        return false;
+
+    return triggerCueGo (padIndex);
+}
+
+bool MainComponent::triggerPadByKeyCode (const juce::KeyPress& key)
+{
+    const int telexResolved = showcontrol::keyboard::resolveTelexAwareTopRowKeyCode (key);
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
+    const int triggerCode = telexResolved != 0 ? telexResolved : keyCode;
+    return triggerPadByKeyCode (triggerCode, key.getModifiers());
+}
+
+bool MainComponent::tryTriggerPadByTelexAwareKeyPress (const juce::KeyPress& key, juce::uint32 nowMs)
+{
+    const int resolved = showcontrol::keyboard::resolveTelexAwareTopRowKeyCode (key);
+
+    if (resolved == 0)
+        return false;
+
+    tryTriggerPadByPhysicalKeyCode (resolved, nowMs);
+    return true;
+}
+
+bool MainComponent::tryTriggerPadByPhysicalKeyCode (int keyCode, juce::uint32 nowMs)
+{
+    const bool swallowMatrixKey = HotkeyManager::isManagedApplicationKeyCode (keyCode)
+                               || showcontrol::keyboard::isFarragoTopRowMatrixKeyCode (keyCode);
+
+    if (showcontrol::keyboard::shouldBlockPlaybackHotkey())
+        return swallowMatrixKey;
+
+    if (HotkeyManager::isArrowNavigationKeyCode (keyCode))
+        return false;
+
+    if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isVisible())
+    {
+        if (keyCode == (int) 'P' || keyCode == (int) 'p'
+            || keyCode == (int) 'S' || keyCode == (int) 's')
+            return true;
+    }
+
+    if (! swallowMatrixKey)
+        return false;
+
+    const juce::KeyPress key (keyCode, juce::ModifierKeys::getCurrentModifiers(), 0);
+    const auto normalized = showcontrol::keyboard::normalizedForHotkeyMatch (key);
+
+    const auto gate = hotkeyManager.evaluateKeyPressGate (keyCode, nowMs);
+
+    if (gate.isDuplicate)
+    {
+        logHotkeyTrace ("swallow duplicate keyCode=" + juce::String (keyCode));
+        return true;
+    }
+
+    if (! gate.shouldExecute)
+        return true;
+
+    logHotkeyTrace ("physical edge keyCode=" + juce::String (keyCode)
+                    + " activeList=" + juce::String (activeListIndex));
+
+    if (hotkeyScopeMode == HotkeyScopeMode::global)
+    {
+        if (const auto* binding = hotkeyManager.findByKeyPressPreferList (normalized, activeListIndex))
+        {
+            if (triggerPadFromHotkey (*binding))
+            {
+                lastHotkeyKeyCode   = keyCode;
+                lastHotkeyTriggerMs = nowMs;
+                logHotkeyTrace ("trigger success");
+            }
+
+            return true;
+        }
+    }
+    else if (activeListIndex >= 0 && activeListIndex < allLists.size())
+    {
+        if (const auto* binding = hotkeyManager.findByKeyPressInList (normalized, activeListIndex))
+        {
+            if (triggerPadFromHotkey (*binding))
+            {
+                lastHotkeyKeyCode   = keyCode;
+                lastHotkeyTriggerMs = nowMs;
+                logHotkeyTrace ("trigger success");
+            }
+
+            return true;
+        }
+    }
+
+    logHotkeyTrace ("no binding match keyCode=" + juce::String (keyCode));
+    return true;
 }
 
 bool MainComponent::matchesHotkeyBindingForKey (const juce::KeyPress& key) const noexcept
 {
+    const auto normalized = showcontrol::keyboard::normalizedForHotkeyMatch (key);
+
     if (hotkeyScopeMode == HotkeyScopeMode::global)
-        return hotkeyManager.findByKeyPressPreferList (key, activeListIndex) != nullptr;
+        return hotkeyManager.findByKeyPressPreferList (normalized, activeListIndex) != nullptr;
 
     if (activeListIndex >= 0)
-        return hotkeyManager.findByKeyPressInList (key, activeListIndex) != nullptr;
+        return hotkeyManager.findByKeyPressInList (normalized, activeListIndex) != nullptr;
 
     return false;
 }
@@ -5914,33 +8685,25 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
     if (currentList == nullptr || currentList->pads.size() == 0)
         return false;
 
-    const int arrowCode = HotkeyManager::normalizeArrowKeyCode (key.getKeyCode());
-    const int mainViewWidth = viewScroller.getWidth();
-    const int mainViewHeight = viewScroller.getHeight();
-    const int cols = getPadGridLayout (mainViewWidth, mainViewHeight, currentList->pads.size()).cols;
-
     if (currentList->isGrid)
     {
-        if (arrowCode == juce::KeyPress::leftKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex - 1);
-        else if (arrowCode == juce::KeyPress::rightKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex + 1);
-        else if (arrowCode == juce::KeyPress::upKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex - cols);
-        else if (arrowCode == juce::KeyPress::downKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex + cols);
-        else
-            return false;
+        if (auto* panel = getPadPanel())
+        {
+            if (panel->keyPressed (key))
+                return true;
+        }
+
+        return false;
     }
+
+    const int arrowCode = HotkeyManager::normalizeArrowKeyCode (key.getKeyCode());
+
+    if (arrowCode == juce::KeyPress::upKey || arrowCode == juce::KeyPress::leftKey)
+        selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex - 1);
+    else if (arrowCode == juce::KeyPress::downKey || arrowCode == juce::KeyPress::rightKey)
+        selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex + 1);
     else
-    {
-        if (arrowCode == juce::KeyPress::upKey || arrowCode == juce::KeyPress::leftKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex - 1);
-        else if (arrowCode == juce::KeyPress::downKey || arrowCode == juce::KeyPress::rightKey)
-            selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex + 1);
-        else
-            return false;
-    }
+        return false;
 
     if (selectedBgmIndex < 0 || selectedBgmIndex >= currentList->pads.size())
         return false;
@@ -6008,7 +8771,7 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
 
 bool MainComponent::isSpacebarKey (const juce::KeyPress& key) noexcept
 {
-    const int code = key.getKeyCode();
+    const int code = showcontrol::keyboard::physicalKeyCode (key);
     return code == juce::KeyPress::spaceKey || code == 32;
 }
 
@@ -6086,12 +8849,6 @@ bool MainComponent::executeSpacebarTransportKey (const juce::KeyPress& key)
     lastHotkeyKeyCode   = key.getKeyCode();
     lastHotkeyTriggerMs = nowMs;
     return true;
-}
-
-bool MainComponent::keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent)
-{
-    juce::ignoreUnused (originatingComponent);
-    return handleApplicationHotkey (key);
 }
 
 void MainComponent::triggerGlobalPanicFadeAll()
@@ -6373,6 +9130,10 @@ bool MainComponent::loadPlaylistFromJson (const juce::var& playlistVar)
         const auto listName = listVar.getProperty ("name",
             newList->isGrid ? showcontrol::localization::defaultCueListName()
                             : showcontrol::localization::defaultBgmListName()).toString();
+        const auto themeHex = listVar.getProperty ("themeColour", {}).toString().trim();
+        if (themeHex.isNotEmpty())
+            newList->themeColour = showcontrol::colours::snapToPalette (
+                showcontrol::colours::colourFromHexString (themeHex));
         const auto tracks   = listVar.getProperty ("tracks", juce::var());
 
         if (tracks.isArray())
@@ -6416,6 +9177,18 @@ bool MainComponent::loadPlaylistFromJson (const juce::var& playlistVar)
                 if (newList->isGrid)
                     p->setLooping (newList->isLooping);
 
+                if (newList->isGrid && trackVar.isObject())
+                {
+                    if (auto* trackObj = trackVar.getDynamicObject())
+                    {
+                        if (trackObj->hasProperty ("gridRow") && trackObj->hasProperty ("gridCol"))
+                        {
+                            p->setGridPosition ((int) trackObj->getProperty ("gridRow"),
+                                                (int) trackObj->getProperty ("gridCol"));
+                        }
+                    }
+                }
+
                 newList->pads.add (p);
                 ++padIdx;
             }
@@ -6423,7 +9196,7 @@ bool MainComponent::loadPlaylistFromJson (const juce::var& playlistVar)
 
         allLists.add (newList);
         sidebarPanel.addSet (listName, newList->pads.size(), newList->isGrid,
-                             newList->useCueListPanel, newList->isLocked);
+                             newList->useCueListPanel, newList->isLocked, newList->themeColour);
         sidebarPanel.setListLooping (allLists.size() - 1, newList->isLooping);
     }
 
@@ -6465,12 +9238,20 @@ juce::var MainComponent::buildPlaylistJson() const
             if (formatInfo.isNotEmpty())
                 trackObj->setProperty ("format", formatInfo);
 
+            if (list->isGrid && pad->occupiesCueGridSlot())
+            {
+                trackObj->setProperty ("gridRow", pad->getGridRow());
+                trackObj->setProperty ("gridCol", pad->getGridCol());
+            }
+
             tracks.add (juce::var (trackObj.get()));
         }
 
         juce::DynamicObject::Ptr listObj (new juce::DynamicObject());
         listObj->setProperty ("name", sidebarPanel.getListName (i));
         listObj->setProperty ("isGrid", list->isGrid);
+        if (! showcontrol::colours::isDefaultTagColour (list->themeColour))
+            listObj->setProperty ("themeColour", showcontrol::colours::colourToHexString (list->themeColour));
         listObj->setProperty ("tracks", tracks);
         playlistLists.add (juce::var (listObj.get()));
     }
@@ -6480,7 +9261,80 @@ juce::var MainComponent::buildPlaylistJson() const
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
-    return handleApplicationHotkey (key);
+    if (sidebarPanel.isSearchBarFocused() || isSearchWindowFocused())
+        return false;
+
+    const bool isCmdDown   = key.getModifiers().isCommandDown();
+    const bool isShiftDown = key.getModifiers().isShiftDown();
+
+    if (isCmdDown && ! isShiftDown && key.getKeyCode() == 'Z')
+    {
+        isPerformingUndoRedo.store (true, std::memory_order_release);
+        const bool undone = undoManager.undo();
+        isPerformingUndoRedo.store (false, std::memory_order_release);
+
+        if (undone)
+        {
+            clearAllPanelsSelectionLive();
+            refreshAllPanelsAfterDataMutation (activeListIndex);
+            triggerSave();
+        }
+
+        return true;
+    }
+
+    if (isCmdDown && isShiftDown && key.getKeyCode() == 'Z')
+    {
+        isPerformingUndoRedo.store (true, std::memory_order_release);
+        const bool redone = undoManager.redo();
+        isPerformingUndoRedo.store (false, std::memory_order_release);
+
+        if (redone)
+        {
+            clearAllPanelsSelectionLive();
+            refreshAllPanelsAfterDataMutation (activeListIndex);
+            triggerSave();
+        }
+
+        return true;
+    }
+
+    if (auto* focusedComponent = juce::Component::getCurrentlyFocusedComponent())
+    {
+        if (dynamic_cast<juce::TextEditor*> (focusedComponent) != nullptr
+            || dynamic_cast<juce::ComboBox*> (focusedComponent) != nullptr)
+            return false;
+    }
+
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
+    const int telexResolved = showcontrol::keyboard::resolveTelexAwareTopRowKeyCode (key);
+    const int triggerCode = telexResolved != 0 ? telexResolved : keyCode;
+    const bool matrixKey = showcontrol::padgrid::isMatrixPhysicalKeyCode (triggerCode);
+    const bool optionMatrixKey = matrixKey
+                              && key.getModifiers().isAltDown()
+                              && ! key.getModifiers().isCommandDown()
+                              && ! key.getModifiers().isCtrlDown();
+    const bool globalSwallowHotkey = telexResolved != 0
+                                  || showcontrol::keyboard::isFarragoTopRowMatrixKeyCode (keyCode)
+                                  || matrixKey
+                                  || optionMatrixKey;
+
+    if (globalSwallowHotkey
+        && juce::Component::getCurrentlyModalComponent() == nullptr)
+    {
+        handleApplicationHotkey (key);
+        return true;
+    }
+
+    if (handleApplicationHotkey (key))
+        return true;
+
+    if (showcontrol::keyboard::isFarragoTopRowMatrixKeyCode (keyCode)
+        || telexResolved != 0
+        || HotkeyManager::isManagedApplicationKeyCode (keyCode))
+        return true;
+
+    return false;
 }
 
 bool MainComponent::handleApplicationHotkey (const juce::KeyPress& key)
@@ -6491,197 +9345,85 @@ bool MainComponent::handleApplicationHotkey (const juce::KeyPress& key)
     if (juce::Component::getCurrentlyModalComponent() != nullptr)
         return false;
 
-    if (isSpacebarKey (key))
-        return executeSpacebarTransportKey (key);
+    const int keyCode = showcontrol::keyboard::physicalKeyCode (key);
 
-    if (key == juce::KeyPress::escapeKey)
-    {
-        if (swallowLikelyOsKeyRepeat (key))
-            return true;
+    if ((keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey)
+        && key.getModifiers().isCommandDown())
+        return tryHandleDeleteOrBackspaceKey (key);
 
-        triggerGlobalPanicFadeAll();
-        return true;
-    }
-
-    const int pressedKeyCode = key.getKeyCode();
     const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
-    const bool managedHotkey = isShowControlManagedHotkey (key);
+    const int telexResolved = showcontrol::keyboard::resolveTelexAwareTopRowKeyCode (key);
+    const int triggerCode = telexResolved != 0 ? telexResolved : keyCode;
+    const bool matrixKey = showcontrol::padgrid::isMatrixPhysicalKeyCode (triggerCode);
+    const bool optionOnly = key.getModifiers().isAltDown()
+                         && ! key.getModifiers().isCommandDown()
+                         && ! key.getModifiers().isCtrlDown();
+    const bool plainMatrix = matrixKey
+                          && ! key.getModifiers().isCommandDown()
+                          && ! key.getModifiers().isCtrlDown()
+                          && ! key.getModifiers().isAltDown();
 
-    // Lớp 1 — luôn tiêu thụ (không rò sang Slider/Button con) khi đang xử lý chuỗi key lồng nhau.
-    if (inExclusiveKeyHandler)
-        return true;
-
-    const juce::ScopedValueSetter<bool> keyHandlerScope (inExclusiveKeyHandler, true);
-
-    if (isPlaybackCommandBlocked() || nowMs < startupInputGuardUntilMs)
+    if (matrixKey && (plainMatrix || optionOnly))
     {
-        logHotkeyTrace ("ignore startup keyCode=" + juce::String (pressedKeyCode));
+        if (triggerPadByKeyCode (key))
+        {
+            lastHotkeyKeyCode   = triggerCode;
+            lastHotkeyTriggerMs = nowMs;
+        }
+
         return true;
     }
 
-    if (allLists.isEmpty())
-        return true;
-
-    // Delete/Backspace — ưu tiên trước matrix hotkey (KeyListener + focus con đều đi qua đây).
-    if (tryHandleDeleteOrBackspaceKey (key))
+    if (key.getModifiers().isCommandDown()
+        || key.getModifiers().isCtrlDown())
     {
-        lastHotkeyKeyCode   = key.getKeyCode();
-        lastHotkeyTriggerMs = nowMs;
-        return true;
-    }
-
-    if (key.getModifiers().isShiftDown()
-        && (key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown())
-        && (key.getTextCharacter() == 'd' || key.getTextCharacter() == 'D'))
-    {
-        toggleStageMonitorWindow();
-        return true;
-    }
-
-    // Mũi tên không có macro binding — bubble (return false), không chạy matrix/transport phía dưới.
-    if (HotkeyManager::isArrowNavigationKeyCode (pressedKeyCode)
-        && ! matchesHotkeyBindingForKey (key))
-    {
-        if (handleArrowNavigationKey (key))
+        if (trySwitchListByShortcut (key))
             return true;
 
         return false;
     }
 
-    // Cue List view — Space/P/S biệt lập, không dùng GO toggle của PAD grid.
-    if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isVisible())
+    if (key.getModifiers().isAltDown())
     {
-        if (cueListPanel->handleTransportKey (key))
-        {
-            lastHotkeyKeyCode   = pressedKeyCode;
-            lastHotkeyTriggerMs = nowMs;
+        if (trySwitchListByShortcut (key))
             return true;
-        }
+
+        return false;
     }
 
-    if (managedHotkey)
+    const bool topRowMatrixKey = telexResolved != 0
+                              || showcontrol::keyboard::isFarragoTopRowMatrixKeyCode (keyCode);
+    const bool swallowMatrixKey = topRowMatrixKey
+                               || HotkeyManager::isManagedApplicationKeyCode (keyCode);
+
+    const bool canTriggerPlayback = ! isPlaybackCommandBlocked()
+                                 && nowMs >= startupInputGuardUntilMs
+                                 && ! allLists.isEmpty();
+
+    if (topRowMatrixKey)
     {
-        const auto gate = hotkeyManager.evaluateKeyPressGate (pressedKeyCode, nowMs);
-
-        if (gate.isDuplicate)
-        {
-            logHotkeyTrace ("swallow duplicate keyCode=" + juce::String (pressedKeyCode));
-            return true;
-        }
-
-        if (! gate.shouldExecute)
-            return true;
-    }
-
-    logHotkeyTrace ("keyCode=" + juce::String (pressedKeyCode)
-                    + " activeList=" + juce::String (activeListIndex));
-
-    if (trySwitchListByShortcut (key))
-        return true;
-
-    if (hotkeyScopeMode == HotkeyScopeMode::global)
-    {
-        if (const auto* binding = hotkeyManager.findByKeyPressPreferList (key, activeListIndex))
-        {
-            logHotkeyTrace ("match key -> list=" + juce::String (binding->padListIndex)
-                            + " pad=" + juce::String (binding->padIndex) + " scope=global");
-            if (triggerPadFromHotkey (*binding))
-            {
-                lastHotkeyKeyCode = pressedKeyCode;
-                lastHotkeyTriggerMs = nowMs;
-                logHotkeyTrace ("trigger success");
-            }
-            else
-                logHotkeyTrace ("trigger failed");
-
-            return true;
-        }
-
-        if (managedHotkey && ! HotkeyManager::isArrowNavigationKeyCode (pressedKeyCode))
-        {
-            logHotkeyTrace ("no binding match in global scope");
-            return true;
-        }
-    }
-    else if (activeListIndex >= 0 && activeListIndex < allLists.size())
-    {
-        if (const auto* binding = hotkeyManager.findByKeyPressInList (key, activeListIndex))
-        {
-            logHotkeyTrace ("match key -> list=" + juce::String (binding->padListIndex)
-                            + " pad=" + juce::String (binding->padIndex) + " scope=active");
-            if (triggerPadFromHotkey (*binding))
-            {
-                lastHotkeyKeyCode = pressedKeyCode;
-                lastHotkeyTriggerMs = nowMs;
-                logHotkeyTrace ("trigger success");
-            }
-            else
-                logHotkeyTrace ("trigger failed");
-
-            return true;
-        }
-
-        if (managedHotkey && ! HotkeyManager::isArrowNavigationKeyCode (pressedKeyCode))
-        {
-            logHotkeyTrace ("no binding match in active scope");
-            return true;
-        }
-    }
-
-    if (activeListIndex < 0 || activeListIndex >= allLists.size())
-        return managedHotkey;
-
-    auto* currentList = getActiveListSafe();
-
-    if (currentList == nullptr || currentList->pads.size() == 0)
-        return managedHotkey;
-
-    if (pressedKeyCode == juce::KeyPress::returnKey)
-    {
-        if (currentList->isGrid)
-        {
-            triggerCueGo (selectedBgmIndex);
-            lastHotkeyKeyCode  = pressedKeyCode;
-            lastHotkeyTriggerMs = nowMs;
-        }
+        const int triggerCode = telexResolved != 0 ? telexResolved : keyCode;
+        tryTriggerPadByPhysicalKeyCode (triggerCode, nowMs);
         return true;
     }
 
-    if (pressedKeyCode == 'S' || pressedKeyCode == 's')
-    {
-        if (isCueListViewActive())
-        {
-            triggerCueListStop (selectedBgmIndex);
-        }
-        else
-        {
-            for (auto* pad : currentList->pads)
-                if (pad != nullptr)
-                    pad->triggerStop();
-        }
+    if (! canTriggerPlayback)
+        return swallowMatrixKey;
 
-        lastHotkeyKeyCode  = pressedKeyCode;
-        lastHotkeyTriggerMs = nowMs;
+    if (isSpacebarKey (key)
+        || keyCode == juce::KeyPress::escapeKey
+        || keyCode == juce::KeyPress::returnKey
+        || HotkeyManager::isArrowNavigationKeyCode (keyCode)
+        || HotkeyManager::isManagedApplicationKeyCode (keyCode)
+        || keyCode == (int) 'P' || keyCode == (int) 'p'
+        || keyCode == (int) 'S' || keyCode == (int) 's'
+        || keyCode == (int) 'N' || keyCode == (int) 'n')
+    {
+        routePhysicalHotkeyFromKeyCode (keyCode);
         return true;
     }
 
-    if ((pressedKeyCode == 'P' || pressedKeyCode == 'p') && isCueListViewActive())
-    {
-        triggerCueListPause (selectedBgmIndex);
-        lastHotkeyKeyCode  = pressedKeyCode;
-        lastHotkeyTriggerMs = nowMs;
-        return true;
-    }
-    
-    if (! currentList->isGrid && (pressedKeyCode == 'N' || pressedKeyCode == 'n'))
-    {
-        triggerBgmNext();
-        lastHotkeyKeyCode  = pressedKeyCode;
-        lastHotkeyTriggerMs = nowMs;
-        return true;
-    }
-
-    return managedHotkey;
+    return swallowMatrixKey;
 }
 
 void MainComponent::loadList (int listIndex, int trackCount, bool isGridHint)
@@ -6776,33 +9518,21 @@ void MainComponent::loadList (int listIndex, int trackCount, bool isGridHint)
         inspectorPanel.selectPad (nullptr);
     }
 
-    lastUiSyncedPlayingPad = nullptr;
-
     resized();
-
-    if (! isGrid)
-    {
-        for (auto* p : target->pads)
-        {
-            if (p != nullptr && p->isTransportActive())
-            {
-                syncUiToPlayingPad (p, true);
-                break;
-            }
-        }
-    }
 
     activeList = (isGrid && target->useCueListPanel) ? 1 : 0;
 
     if (isShowing())
     {
-        if (activeList == 1 && cueListPanel != nullptr)
+        if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isShowing())
             cueListPanel->grabKeyboardFocus();
         else if (viewScroller.isVisible())
             viewScroller.grabKeyboardFocus();
         else
             grabKeyboardFocus();
     }
+
+    updateMainDeskDisplay();
 }
 
 void MainComponent::syncCueMetadataFromPads (ListData& list)
@@ -6820,8 +9550,9 @@ void MainComponent::syncCueMetadataFromPads (ListData& list)
 
         if (auto* pad = list.pads[i])
         {
-            meta.name     = pad->getPadName();
-            meta.filePath = pad->getFilePath();
+            meta.name      = pad->getPadName();
+            meta.filePath  = pad->getFilePath();
+            meta.tagColour = pad->getTagColour();
         }
         else
         {
@@ -6831,42 +9562,295 @@ void MainComponent::syncCueMetadataFromPads (ListData& list)
     }
 }
 
-void MainComponent::setPlayoutMode (bool isPadMode)
+void MainComponent::refreshTagColourLiveUi (ListData& list, int changedIndex)
+{
+    for (auto* pad : list.pads)
+    {
+        if (pad != nullptr)
+            pad->repaint();
+    }
+
+    if (scrollContent != nullptr)
+        scrollContent->repaint();
+
+    viewScroller.repaint();
+
+    if (cueListPanel != nullptr)
+    {
+        if (juce::isPositiveAndBelow (changedIndex, list.cueMeta.size()))
+            cueListPanel->syncCueTagColourAt (changedIndex, list.cueMeta.getReference (changedIndex).tagColour);
+
+        cueListPanel->repaint();
+    }
+
+    refreshGlobalTrackAccent();
+    repaint();
+}
+
+void MainComponent::updateListThemeColour (int listIndex, juce::Colour colour)
+{
+    if (! juce::isPositiveAndBelow (listIndex, allLists.size()))
+        return;
+
+    auto* list = allLists[listIndex];
+    if (list == nullptr)
+        return;
+
+    list->themeColour = showcontrol::colours::snapToPalette (colour);
+    sidebarPanel.setListThemeColour (listIndex, list->themeColour);
+    sidebarPanel.repaint();
+    triggerSave();
+}
+
+void MainComponent::refreshGlobalTrackAccent()
+{
+    SoundPad* accentPad = findGloballyPrioritizedPlayingPad();
+
+    if (accentPad == nullptr)
+        accentPad = inspectorPanel.getCurrentPad();
+
+    masterDeckPanel.setTrackAccentFromPad (accentPad);
+}
+
+void MainComponent::syncPadTagColourFromCueMeta (ListData& list, SoundPad* pad) noexcept
+{
+    if (pad == nullptr)
+        return;
+
+    const int idx = list.pads.indexOf (pad);
+
+    if (! juce::isPositiveAndBelow (idx, list.cueMeta.size()))
+        return;
+
+    const auto snapped = showcontrol::colours::snapToPalette (list.cueMeta.getReference (idx).tagColour);
+
+    if (pad->getTagColour().getARGB() != snapped.getARGB())
+        pad->setPadThemeColour (snapped);
+}
+
+void MainComponent::presentPadInInspector (SoundPad* pad)
+{
+    inspectorPanel.selectPad (pad);
+    refreshGlobalTrackAccent();
+}
+
+void MainComponent::syncBgmListHeaderScrollbar()
+{
+    if (listHeaderComponent == nullptr || ! listHeaderComponent->isVisible())
+        return;
+
+    int scrollbarTrim = 0;
+
+    if (viewScroller.isShowing())
+    {
+        const auto& vBar = viewScroller.getVerticalScrollBar();
+
+        if (vBar.isVisible())
+            scrollbarTrim = vBar.getWidth();
+    }
+
+    auto headerBounds = listHeaderComponent->getBounds();
+    listHeaderComponent->setBounds (headerBounds.getX(), headerBounds.getY(),
+                                    std::max (0, viewScroller.getWidth() - scrollbarTrim),
+                                    headerBounds.getHeight());
+}
+
+void MainComponent::applyTagColourToPadAndCue (ListData& list, int index, juce::Colour colour)
+{
+    if (! juce::isPositiveAndBelow (index, list.pads.size()))
+        return;
+
+    const auto snapped = showcontrol::colours::snapToPalette (colour);
+
+    if (auto* pad = list.pads[index])
+        pad->setPadThemeColour (snapped);
+
+    if (index < list.cueMeta.size())
+        list.cueMeta.getReference (index).tagColour = snapped;
+
+    refreshTagColourLiveUi (list, index);
+
+    if (auto* pad = list.pads[index])
+    {
+        if (inspectorPanel.getCurrentPad() == pad)
+            inspectorPanel.refreshTagColourUi();
+    }
+
+    triggerSave();
+}
+
+void MainComponent::synchronizePadGridWithEngineState()
 {
     auto* list = getActiveListSafe();
 
     if (list == nullptr || ! list->isGrid)
         return;
 
+    syncCueMetadataFromPads (*list);
+
+    for (auto* p : list->pads)
+    {
+        if (p == nullptr)
+            continue;
+
+        p->clearHotkeyTriggerGuard();
+        p->setCueListPlayback (true);
+        p->setRenderMode (true);
+        p->setClickToTrigger (false);
+    }
+
+    SoundPad* focusPad = nullptr;
+
+    if (juce::isPositiveAndBelow (selectedBgmIndex, list->pads.size()))
+        focusPad = list->pads[selectedBgmIndex];
+
+    if (focusPad == nullptr)
+    {
+        for (auto* p : list->pads)
+        {
+            if (p != nullptr && (p->isPlaying() || p->isPaused()))
+            {
+                focusPad = p;
+                break;
+            }
+        }
+    }
+
+    if (focusPad != nullptr)
+    {
+        forwardUiSelectionToPad (focusPad, false);
+        inspectorPanel.selectPad (focusPad);
+    }
+    else
+    {
+        applyPadSelectionVisualState();
+    }
+
+    updateCuePlaybackIndicators();
+    refreshSidebarPlayingStatus();
+
+    if (auto* panel = getPadPanel())
+    {
+        panel->setPadList (&list->pads);
+        panel->refreshPadGrid();
+    }
+
+    viewScroller.resized();
+
+    for (auto* p : list->pads)
+        if (p != nullptr && p->isVisible())
+            p->repaint();
+
+    viewScroller.repaint();
+}
+
+void MainComponent::finishPlayoutViewHeavySync (bool isPadMode)
+{
+    if (auto* activeList = getActiveListSafe())
+    {
+        if (isPadMode)
+            synchronizePadGridWithEngineState();
+        else
+        {
+            refreshCueListPanel (false);
+
+            if (cueListPanel != nullptr)
+                cueListPanel->repaint();
+        }
+
+        juce::ignoreUnused (activeList);
+    }
+
+    repaint();
+}
+
+void MainComponent::releaseUiFocusForViewSwitch()
+{
+    if (padReorderActive)
+        cancelPadReorder();
+
+    endMarqueeSelection();
+
+    juce::Component::unfocusAllComponents();
+}
+
+void MainComponent::applyPlayoutViewFocus (bool isPadMode)
+{
+    if (! isShowing())
+        return;
+
+    if (! isPadMode && cueListPanel != nullptr && cueListPanel->isShowing())
+    {
+        cueListPanel->grabKeyboardFocus();
+        return;
+    }
+
+    if (auto* panel = getPadPanel())
+    {
+        if (isPadMode && viewScroller.isVisible())
+        {
+            panel->grabKeyboardFocus();
+            return;
+        }
+    }
+
+    if (viewScroller.isVisible())
+        viewScroller.grabKeyboardFocus();
+    else if (isShowing())
+        grabKeyboardFocus();
+}
+
+void MainComponent::flushPlayoutViewGraphics (bool isPadMode)
+{
+    // Ép bounds swap đồng bộ (0ms) — tránh viewScroller 0×0.
+    resized();
+
+    const auto heavy = [this, isPadMode]
+    {
+        finishPlayoutViewHeavySync (isPadMode);
+        applyPlayoutViewFocus (isPadMode);
+    };
+
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        juce::MessageManager::callAsync (heavy);
+    else
+        heavy();
+}
+
+void MainComponent::setPlayoutMode (bool isPadMode)
+{
+    if (isOperatingState())
+        return;
+
+    auto* list = getActiveListSafe();
+
+    if (list == nullptr || ! list->isGrid)
+        return;
+
+    releaseUiFocusForViewSwitch();
+
     list->useCueListPanel = ! isPadMode;
-    activeList = isPadMode ? 0 : 1; // 1 = Danh sách CUE QLab-style
+    activeList = isPadMode ? 0 : 1;
 
     if (activeListIndex >= 0)
         sidebarPanel.setListViewMode (activeListIndex, ! isPadMode);
 
     if (playoutModeBar != nullptr)
+    {
         playoutModeBar->setPadModeActive (isPadMode);
-
-    layoutActiveListPads();
-    viewScroller.resized();
-    repaint();
-
-    if (! isPadMode && cueListPanel != nullptr)
-    {
-        refreshCueListPanel();
-
-        if (isShowing())
-            cueListPanel->grabKeyboardFocus();
-    }
-    else if (isShowing())
-    {
-        if (viewScroller.isVisible())
-            viewScroller.grabKeyboardFocus();
-        else
-            grabKeyboardFocus();
+        playoutModeBar->setViewMode (isPadMode);
+        playoutModeBar->toFront (false);
     }
 
-    saveProject();
+    if (cueListPanel != nullptr)
+        cueListPanel->setVisible (! isPadMode);
+
+    resized();
+    finishPlayoutViewHeavySync (isPadMode);
+    applyPlayoutViewFocus (isPadMode);
+
+    if (! isOperatingState())
+        saveProject();
 }
 
 void MainComponent::syncPlayoutModeBarFromActiveList()
@@ -6881,7 +9865,7 @@ void MainComponent::syncPlayoutModeBarFromActiveList()
     }
 }
 
-void MainComponent::refreshCueListPanel()
+void MainComponent::refreshCueListPanel (bool resetScrollToTop)
 {
     if (cueListPanel == nullptr || activeListIndex < 0 || activeListIndex >= allLists.size())
         return;
@@ -6894,13 +9878,19 @@ void MainComponent::refreshCueListPanel()
     syncCueMetadataFromPads (*list);
     cueListPanel->setCues (list->cueMeta);
     cueListPanel->setSelectedIndex (selectedBgmIndex);
-    cueListPanel->resetListScrollToTop();
+
+    if (resetScrollToTop)
+        cueListPanel->resetListScrollToTop();
+
     updateCuePlaybackIndicators();
     cueListPanel->notifyPlaybackActivity();
 }
 
 void MainComponent::updateCuePlaybackIndicators()
 {
+    if (isOperatingState())
+        return;
+
     if (cueListPanel == nullptr || activeListIndex < 0 || activeListIndex >= allLists.size())
         return;
 
@@ -6922,6 +9912,9 @@ void MainComponent::updateCuePlaybackIndicators()
 
         if (pad->isTransportActive())
         {
+            if (uiPlaybackFocusPad != nullptr && pad != uiPlaybackFocusPad && pad->isFadeOutInProgress())
+                continue;
+
             playingIdx = i;
             ++activeCount;
         }
@@ -6930,8 +9923,36 @@ void MainComponent::updateCuePlaybackIndicators()
             armedIdx = i;
     }
 
-    if (activeCount != 1)
+    if (uiPlaybackFocusPad != nullptr && list->pads.contains (uiPlaybackFocusPad))
+    {
+        const int focusIdx = list->pads.indexOf (uiPlaybackFocusPad);
+
+        if (uiPlaybackFocusPad->isPlaying() || uiPlaybackFocusPad->isPaused())
+            playingIdx = focusIdx;
+        else if (playingIdx < 0 && juce::isPositiveAndBelow (focusIdx, list->pads.size()))
+            playingIdx = focusIdx;
+    }
+    else if (activeCount != 1)
+    {
         playingIdx = -1;
+
+        for (int i = 0; i < list->pads.size(); ++i)
+        {
+            auto* pad = list->pads[i];
+
+            if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
+            {
+                if (uiPlaybackFocusPad != nullptr && pad != uiPlaybackFocusPad && pad->isFadeOutInProgress())
+                    continue;
+
+                playingIdx = i;
+                break;
+            }
+        }
+
+        if (playingIdx < 0 && juce::isPositiveAndBelow (selectedBgmIndex, list->pads.size()))
+            playingIdx = selectedBgmIndex;
+    }
 
     cueListPanel->setPlayingIndex (playingIdx);
     cueListPanel->setArmedIndex (armedIdx);
@@ -6996,11 +10017,8 @@ bool MainComponent::triggerCueListPlay (int padIndex)
         preWaitMs = list->cueMeta.getReference (padIndex).preWaitMs;
 
     armPad (pad);
-    selectedBgmIndex = padIndex;
+    forwardUiSelectionToPad (pad, false);
     inspectorPanel.selectPad (pad);
-
-    if (cueListPanel != nullptr)
-        cueListPanel->setSelectedIndex (padIndex);
 
     pendingGoTimer.reset();
 
@@ -7115,11 +10133,8 @@ bool MainComponent::triggerCueGo (int padIndex)
         preWaitMs = list->cueMeta.getReference (padIndex).preWaitMs;
 
     armPad (pad);
-    selectedBgmIndex = padIndex;
+    forwardUiSelectionToPad (pad, false);
     inspectorPanel.selectPad (pad);
-
-    if (cueListPanel != nullptr)
-        cueListPanel->setSelectedIndex (padIndex);
 
     pendingGoTimer.reset();
     auto runCueGoPad = [this] (SoundPad* goPad)
@@ -7142,7 +10157,7 @@ bool MainComponent::triggerCueGo (int padIndex)
                 return;
             }
 
-            goPad->startFadeOut();
+            goPad->stopTransportWithConfiguredFade();
 
             updateCuePlaybackIndicators();
             refreshSidebarPlayingStatus();
@@ -7292,24 +10307,18 @@ void MainComponent::rebuildDefaultHotkeysForList (int listIndex)
 
     hotkeyManager.removeBindingsForPad (listIndex, -1);
 
-    // 48-key matrix:
-    // 1..0, Q..P, A..;, Z..,. (40 keys) + F1..F8 (8 keys)
-    const juce::String keyMatrix = "1234567890QWERTYUIOPASDFGHJKL;ZXCVBNM,.";
-    const int maxMappedPads = juce::jmin (list->pads.size(), keyMatrix.length() + 8);
-
-    for (int i = 0; i < maxMappedPads; ++i)
+    for (int i = 0; i < list->pads.size(); ++i)
     {
-        if (list->pads[i] == nullptr || ! list->pads[i]->hasAudioFile())
+        auto* pad = list->pads[i];
+
+        if (pad == nullptr || ! pad->hasAudioFile())
             continue;
 
         HotkeyBinding binding;
         binding.padListIndex = listIndex;
         binding.padIndex     = i;
-        if (i < keyMatrix.length())
-            binding.keyPress = juce::KeyPress (keyMatrix[i]);
-        else
-            binding.keyPress = juce::KeyPress (juce::KeyPress::F1Key + (i - keyMatrix.length()));
-        binding.description  = list->pads[i]->getPadName();
+        binding.keyPress     = showcontrol::padgrid::hotkeyForCell (pad->getGridRow(), pad->getGridCol()).keyPress;
+        binding.description  = pad->getPadName();
         hotkeyManager.addBinding (binding);
     }
 }
@@ -7323,22 +10332,13 @@ void MainComponent::ensureDefaultHotkeysForList (int listIndex)
     if (list == nullptr)
         return;
 
-    // 48-key matrix:
-    // 1..0, Q..P, A..;, Z..,. (40 keys) + F1..F8 (8 keys)
-    const juce::String keyMatrix = "1234567890QWERTYUIOPASDFGHJKL;ZXCVBNM,.";
-    const int maxMappedPads = juce::jmin (list->pads.size(), keyMatrix.length() + 8);
-
-    for (int i = 0; i < maxMappedPads; ++i)
+    for (int i = 0; i < list->pads.size(); ++i)
     {
         auto* pad = list->pads[i];
         if (pad == nullptr || ! pad->hasAudioFile())
             continue;
 
-        juce::KeyPress kp;
-        if (i < keyMatrix.length())
-            kp = juce::KeyPress (keyMatrix[i]);
-        else
-            kp = juce::KeyPress (juce::KeyPress::F1Key + (i - keyMatrix.length()));
+        const auto kp = showcontrol::padgrid::hotkeyForCell (pad->getGridRow(), pad->getGridCol()).keyPress;
 
         if (hotkeyManager.hasKeyboardBindingForPad (listIndex, i))
             continue;
@@ -7452,7 +10452,6 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
     if (auto* dw = opts.launchAsync())
     {
         dw->centreWithSize (680, 560);
-        dw->addKeyListener (this);
         dw->grabKeyboardFocus();
         dialog->grabKeyboardFocus();
 
@@ -7586,13 +10585,10 @@ void MainComponent::refreshAllPanelThemes (bool shouldBeDark)
     if (emptyStatePanel != nullptr)
         emptyStatePanel->setDarkMode (shouldBeDark);
 
-    if (auto* scroll = dynamic_cast<ScrollableContainer*> (scrollContent.get()))
+    if (auto* scroll = getPadPanel())
         scroll->setDarkMode (shouldBeDark);
 
     const auto pal = ShowTheme::get (shouldBeDark);
-    gridSizeSlider.setColour (juce::Slider::thumbColourId, pal.accent);
-    gridSizeSlider.setColour (juce::Slider::trackColourId, pal.sliderTrack);
-    gridSizeSlider.setColour (juce::Slider::backgroundColourId, pal.panelElevated);
     addMusicFloatingBtn.setColour (juce::TextButton::buttonColourId, pal.panelElevated);
     addMusicFloatingBtn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
     showSidebarBtn.setColour (juce::TextButton::buttonColourId, pal.panelElevated);
@@ -7810,9 +10806,9 @@ static void writeCueMetaToPadElem (juce::XmlElement& padElem, const CueItem& cue
     if (! cue.isEnabled)
         padElem.setAttribute ("cueEnabled", false);
 
-    const auto defaultTag = ShowTheme::darkPalette().textMuted;
+    const auto defaultTag = showcontrol::colours::defaultTagColour();
 
-    if (cue.tagColour != defaultTag)
+    if (! showcontrol::colours::isDefaultTagColour (cue.tagColour))
         padElem.setAttribute ("tagColour", (int) cue.tagColour.getARGB());
 }
 
@@ -7824,7 +10820,8 @@ static void readCueMetaFromPadElem (const juce::XmlElement& padElem, CueItem& cu
     cue.isEnabled  = padElem.getBoolAttribute ("cueEnabled", true);
 
     if (padElem.hasAttribute ("tagColour"))
-        cue.tagColour = juce::Colour ((juce::uint32) padElem.getIntAttribute ("tagColour"));
+        cue.tagColour = showcontrol::colours::snapToPalette (
+            juce::Colour ((juce::uint32) padElem.getIntAttribute ("tagColour")));
 }
 
 static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad)
@@ -7834,7 +10831,8 @@ static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad
     if (pad.getFilePath().isNotEmpty())
     {
         juce::File f (pad.getFilePath());
-        if (custom != f.getFileNameWithoutExtension())
+        const auto fileStem = VideoAudioExtractor::displayNameFromAudioPath (f);
+        if (custom != fileStem)
             padElem.setAttribute ("customName", custom);
     }
     else if (custom != juce::String::fromUTF8 (u8"Trống"))
@@ -7901,6 +10899,15 @@ static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad
             if (std::abs (g) > 0.05f)
                 padElem.setAttribute ("dspEqBand" + juce::String (b), (double) g);
         }
+    }
+
+    if (! showcontrol::colours::isDefaultTagColour (pad.getTagColour()))
+        padElem.setAttribute ("tagColour", (int) pad.getTagColour().getARGB());
+
+    if (pad.occupiesCueGridSlot())
+    {
+        padElem.setAttribute ("gridRow", pad.getGridRow());
+        padElem.setAttribute ("gridCol", pad.getGridCol());
     }
 }
 
@@ -8107,7 +11114,6 @@ void MainComponent::applyFactoryDefaultApplicationState()
 
     projectDefaultNormalizeLufs = false;
     hotkeyScopeMode             = HotkeyScopeMode::activeList;
-    gridSizeSlider.setValue (180.0, juce::dontSendNotification);
     sidebarWidth   = 250;
     inspectorWidth = 360;
     sidebarVisible   = true;
@@ -8164,6 +11170,11 @@ void MainComponent::applyFactoryDefaultApplicationState()
 
 void MainComponent::loadApplicationState()
 {
+    StateOperationScope stateGuard (isPerformingStateOperation);
+
+    if (! stateGuard.enteredSuccessfully())
+        return;
+
     const auto configPath = showcontrol::state::getCanonicalConfigFile().getFullPathName();
     std::cout << "[CONFIG] loadApplicationState() — target: " << configPath.toStdString() << std::endl;
 
@@ -8222,7 +11233,6 @@ void MainComponent::loadApplicationState()
                 ? HotkeyScopeMode::global
                 : HotkeyScopeMode::activeList;
 
-            gridSizeSlider.setValue (xml->getDoubleAttribute ("gridPadSize", 180.0), juce::dontSendNotification);
             sidebarWidth   = xml->getIntAttribute ("sidebarWidth", sidebarWidth);
             inspectorWidth = xml->getIntAttribute ("inspectorWidth", inspectorWidth);
             sidebarVisible   = xml->getBoolAttribute ("sidebarVisible", sidebarVisible);
@@ -8271,6 +11281,11 @@ void MainComponent::loadApplicationState()
                 newList->useCueListPanel   = listElem->getBoolAttribute ("useCueListPanel", false);
                 newList->clickPadToTrigger = listElem->getBoolAttribute ("clickPadToTrigger", false);
                 newList->autoArmOnSelect   = listElem->getBoolAttribute ("autoArmOnSelect", true);
+                if (listElem->hasAttribute ("themeColour"))
+                {
+                    newList->themeColour = showcontrol::colours::snapToPalette (
+                        juce::Colour ((juce::uint32) listElem->getIntAttribute ("themeColour")));
+                }
                 const juce::String listName = listElem->getStringAttribute ("name",
                     newList->isGrid ? showcontrol::localization::defaultCueListName()
                                     : showcontrol::localization::defaultBgmListName());
@@ -8317,6 +11332,14 @@ void MainComponent::loadApplicationState()
                             p->setClickToTrigger (newList->clickPadToTrigger);
                         }
 
+                        p->setTagColour (cueMeta.tagColour);
+
+                        if (newList->isGrid && padElem->hasAttribute ("gridRow"))
+                        {
+                            p->setGridPosition (padElem->getIntAttribute ("gridRow", 0),
+                                                padElem->getIntAttribute ("gridCol", 0));
+                        }
+
                         if (newList->isGrid)
                         {
                             cueMeta.cueNumber = index + 1;
@@ -8352,13 +11375,23 @@ void MainComponent::loadApplicationState()
                         else if (loopTrack)
                             p->setLooping (true);
 
+                        CueItem legacyMeta;
+                        readCueMetaFromPadElem (*padElem, legacyMeta);
+                        p->setTagColour (legacyMeta.tagColour);
+
+                        if (newList->isGrid && padElem->hasAttribute ("gridRow"))
+                        {
+                            p->setGridPosition (padElem->getIntAttribute ("gridRow", 0),
+                                                padElem->getIntAttribute ("gridCol", 0));
+                        }
+
                         newList->pads.add (p);
                     }
                 }
 
                 allLists.add (newList);
                 sidebarPanel.addSet (listName, newList->pads.size(), newList->isGrid,
-                                     newList->useCueListPanel, newList->isLocked);
+                                     newList->useCueListPanel, newList->isLocked, newList->themeColour);
                 sidebarPanel.setListLooping (allLists.size() - 1, newList->isLooping);
             }
 
@@ -8495,7 +11528,6 @@ std::unique_ptr<juce::XmlElement> MainComponent::buildProjectXml()
     if (projectDefaultNormalizeLufs)
         xml->setAttribute ("defaultNormalizeLufs", true);
 
-    xml->setAttribute ("gridPadSize", gridSizeSlider.getValue());
     xml->setAttribute ("sidebarWidth", sidebarWidth);
     xml->setAttribute ("inspectorWidth", inspectorWidth);
     xml->setAttribute ("sidebarVisible", sidebarVisible);
@@ -8515,6 +11547,9 @@ std::unique_ptr<juce::XmlElement> MainComponent::buildProjectXml()
 
         if (list->isLocked)
             listElem->setAttribute ("isLocked", true);
+
+        if (! showcontrol::colours::isDefaultTagColour (list->themeColour))
+            listElem->setAttribute ("themeColour", (int) list->themeColour.getARGB());
 
         if (list->isGrid)
         {
@@ -8578,11 +11613,32 @@ std::unique_ptr<juce::XmlElement> MainComponent::buildProjectXml()
     return xml;
 }
 
+void MainComponent::handleAsyncUpdate()
+{
+    executeActualDiskWriteJSON();
+}
+
+void MainComponent::executeActualDiskWriteJSON()
+{
+    StateOperationScope stateGuard (isPerformingStateOperation);
+
+    if (! stateGuard.enteredSuccessfully())
+        return;
+
+    saveApplicationStateInternal();
+}
+
 void MainComponent::saveApplicationState()
 {
+    if (isOperatingState())
+        return;
+
+    triggerAsyncUpdate();
+}
+
+void MainComponent::saveApplicationStateInternal()
+{
     const auto configFile = showcontrol::state::getCanonicalConfigFile();
-    std::cout << "[CONFIG] saveApplicationState() — target: "
-              << configFile.getFullPathName().toStdString() << std::endl;
 
     if (! showcontrol::state::ensureConfigParentDirectory (configFile))
         return;
@@ -8590,10 +11646,7 @@ void MainComponent::saveApplicationState()
     auto xml = buildProjectXml();
 
     if (xml == nullptr)
-    {
-        std::cout << "[CONFIG] [ERROR] buildProjectXml() returned null" << std::endl;
         return;
-    }
 
     xml->writeTo (getProjectFile());
 
@@ -8603,26 +11656,20 @@ void MainComponent::saveApplicationState()
     root->setProperty ("projectXml", xml->toString());
     root->setProperty ("savedAtMs", juce::Time::getMillisecondCounterHiRes());
     root->setProperty ("configPath", configFile.getFullPathName());
+    root->setProperty ("playlist", buildPlaylistJson());
 
-    const auto playlist = buildPlaylistJson();
-    root->setProperty ("playlist", playlist);
-    int trackCount = 0;
+    showcontrol::state::hardFlushJsonConfig (juce::var (root.get()));
+}
 
-    if (playlist.isArray())
-        for (const auto& listVar : *playlist.getArray())
-            if (const auto tracks = listVar.getProperty ("tracks", juce::var()); tracks.isArray())
-                trackCount += tracks.getArray()->size();
+void MainComponent::triggerSave()
+{
+    if (isOperatingState())
+        return;
 
-    std::cout << "[CONFIG] Saving theme=" << themePreferenceId
-              << " lang=" << languagePreferenceIndex
-              << " lists=" << (playlist.isArray() ? playlist.getArray()->size() : 0)
-              << " tracks=" << trackCount << std::endl;
-
-    if (! showcontrol::state::hardFlushJsonConfig (juce::var (root.get())))
-        std::cout << "[CONFIG] [ERROR] hardFlushJsonConfig failed" << std::endl;
+    triggerAsyncUpdate();
 }
 
 void MainComponent::saveProject()
 {
-    saveApplicationState();
+    triggerSave();
 }

@@ -1,9 +1,65 @@
+#=======================================================================
+# SHOWCUE - MASTER COMPREHENSIVE GITIGNORE (MAC & WINDOWS COMPATIBLE)
+#=======================================================================
+
+# --- Phân khu 1: Thư mục Build & Cache (Quét sạch rác biên dịch) ---
+build/
+build-win/
+build-debug/
+build-release/
+bin/
+obj/
+x64/
+Win32/
 .cache/
 .cursor-build/
-build-debug/
-build/
-build-release/
+
+# --- Phân khu 2: Lõi Trình biên dịch & Hạ tầng CMake ---
+CMakeCache.txt
+CMakeFiles/
+CMakeSettings.json
+CMakeUserPresets.json
+/compile_commands.json
+/compile_flags.txt
+*.cmake
+*.ninja
+
+# --- Phân khu 3: IDE Cursor & Visual Studio Code ---
 .vscode/
+.cursor/
+.history/
+*.code-workspace
+
+# --- Phân khu 4: Visual Studio 2022 (Chí mạng trên Windows LTSC) ---
+# Thư mục ẩn lưu cache Intellisense của VS, có thể nặng hàng GB, cấm push lên Git
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln
+*.vcxproj
+*.filters
+
+# --- Phân khu 5: Rác Hệ điều hành (macOS & Windows) ---
 .DS_Store
-compile_commands.json
-compile_flags.txt
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# --- Phân khu 6: Sản phẩm Đóng gói & File Nhị phân (Tránh lọt lưới) ---
+*.exe
+*.app/
+*.dll
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.msi
+
+# --- Phân khu 7: BẢO LƯU TÀI NGUYÊN BẮT BUỘC (TUYỆT ĐỐI KHÔNG CHẶN) ---
+# Dấu chấm than (!) ép Git giữ lại bộ font Roboto nhúng nhị phân của anh em mình
+!/Resources/Fonts/*.ttf

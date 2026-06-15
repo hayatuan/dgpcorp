@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <atomic>
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -11,18 +12,23 @@
 #include "SidebarPanel.h"
 #include "SoundPad.h"
 #include "InspectorPanel.h"
+#include "PadPanel.h"
+#include "ShowPadGridMatrix.h"
 #include "MasterDeckPanel.h"
 #include "CueListPanel.h"
 #include "AudioEngine.h"
 #include "HotkeyManager.h"
 #include "HotkeyAssignDialog.h"
 #include "VideoAudioExtractor.h"
+#include "ShowKeyboardInput.h"
+#include "ShowCrossComponentDrag.h"
 #include "FfmpegSetupDialog.h"
 #include "AudioDeviceSettingsPanel.h"
 #include "BusMixerPanel.h"
 #include "ErrorHandler.h"
 #include "SetSecondaryWindow.h"
 #include "StageMonitorComponent.h"
+#include "ShowUndoActions.h"
 
 namespace showcontrol::update { class ShowUpdateChecker; }
 
@@ -40,10 +46,11 @@ class OneShotApplicationTimer;
 
 class MainComponent  : public juce::Component,
                        public juce::DragAndDropContainer,
+                       public juce::DragAndDropTarget,
                        public juce::Timer,
                        public juce::FileDragAndDropTarget,
-                       public juce::KeyListener,
                        public juce::ApplicationCommandTarget,
+                       public juce::AsyncUpdater,
                        private juce::DarkModeSettingListener
 {
 public:
@@ -57,26 +64,53 @@ public:
     ~MainComponent() override;
 
     void paint (juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     bool keyPressed (const juce::KeyPress& key) override;
-    bool keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent) override;
-    bool keyStateChanged (bool isKeyDown) override;
     void timerCallback() override; 
     void visibilityChanged() override;
-    void parentHierarchyChanged() override;
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray& files, int x, int y) override;
     void fileDragExit (const juce::StringArray& files) override;
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
+    bool isInterestedInDragSource (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+    void itemDragEnter (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+    void itemDragMove (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+    void itemDragExit (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+    void itemDropped (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+
     void loadList (int listIndex, int trackCount, bool isGrid);
     void saveProject();
+    void triggerSave();
+    void persistApplicationStateNow();
+    void rebuildHotkeyBindings();
+    void movePadsToGridCell (int listIdx,
+                             const juce::Array<int>& padIndices,
+                             int anchorIndex,
+                             int targetRow,
+                             int targetCol);
+    void copyTracksToPadGrid (int targetRow,
+                              int targetCol,
+                              const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks);
+    void copyLegacySidebarItemsToPadGrid (int targetRow,
+                                          int targetCol,
+                                          const juce::Array<int>& itemIds,
+                                          const juce::String& sourceListName);
+    void appendPadsFromGridToList (int targetListIdx,
+                                   const juce::Array<int>& padIndices);
+    void appendCopyTracksToPlaylist (int targetListIdx,
+                                     const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks);
+    void consumeInternalJucePadDrop() noexcept;
+    int getActiveListIndex() const noexcept { return activeListIndex; }
+    bool isPadGridReorderActive() const noexcept { return padReorderActive && padReorderIsGridMode; }
     void saveApplicationState();
     void loadApplicationState();
+    bool isOperatingState() const noexcept { return isPerformingStateOperation.load (std::memory_order_acquire); }
     void prepareForApplicationShutdown();
     void loadProject();
     juce::File getProjectFile();
@@ -85,6 +119,8 @@ public:
     void setAppLanguage (int languageIndex);
     void lookAndFeelChanged() override;
     void refreshSidebarPlayingStatus();
+    /** Quét ưu tiên toàn cục PAD → CUE → BGM và cập nhật MasterDeck — độc lập luồng chuyển playlist Sidebar. */
+    void updateMainDeskDisplay();
     void showAudioSettingsDialog();
     void showPreferencesDialog (int initialTabIndex = 0);
     void showAboutDialog();
@@ -105,6 +141,10 @@ public:
     void reloadAllPadWaveformsFromConfig();
     void reloadAllPadWaveformsStaggered (int batchSize = 6, int batchDelayMs = 16);
     void refreshStartupPlaylistDisplay();
+
+    juce::UndoManager& getUndoManager() noexcept { return undoManager; }
+    void forceStopActiveAudioForSafety();
+    void applyPadGridDropAt (int listIdx, SoundPad* sourcePad, int targetRow, int targetCol);
 
     struct AudioFormatMigrationEntry
     {
@@ -137,9 +177,11 @@ private:
     void finishDeferredStartup();
     void shutdownActiveTimers() noexcept;
     void applyFactoryDefaultApplicationState();
+    void handleAsyncUpdate() override;
+    void executeActualDiskWriteJSON();
+    void saveApplicationStateInternal();
     std::unique_ptr<juce::XmlElement> buildProjectXml();
 
-    juce::Component* topLevelKeyListenerHost = nullptr;
     ShowControlLookAndFeel appLookAndFeel;
     SidebarPanel sidebarPanel;
     InspectorPanel inspectorPanel; 
@@ -154,11 +196,20 @@ private:
         bool clickPadToTrigger = false;
         bool autoArmOnSelect = true;
         bool isLocked = false;
+        juce::Colour themeColour = showcontrol::colours::defaultTagColour();
     };
 
     SoundPad* ensurePadSlotAtIndex (ListData& list, int index);
     void syncCueMetadataFromPads (ListData& list);
-    void refreshCueListPanel();
+    void applyTagColourToPadAndCue (ListData& list, int index, juce::Colour colour);
+    void refreshTagColourLiveUi (ListData& list, int changedIndex);
+    void updateListThemeColour (int listIndex, juce::Colour colour);
+    void refreshGlobalTrackAccent();
+    void syncPadTagColourFromCueMeta (ListData& list, SoundPad* pad) noexcept;
+    void presentPadInInspector (SoundPad* pad);
+    SoundPad* getActiveSoundPad() const noexcept { return inspectorPanel.getCurrentPad(); }
+    void syncBgmListHeaderScrollbar();
+    void refreshCueListPanel (bool resetScrollToTop = true);
     bool triggerCueGo (int padIndex);
     bool triggerCueListPlay (int padIndex);
     bool triggerCueListPause (int padIndex);
@@ -167,8 +218,24 @@ private:
     void armPad (SoundPad* pad);
     void setSoloPad (SoundPad* pad, bool enable);
     void updateCuePlaybackIndicators();
+    /** Ép highlight/selection sang pad mới ngay lập tức — tách khỏi fade-out pad cũ. */
+    void forwardUiSelectionToPad (SoundPad* pad, bool scrollIntoView = false);
+    /** Chặn timer/callback của pad fade-out cướp con trỏ UI khỏi pad đang focus. */
+    bool shouldAcceptPlaybackUiEventFromPad (SoundPad* pad) const noexcept;
+    SoundPad* findPrimaryPlaybackPadForActiveList() const noexcept;
+    SoundPad* findGloballyPrioritizedPlayingPad() const noexcept;
+    SoundPad* getAllActivePlayingPadTrackGlobal() const noexcept;
+    SoundPad* getAllActivePlayingCueTrackGlobal() const noexcept;
+    SoundPad* getAllActivePlayingBGMTrackGlobal() const noexcept;
+    void updateTrackPlayingInfo (SoundPad* pad);
+    void showNoTrackPlayingState();
+    void refreshMasterDeckBgmTransportState();
     /** Đồng bộ selection + inspector + master deck theo pad đang phát (single source of truth). */
     void syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView);
+    /** Sau toggle sang PAD grid — đồng bộ armed/playing + mở khóa tương tác. */
+    void synchronizePadGridWithEngineState();
+    void finishPlayoutViewHeavySync (bool isPadMode);
+    void applyPlayoutViewFocus (bool isPadMode);
     SoundPad* findPlayingPadInActiveBgmList() const;
     bool triggerPadFromHotkey (const HotkeyBinding& binding);
     void rebuildDefaultHotkeysForList (int listIndex);
@@ -222,8 +289,21 @@ private:
     void exportSetAtIndex (int listIndex);
     bool isActiveListLocked() const noexcept;
     void movePadInList (int listIdx, int fromPadIdx, int toPadIdx);
+    void movePadToGridCellImpl (int listIdx, SoundPad* pad, int row, int col);
+    void movePadsToGridCellImpl (int listIdx,
+                                 const juce::Array<int>& padIndices,
+                                 int anchorIndex,
+                                 int targetRow,
+                                 int targetCol);
+    void performPadGridMutationWithUndo (int listIdx,
+                                         const juce::String& actionName,
+                                         std::function<void()> mutation);
+    void sortListTracksAscending (int listIdx);
+    void applyListSortAscending (int listIdx);
     void deletePadFromList (SoundPad* pad);
     void deletePadsFromList (int listIdx, const juce::Array<int>& padIndices);
+    void deletePadsFromListImpl (int listIdx, const juce::Array<int>& padIndices);
+    static juce::Array<int> buildBulkDeleteIndicesDescending (const juce::Array<int>& indices, int listSize);
     void deleteSelectedPadsFromActiveList();
     void compactCueListPads (ListData& list);
     void updateCueGridUIFromData (ListData& list);
@@ -231,10 +311,18 @@ private:
     static bool isSpacebarKey (const juce::KeyPress& key) noexcept;
     bool executeSpacebarTransportKey (const juce::KeyPress& key);
     bool handleApplicationHotkey (const juce::KeyPress& key);
+    bool triggerPadByKeyCode (int keyCode, juce::ModifierKeys modifiers);
+    bool triggerPadByKeyCode (const juce::KeyPress& key);
+    void routePhysicalHotkeyFromKeyCode (int keyCode);
+    bool tryTriggerPadByPhysicalKeyCode (int keyCode, juce::uint32 nowMs);
+    bool tryTriggerPadByTelexAwareKeyPress (const juce::KeyPress& key, juce::uint32 nowMs);
     bool handleDeleteKeyForActiveSelection();
     void promptDeleteSelectedPadsConfirmation();
     juce::Array<int> collectActiveListDeletionIndices() const;
     void safelyPreparePadForDeletion (SoundPad* pad);
+    void surgicalStopPadIfTransportActive (SoundPad* pad) noexcept;
+    void surgicalStopTransportActivePadsInList (const ListData& list) noexcept;
+    void detachDeckUiReferencesIfPadInList (const ListData& list) noexcept;
     void moveSelectedPadsInActiveListUp();
     void moveSelectedPadsInActiveListDown();
     void moveSelectedPadsInActiveListToTop();
@@ -249,11 +337,14 @@ private:
     void applyMarqueeSelectionToPads();
     juce::Rectangle<int> getMarqueeRectInScrollContent() const;
     void showTrackContextMenu (SoundPad* pad);
+    void showBgmListBackgroundSortMenu (const juce::MouseEvent& e);
     void handleTrackMenuResult (SoundPad* pad, int result);
     void resetFadeForSelectedPads();
     void syncContextMenuTargetSelection (int listIdx, int padIdx);
     void promptReplaceTrackAudioFile (SoundPad* pad);
     void handleAudioFileReplacement (SoundPad* pad, const juce::File& file);
+    void duplicatePad (SoundPad* sourcePad);
+    void duplicateSelectedPads();
     void duplicatePadAtIndex (int listIdx, int padIdx);
     void revealPadFileInOS (SoundPad* pad);
 
@@ -266,20 +357,49 @@ private:
     void beginPadReorder (SoundPad* source);
     void updatePadReorder (juce::Point<int> posInScrollContent);
     void endPadReorder();
-    void cancelPadReorder();
+    void cancelPadReorder (bool keepPadGridDragVisual = false);
     int hitTestPadInsertIndex (juce::Point<int> local) const;
     PadGridLayout getPadGridLayout (int mainViewWidth, int mainViewHeight, int padCount) const;
+    void movePadToGridCell (int listIdx, SoundPad* pad, int row, int col);
+    bool assignNextFreeGridCell (ListData& list, SoundPad* pad);
+    static juce::Point<int> findSmartDuplicateGridSlot (const ListData& list,
+                                                        int sourceRow,
+                                                        int sourceCol) noexcept;
+    using GridOccupancy = std::array<std::array<bool, showcontrol::padgrid::kCols>,
+                                     showcontrol::padgrid::kRows>;
+    static GridOccupancy buildGridOccupancyFromList (const ListData& list) noexcept;
+    static juce::Point<int> findProximitySlotInGrid (const GridOccupancy& grid,
+                                                     int sourceRow,
+                                                     int sourceCol) noexcept;
+    static void markGridCellOccupied (GridOccupancy& grid, int row, int col) noexcept;
+    SoundPad* createDuplicatePadFromSource (const ListData& list, SoundPad* src,
+                                            bool makeVisible, bool fastRamClone = false);
+    void finishBatchDuplicatedPads (const juce::Array<SoundPad*>& createdPads) noexcept;
+    PadPanel* getPadPanel() const noexcept;
     void layoutActiveListPads();
+    int findListIndexByName (const juce::String& name) const;
+    juce::var buildSidebarListDragPayload (const juce::Array<int>& itemIds) const;
+    juce::var buildPadPanelDragPayload (const juce::Array<int>& padIndices, int anchorIndex) const;
     static bool listHasLoadedAudio (const ListData& list) noexcept;
     void autoScrollViewportForPadReorder (juce::Point<int> posInScrollContent);
     juce::Rectangle<int> getListInsertLineBounds() const;
     juce::Rectangle<int> getGridGapCellBounds() const;
+    void repaintPadReorderInsertStrip (int insertIndex) const;
+    void repaintPadReorderCapsuleStrip (juce::Point<int> pointerInScrollContent) const;
     void paintPadReorderOverlay (juce::Graphics& g) const;
     void updatePadReorderOverlayBounds();
+    bool canAcceptCrossCopyToPadGrid() const noexcept;
+    juce::Point<int> mapDropPointToPadGridCell (juce::Point<int> localInMain) const noexcept;
+    bool handleCrossCopyDropOnPadGrid (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails);
+    void setCrossCopyDropHighlightActive (bool active);
+    void setPadPanelChildrenMousePassthrough (bool passthrough) noexcept;
     void setSidebarVisible (bool shouldShow);
     void setInspectorVisible (bool shouldShow);
     /** Chuyển PAD grid ↔ Cue List trong bộ CUE đang active (chỉ message thread). */
     void setPlayoutMode (bool isPadMode);
+    void releaseUiFocusForViewSwitch();
+    /** Ép resized + nạp lại nội dung vùng trung tâm sau toggle view (0ms, message thread). */
+    void flushPlayoutViewGraphics (bool isPadMode);
     void refreshAllPanelThemes (bool shouldBeDark);
     void refreshLocalizedUi();
     void refreshLocalizedBusNames();
@@ -389,16 +509,89 @@ private:
     void registerAllPadsWithMixer();
     void forceAllPadsIdleAtStartup();
 
+    struct ListOrderUndoState
+    {
+        juce::Array<SoundPad*> padOrder;
+        juce::Array<CueItem> cueMeta;
+    };
+
+    struct GridPositionsUndoState
+    {
+        struct Entry { SoundPad* pad = nullptr; int row = 0; int col = 0; };
+        juce::Array<Entry> entries;
+    };
+
+    struct DeletedPadUndoEntry
+    {
+        int index = -1;
+        std::unique_ptr<juce::XmlElement> padXml;
+    };
+
+    struct ListDeletionUndoState
+    {
+        int listIdx = -1;
+        juce::Array<DeletedPadUndoEntry> removedPads;
+    };
+
+    struct PlaylistSnapshotUndoState
+    {
+        int listIdx = -1;
+        int activeListIndexAtCapture = -1;
+        juce::String sidebarName;
+        bool isGrid = true;
+        bool isLooping = false;
+        bool useCueListPanel = false;
+        bool clickPadToTrigger = false;
+        bool autoArmOnSelect = true;
+        bool isLocked = false;
+        juce::Colour themeColour = showcontrol::colours::defaultTagColour();
+        juce::Array<CueItem> cueMeta;
+        juce::OwnedArray<juce::XmlElement> padXmls;
+    };
+
+    ListOrderUndoState captureListOrderSnapshot (int listIdx) const;
+    void restoreListOrderSnapshot (int listIdx, const ListOrderUndoState& state);
+    GridPositionsUndoState captureGridPositionsSnapshot (int listIdx) const;
+    void restoreGridPositionsSnapshot (int listIdx, const GridPositionsUndoState& state);
+    ListDeletionUndoState captureListDeletionSnapshot (int listIdx,
+                                                       const juce::Array<int>& padIndices) const;
+    void restoreListDeletionSnapshot (const ListDeletionUndoState& state);
+    PlaylistSnapshotUndoState capturePlaylistSnapshot (int listIdx) const;
+    void restorePlaylistSnapshot (const PlaylistSnapshotUndoState& state);
+    void deleteListAtIndexImpl (int idx);
+    void movePadInListImpl (int listIdx, int fromPadIdx, int toPadIdx);
+    void movePadsBlockInListImpl (int listIdx,
+                                  const juce::Array<int>& sourceIndices,
+                                  int insertBeforeIndex);
+    void applyUndoXmlToPad (ListData& list, SoundPad* pad, const juce::XmlElement& padElem);
+    SoundPad* insertPadFromUndoXml (ListData& list, int index, const juce::XmlElement& padElem);
+    SoundPad* restorePadFromUndoXml (ListData& list, int index, const juce::XmlElement& padElem);
+    void performUndoableMutation (const juce::String& transactionName,
+                                  std::function<void()> performMutation,
+                                  std::function<void()> undoMutation);
+    void clearAllPanelsSelectionLive();
+    void refreshAllPanelsAfterDataMutation (int listIdx);
+    void refreshGridLayoutAfterMutation (int listIdx);
+    void refreshPadGridLayoutFast (int listIdx);
+    void refreshListOrderAfterMutation (int listIdx);
+    static bool isSearchWindowFocused() noexcept;
+
+    juce::UndoManager undoManager { 50 };
+    std::atomic<bool> isPerformingUndoRedo { false };
+
     juce::TimeSliceThread timeSliceThread { "ShowCue ReadAhead" };
     juce::AudioDeviceManager deviceManager;
     MultiOutputAudioCallback multiOutputCallback;
 
     juce::TooltipWindow tooltipWindow { this };
+    std::atomic<bool> isPerformingStateOperation { false };
     bool deferredStartupComplete = false;
     int activeListIndex = -1; int selectedBgmIndex = 0; bool isDarkMode = true;
     /** 0 = BÀN PAD, 1 = DANH SÁCH CUE QLab — định tuyến Space/P/S (không đè GO/Panic). */
     int activeList = 0;
     SoundPad* lastUiSyncedPlayingPad = nullptr;
+    /** Token UI playback — pad user vừa chọn/phát; fade-out pad khác không được bẻ selection. */
+    SoundPad* uiPlaybackFocusPad = nullptr;
     /** 1 = Dark, 2 = Light, 3 = Match System */
     int themePreferenceId = 1;
     /** 0 = Match System, 1 = Tiếng Việt, 2 = English */
@@ -407,7 +600,6 @@ private:
     HotkeyScopeMode hotkeyScopeMode = HotkeyScopeMode::activeList;
     int lastHotkeyKeyCode = 0;
     juce::uint32 lastHotkeyTriggerMs = 0;
-    bool inExclusiveKeyHandler = false;
     TransportCommandKind lastBgmTransportKind  = TransportCommandKind::none;
     juce::uint32         lastBgmTransportCommandMs = 0;
     TransportCommandKind lastCueGoTransportKind  = TransportCommandKind::none;
@@ -417,6 +609,9 @@ private:
     int padReorderFromIndex = -1;
     int padReorderInsertIndex = -1;
     bool padReorderActive = false;
+    bool crossComponentDragConsumed = false;
+    bool crossCopyDropHighlightActive = false;
+    juce::Rectangle<int> crossCopyDropHighlightBounds;
     juce::Point<int> padReorderPointerPos { 0, 0 };
     juce::Point<int> padReorderDragOffset { 0, 0 };
     juce::Image padReorderGhostImage;
@@ -436,7 +631,6 @@ private:
     juce::Viewport viewScroller;
     std::unique_ptr<juce::Component> scrollContent;
     std::unique_ptr<CueListPanel> cueListPanel;
-    juce::Slider gridSizeSlider;
     juce::TextButton addMusicFloatingBtn;
     juce::TextButton showSidebarBtn;
     juce::TextButton showInspectorBtn;

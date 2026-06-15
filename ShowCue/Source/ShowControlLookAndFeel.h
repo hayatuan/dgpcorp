@@ -64,6 +64,11 @@ public:
     void drawToggleButton (juce::Graphics& g, juce::ToggleButton& button,
                            bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
 
+    juce::Font getTabButtonFont (juce::TabBarButton&, float height) override;
+
+    /** Font chuột phải toàn cục — Roboto 15pt nhúng nhị phân. */
+    juce::Font getPopupMenuFont() override;
+
     /** TextEditor phẳng bo góc — nền chìm, viền xanh thương hiệu khi focus. */
     void fillTextEditorBackground (juce::Graphics& g, int width, int height,
                                    juce::TextEditor& textEditor) override;
@@ -200,18 +205,16 @@ public:
         }
 
         auto font = getPopupMenuFont();
-        idealHeight = juce::jmax (32, standardMenuItemHeight > 0 ? standardMenuItemHeight : 32);
-        idealWidth = juce::GlyphArrangement::getStringWidthInt (font, text) + 52;
-    }
-
-    juce::Font getPopupMenuFont() override
-    {
-        return ShowTheme::font (13.0f);
+        idealHeight = juce::jmax (36, standardMenuItemHeight > 0 ? standardMenuItemHeight : 36);
+        idealWidth = juce::GlyphArrangement::getStringWidthInt (font, text) + 56;
     }
 
 private:
     bool currentIsDark = true;
+    juce::Typeface::Ptr robotoRegular;
+    juce::Typeface::Ptr robotoBold;
 
+    void loadRobotoTypefaces();
     void applyPalette (bool dark);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShowControlLookAndFeel)

@@ -1,10 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # ShowCue — trình phát sự kiện cue-based (JUCE 8)
-project(ShowCue VERSION 1.0.0 LANGUAGES C CXX)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Giúp clangd / Cursor Problems đọc đúng include JUCE
+project(ShowCue VERSION 0.2.0 LANGUAGES C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json for clangd" FORCE)
 
 # Chỉ đường dẫn cho VS Code tìm thấy bộ thư viện JUCE nằm bên cạnh
@@ -15,7 +12,7 @@ add_subdirectory(JUCE)
 # PNG 1024×1024 cho macOS; ICO riêng cho Windows khi cross-build.
 juce_add_gui_app(ShowCue
     PRODUCT_NAME "ShowCue"
-    VERSION 1.0.0-beta
+    VERSION 0.2.0
     BUNDLE_ID "com.dgpco.showcue"
     ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.ico"
@@ -31,6 +28,7 @@ target_sources(ShowCue PRIVATE
     Source/ShowControlMacWindow.h
     Source/ShowControlIDEIndex.cpp
     Source/ShowTheme.h
+    Source/ShowTagColors.h
     Source/MasterDeckComponent.h
     Source/ShowControlLookAndFeel.h
     Source/ShowControlLookAndFeel.cpp
@@ -71,8 +69,16 @@ target_sources(ShowCue PRIVATE
     Source/SystemPermissionsPanel.cpp
     Source/BusMixerPanel.h
     Source/AudioMetadataReader.h
-    Source/ShowWaveformCache.h
+    Source/ShowPadGridMatrix.h
+    Source/ShowCrossComponentDrag.h
+    Source/PadPanel.h
+    Source/PadPanel.cpp
     )
+
+# Nhúng font Roboto (Unicode tiếng Việt) — đồng bộ macOS + Windows LTSC, không phụ thuộc font hệ thống.
+juce_add_binary_data (ShowCueAssets SOURCES
+    Resources/Fonts/Roboto-Regular.ttf
+    Resources/Fonts/Roboto-Bold.ttf)
 
 if (APPLE)
     target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm)
@@ -94,6 +100,7 @@ endif()
 
 # Nạp tất cả các module xử lý Mixer và driver phần cứng âm thanh
 target_link_libraries(ShowCue PRIVATE
+    ShowCueAssets
     juce::juce_audio_utils
     juce::juce_audio_devices
     juce::juce_audio_formats

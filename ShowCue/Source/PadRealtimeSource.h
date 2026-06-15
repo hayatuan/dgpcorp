@@ -444,6 +444,9 @@ private:
         publishedCueState.store (static_cast<uint8_t> (PadCueState::stopped), std::memory_order_relaxed);
         outputGainProcessor.setRampDurationSeconds (0.0);
         outputGainProcessor.setGainLinear (0.0f);
+        const double trimStart = (double) trimStartSec.load (std::memory_order_relaxed);
+        transport.setPosition (trimStart);
+        publishedPosition.store (trimStart, std::memory_order_relaxed);
         deferTransportStopFromAudioThread();
     }
 
@@ -605,6 +608,9 @@ private:
         publishedCueState.store (static_cast<uint8_t> (PadCueState::stopped), std::memory_order_relaxed);
         outputGainProcessor.setRampDurationSeconds (0.0);
         outputGainProcessor.setGainLinear (0.0f);
+        const double trimStart = (double) trimStartSec.load (std::memory_order_relaxed);
+        transport.setPosition (trimStart);
+        publishedPosition.store (trimStart, std::memory_order_relaxed);
         deferTransportStopFromAudioThread();
     }
 

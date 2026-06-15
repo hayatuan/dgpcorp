@@ -169,6 +169,102 @@ inline juce::String brewInstallFfmpegCommand()
     return "brew install ffmpeg";
 }
 
+inline constexpr const char* showControlWavTag() noexcept { return ".showcontrol"; }
+
+/** ~/Library/Application Support/ShowCue/AudioCache/ — WAV trích từ video, ẩn khỏi thư mục người dùng. */
+inline juce::File getAudioCacheDirectory()
+{
+    auto cacheDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                      .getChildFile ("ShowCue")
+                      .getChildFile ("AudioCache");
+
+    if (! cacheDir.exists())
+        cacheDir.createDirectory();
+
+    return cacheDir;
+}
+
+inline bool isAudioCacheFile (const juce::File& audioFile)
+{
+    if (! audioFile.existsAsFile())
+        return false;
+
+    return audioFile.getParentDirectory().getFullPathName()
+         == getAudioCacheDirectory().getFullPathName();
+}
+
+/** WAV đích ffmpeg trong AudioCache — {tênVideo}_{hash đường dẫn}.wav */
+inline juce::File makeCachedExtractedWavPath (const juce::File& videoFile)
+{
+    const auto cacheDir = getAudioCacheDirectory();
+    const juce::String safeName = videoFile.getFileNameWithoutExtension()
+                                + "_"
+                                + juce::String (juce::String (videoFile.getFullPathName()).hashCode64())
+                                + ".wav";
+    return cacheDir.getChildFile (safeName);
+}
+
+/** @deprecated Dùng makeCachedExtractedWavPath — giữ alias tương thích nội bộ. */
+inline juce::File makeSafeExtractedWavPath (const juce::File& videoFile)
+{
+    return makeCachedExtractedWavPath (videoFile);
+}
+
+/** Tên hiển thị UI từ file video gốc — không có .mp4 / .showcontrol. */
+inline juce::String displayNameFromVideoFile (const juce::File& videoFile)
+{
+    return videoFile.getFileNameWithoutExtension();
+}
+
+/** Tên hiển thị từ đường dẫn audio — gỡ hậu tố cache / sidecar cũ. */
+inline juce::String displayNameFromAudioPath (const juce::File& audioFile)
+{
+    auto base = audioFile.getFileNameWithoutExtension();
+    const juce::String tag (showControlWavTag());
+
+    if (base.endsWithIgnoreCase (tag))
+        return base.dropLastCharacters (tag.length());
+
+    if (isAudioCacheFile (audioFile))
+    {
+        const int lastUnderscore = base.lastIndexOfChar ('_');
+
+        if (lastUnderscore > 0)
+        {
+            const auto suffix = base.substring (lastUnderscore + 1);
+
+            if (suffix.containsOnly ("0123456789-"))
+                return base.substring (0, lastUnderscore);
+        }
+    }
+
+    return base;
+}
+
+/** argv tách rời — macOS execvp tự cô lập khoảng trắng / ngoặc trong đường dẫn. */
+inline juce::StringArray buildFfmpegExtractArguments (const juce::File& ffmpegExe,
+                                                      const juce::File& videoFile,
+                                                      const juce::File& outWav)
+{
+    juce::StringArray command;
+    command.add (ffmpegExe.getFullPathName());
+    command.add ("-y");
+    command.add ("-hide_banner");
+    command.add ("-loglevel");
+    command.add ("error");
+    command.add ("-i");
+    command.add (videoFile.getFullPathName());
+    command.add ("-vn");
+    command.add ("-acodec");
+    command.add ("pcm_s16le");
+    command.add ("-ar");
+    command.add ("44100");
+    command.add ("-ac");
+    command.add ("2");
+    command.add (outWav.getFullPathName());
+    return command;
+}
+
 /** Tạo file WAV tạm; callback trên message thread. */
 inline void extractAudioToWavAsync (const juce::File& videoFile,
                                     std::function<void (bool ok, juce::File wavFile, juce::String error)> onComplete)
@@ -194,9 +290,18 @@ inline void extractAudioToWavAsync (const juce::File& videoFile,
         return;
     }
 
-    const juce::File outWav = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                                .getChildFile ("ShowControl_")
-                                .getChildFile (videoFile.getFileNameWithoutExtension() + "_extracted.wav");
+    const juce::File outWav = makeCachedExtractedWavPath (videoFile);
+
+    if (outWav.existsAsFile() && outWav.getSize() > 44
+        && outWav.getLastModificationTime() >= videoFile.getLastModificationTime())
+    {
+        if (onComplete)
+            juce::MessageManager::callAsync ([onComplete, outWav]
+            {
+                onComplete (true, outWav, {});
+            });
+        return;
+    }
 
     outWav.getParentDirectory().createDirectory();
 
@@ -205,29 +310,23 @@ inline void extractAudioToWavAsync (const juce::File& videoFile,
         juce::String error;
         bool ok = false;
 
-        juce::StringArray command;
-        command.add (ffmpeg.getFullPathName());
-        command.add ("-y");
-        command.add ("-i");
-        command.add (videoFile.getFullPathName());
-        command.add ("-vn");
-        command.add ("-ar");
-        command.add ("44100");
-        command.add ("-ac");
-        command.add ("2");
-        command.add ("-f");
-        command.add ("wav");
-        command.add (outWav.getFullPathName());
+        const auto command = buildFfmpegExtractArguments (ffmpeg, videoFile, outWav);
 
         juce::ChildProcess proc;
-        ok = proc.start (command);
+        ok = proc.start (command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr);
 
         if (ok)
         {
             proc.waitForProcessToFinish (300000);
+            const auto processLog = proc.readAllProcessOutput().trim();
             ok = proc.getExitCode() == 0 && outWav.existsAsFile() && outWav.getSize() > 44;
+
             if (! ok)
-                error = juce::String::fromUTF8 (u8"ffmpeg không tách được audio.");
+            {
+                error = processLog.isNotEmpty()
+                          ? processLog
+                          : juce::String::fromUTF8 (u8"ffmpeg không tách được audio.");
+            }
         }
         else
         {

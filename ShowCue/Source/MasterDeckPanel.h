@@ -11,6 +11,7 @@
 #include "MasterDeckComponent.h"
 #include "ShowControlMacWindow.h"
 #include "ShowFlatIcons.h"
+#include "ShowTagColors.h"
 
 namespace MasterDeckUi
 {
@@ -287,7 +288,7 @@ public:
             const auto iconArea = deckIconBounds.withX (area.getX() + 4.0f);
             showcontrol::icons::paintMonitorIcon (g, iconArea, iconCol);
             g.setColour (iconCol);
-            g.setFont (ShowTheme::font (11.0f));
+            g.setFont (showcontrol::masterDeck::monitorButtonFont());
             g.drawText (button.getButtonText(), area.withTrimmedLeft (deckIconBounds.getWidth() + 6.0f).toNearestInt(),
                         juce::Justification::centredLeft);
             return;
@@ -454,7 +455,7 @@ public:
 
         setOpaque (true);
         updateThemeColors (true);
-        startTimer (40);
+        startTimerHz (60);
     }
 
     ~MasterDeckPanel() override
@@ -481,6 +482,8 @@ public:
     std::function<void()> onBgmNext;
     std::function<float()> getMasterLevelLeft;
     std::function<float()> getMasterLevelRight;
+    /** PAD → CUE → BGM: đồng bộ deck với pad đang phát — độc lập sự kiện Sidebar. */
+    std::function<SoundPad*()> resolveLiveTransportPad;
     std::function<void()> onAudioSettingsRequested;
     std::function<void()> onStageMonitorToggleRequested;
 
@@ -491,14 +494,46 @@ public:
             volValueLabel.setText (juce::String (juce::roundToInt (volume * 100.0f)) + "%", juce::dontSendNotification);
     }
 
-    void setActivePad (SoundPad* pad) {
-        if (activePad != pad) { activePad = pad; refreshTransportLabels(); repaint(); }
-        if (activePad == nullptr) {
+    void setActivePad (SoundPad* pad)
+    {
+        const bool padChanged = (activePad != pad);
+        activePad = pad;
+        setTrackAccentFromPad (pad);
+
+        if (padChanged)
+        {
+            refreshTransportLabels();
+            repaint();
+        }
+
+        if (activePad == nullptr)
+        {
             remainingTimeLabel.setText ("00:00.0", juce::dontSendNotification);
             totalTimeLabel.setText ("00:00.0", juce::dontSendNotification);
             trackMetaLabel.setText ({}, juce::dontSendNotification);
             positionSlider.setValue (0.0, juce::dontSendNotification);
         }
+    }
+
+    void setTrackAccentFromPad (SoundPad* pad) noexcept
+    {
+        const auto pal = ShowTheme::get (isDarkMode);
+        juce::Colour accent = pal.accent;
+
+        if (pad != nullptr && ! showcontrol::colours::isDefaultTagColour (pad->getTagColour()))
+            accent = pad->getTagColour();
+
+        setTrackAccentColour (accent);
+    }
+
+    void setTrackAccentColour (juce::Colour accent) noexcept
+    {
+        if (trackAccent == accent)
+            return;
+
+        trackAccent = accent;
+        applyTrackAccentToUi();
+        repaintTransportCluster();
     }
 
     void setTrackMetadata (const AudioMetadata& meta)
@@ -579,6 +614,7 @@ public:
         masterVolSlider.setColour (juce::Slider::trackColourId, findColour (MasterDeckComponent::meterTrackColourId));
         masterVolSlider.setColour (juce::Slider::backgroundColourId, findColour (MasterDeckComponent::panelBgColourId));
         masterVolSlider.setColour (juce::Slider::thumbColourId, findColour (MasterDeckComponent::thumbColourId));
+        applyTrackAccentToUi();
         repaintTransportCluster();
     }
 
@@ -612,17 +648,29 @@ public:
     /** Kept for backward-compat. */
     void setCueTransportControlsVisible (bool showCueControls) { setListMode (!showCueControls); }
 
-    void timerCallback() override {
+    void timerCallback() override
+    {
         systemTimeLabel.setText (juce::Time::getCurrentTime().formatted ("%H:%M:%S"), juce::dontSendNotification);
+
+        if (resolveLiveTransportPad != nullptr)
+        {
+            if (auto* livePad = resolveLiveTransportPad())
+            {
+                if (livePad != activePad)
+                    setActivePad (livePad);
+            }
+        }
+
+        const bool transportActive = activePad != nullptr
+                                         && activePad->hasAudioFile()
+                                         && activePad->isTransportActive();
 
         if (activePad != nullptr && activePad->hasAudioFile())
         {
             refreshTransportLabels();
 
-            if (activePad->isTransportActive())
+            if (transportActive)
             {
-                double tStart = 0.0, tEnd = 0.0;
-                activePad->getTrimmedDisplayRange (tStart, tEnd);
                 const double remaining = activePad->getRemainingSeconds();
 
                 if (remaining <= 5.0)
@@ -639,9 +687,20 @@ public:
 
                 totalTimeLabel.setColour (juce::Label::textColourId, findColour (MasterDeckComponent::timeSecondaryColourId));
             }
-
-            repaint();
         }
+
+        if (transportActive && ! isDraggingPlayhead)
+        {
+            repaint (getWaveformComponentBounds());
+            repaint (getLeftColumnBounds());
+        }
+        else if (wasTransportAnimatingLastTick && ! transportActive)
+        {
+            repaint (getWaveformComponentBounds());
+            repaint (getLeftColumnBounds());
+        }
+
+        wasTransportAnimatingLastTick = transportActive;
 
         if (getMasterLevelLeft && getMasterLevelRight)
         {
@@ -693,7 +752,6 @@ public:
         if (b.getWidth() <= 0.0f || b.getHeight() <= 0.0f)
             return;
 
-        const auto pal = ShowTheme::get (resolveActiveDarkMode());
         g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
         g.setColour (getLookAndFeel().findColour (juce::ListBox::outlineColourId));
         g.drawRoundedRectangle (b.reduced (0.5f), 6.0f, 1.0f);
@@ -720,6 +778,16 @@ public:
         g.setColour (findColour (MasterDeckComponent::waveInnerColourId));
         g.fillRoundedRectangle (waveInner, 5.0f);
 
+        paintWaveformLive (g, waveBounds);
+
+        paintVolumeFaderTicks (g);
+    }
+
+    void paintWaveformLive (juce::Graphics& g, juce::Rectangle<int> waveBounds)
+    {
+        const auto pal = ShowTheme::get (resolveActiveDarkMode());
+        const auto leftCol = getLeftColumnBounds();
+
         if (activePad != nullptr && activePad->hasAudioFile())
         {
             auto& thumb = activePad->getThumbnail();
@@ -728,7 +796,12 @@ public:
             activePad->getTrimmedDisplayRange (tStart, tEnd);
             const double effectiveLen = juce::jmax (0.0, tEnd - tStart);
 
-            g.setColour (pal.waveformFill.withAlpha (0.85f));
+            juce::Colour waveInk = pal.waveformFill.withAlpha (0.85f);
+
+            if (! showcontrol::colours::isDefaultTagColour (activePad->getTagColour()))
+                waveInk = activePad->getTagColour().withAlpha (0.85f);
+
+            g.setColour (waveInk);
             thumb.drawChannel (g, waveBounds.reduced (2), tStart, tEnd, 0, 1.0f);
 
             const double relativePos = juce::jlimit (tStart, tEnd, currentPos) - tStart;
@@ -751,11 +824,24 @@ public:
                 }
             }
 
-            const int playheadX = showcontrol::gfx::ratioToPixelX (waveBounds, progress);
-            g.setColour (findColour (MasterDeckComponent::playheadColourId));
-            showcontrol::gfx::safeDrawVerticalLine (g, playheadX,
-                                                    (float) waveBounds.getY() + 2.0f,
-                                                    (float) waveBounds.getBottom() - 2.0f);
+            if (effectiveLen > 0.0)
+            {
+                const auto waveArea = waveBounds.reduced (2).toFloat();
+                const float playheadX = waveArea.getX() + waveArea.getWidth() * progress;
+
+                if (progress > 0.0f)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.06f));
+                    g.fillRect (waveArea.withWidth (playheadX - waveArea.getX()));
+                }
+
+                g.setColour (findColour (MasterDeckComponent::playheadColourId));
+                showcontrol::gfx::safeDrawVerticalLine (g, (int) std::round (playheadX),
+                                                        waveArea.getY(),
+                                                        waveArea.getBottom());
+
+                g.fillEllipse (playheadX - 3.0f, waveArea.getY() - 3.0f, 6.0f, 6.0f);
+            }
 
             if (activePad->isLooping())
             {
@@ -773,15 +859,6 @@ public:
             g.drawText (juce::String::fromUTF8 (u8"SYSTEM STANDBY"),
                         waveBounds, juce::Justification::centred);
         }
-
-        auto ledArea = waveBounds.removeFromBottom (2).toFloat();
-        const auto ledCol = findColour (MasterDeckComponent::ledLiveColourId);
-        g.setColour (ledCol.withAlpha (0.22f));
-        g.fillRect (ledArea.expanded (0.0f, 1.5f));
-        g.setColour (ledCol.withAlpha (0.88f));
-        g.fillRect (ledArea);
-
-        paintVolumeFaderTicks (g);
     }
 
     void resized() override
@@ -811,7 +888,7 @@ public:
         constexpr int kAdminRowH     = 35;
         constexpr int kAdminGap      = 6;
         constexpr int kAudioBtnW     = 34;
-        constexpr int kMonitorBtnW   = 85;
+        constexpr int kMonitorBtnW   = 92;
         constexpr int kClockW        = 120;
         constexpr int kVolValueH     = 14;
         constexpr int kVolLabelH     = 12;
@@ -903,6 +980,22 @@ public:
             const float yPos = sliderTop + sliderHeight * ((float) i / 10.0f);
             g.drawHorizontalLine (yPos, sliderLeft - 6.0f, sliderLeft - 2.0f);
             g.drawHorizontalLine (yPos, sliderRight + 2.0f, sliderRight + 6.0f);
+        }
+    }
+
+    void applyTrackAccentToUi()
+    {
+        setColour (MasterDeckComponent::thumbColourId, trackAccent);
+        setColour (MasterDeckComponent::playheadColourId, trackAccent);
+        setColour (MasterDeckComponent::waveformPlayedColourId, trackAccent);
+        setColour (MasterDeckComponent::accentTextColourId, trackAccent);
+
+        masterVolSlider.setColour (juce::Slider::thumbColourId, trackAccent);
+
+        if (deckVolumeLook != nullptr)
+        {
+            deckVolumeLook->setColour (MasterDeckComponent::thumbColourId, trackAccent);
+            deckVolumeLook->setColour (MasterDeckComponent::playheadColourId, trackAccent);
         }
     }
 
@@ -1020,6 +1113,8 @@ private:
 
         return { col.getX() + innerPad, y, waveW, waveH };
     }
+
+    juce::Rectangle<int> getWaveformComponentBounds() const { return getWaveBounds(); }
     
     void updatePlayheadPosition (int mouseX, const juce::Rectangle<int>& waveBounds)
     {
@@ -1035,7 +1130,9 @@ private:
     }
 
     bool isDarkMode, isDraggingPlayhead, isPaused, isBgmMode = false;
+    bool wasTransportAnimatingLastTick = false;
     SoundPad* activePad;
+    juce::Colour trackAccent { showcontrol::colours::tagColourAt (7) };
     juce::Label remainingTimeLabel, totalTimeLabel, trackMetaLabel, volLabel, volValueLabel, systemTimeLabel;
     juce::Slider masterVolSlider, positionSlider;
     juce::TextButton pauseAllBtn, stopAllBtn, fadeAllBtn;

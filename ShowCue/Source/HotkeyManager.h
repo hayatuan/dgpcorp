@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <juce_core/juce_core.h>
+#include "ShowKeyboardInput.h"
 #include "SoundPad.h"
 
 //==============================================================================
@@ -56,7 +57,7 @@ public:
     const HotkeyBinding* findByKeyPress (const juce::KeyPress& key) const
     {
         for (auto& b : bindings)
-            if (b.keyPress == key)
+            if (showcontrol::keyboard::keyPressMatchesRaw (b.keyPress, key))
                 return &b;
         return nullptr;
     }
@@ -68,7 +69,7 @@ public:
 
         for (auto& b : bindings)
         {
-            if (b.keyPress != key)
+            if (! showcontrol::keyboard::keyPressMatchesRaw (b.keyPress, key))
                 continue;
 
             if (b.padListIndex == preferredListIndex)
@@ -85,7 +86,7 @@ public:
     const HotkeyBinding* findByKeyPressInList (const juce::KeyPress& key, int listIndex) const
     {
         for (auto& b : bindings)
-            if (b.padListIndex == listIndex && b.keyPress == key)
+            if (b.padListIndex == listIndex && showcontrol::keyboard::keyPressMatchesRaw (b.keyPress, key))
                 return &b;
         return nullptr;
     }
@@ -143,7 +144,8 @@ public:
     {
         for (auto& b : bindings)
         {
-            if (b.padListIndex == listIndex && b.padIndex == padIndex && b.keyPress == key)
+            if (b.padListIndex == listIndex && b.padIndex == padIndex
+                && showcontrol::keyboard::keyPressMatchesRaw (b.keyPress, key))
                 return true;
         }
         return false;
@@ -174,7 +176,7 @@ public:
     {
         for (auto& b : bindings)
         {
-            if (b.keyPress != key)
+            if (! showcontrol::keyboard::keyPressMatchesRaw (b.keyPress, key))
                 continue;
 
             if (b.padListIndex == exceptListIndex && b.padIndex == exceptPadIndex)

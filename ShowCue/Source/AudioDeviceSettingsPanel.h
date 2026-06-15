@@ -12,6 +12,55 @@
 #include "ShowGraphicsSafe.h"
 
 //==============================================================================
+/** LAF phạm vi Cài đặt Audio — Roboto 14.5–15pt cho ComboBox, Label, nút bấm. */
+class AudioSettingsPanelLookAndFeel : public ShowControlLookAndFeel
+{
+public:
+    juce::Font getComboBoxFont (juce::ComboBox&) override
+    {
+        return showcontrol::audioSettings::comboFont();
+    }
+
+    juce::Font getLabelFont (juce::Label&) override
+    {
+        return showcontrol::audioSettings::labelFont();
+    }
+
+    void drawButtonText (juce::Graphics& g, juce::TextButton& button,
+                         bool shouldDrawButtonAsHighlighted,
+                         bool shouldDrawButtonAsDown) override
+    {
+        juce::ignoreUnused (shouldDrawButtonAsHighlighted, shouldDrawButtonAsDown);
+        auto col = button.findColour (juce::TextButton::textColourOffId);
+
+        if (! button.isEnabled())
+            col = col.withAlpha (0.45f);
+
+        g.setColour (col);
+        g.setFont (showcontrol::audioSettings::buttonFont());
+        g.drawText (button.getButtonText(), button.getLocalBounds(), juce::Justification::centred);
+    }
+
+    void drawGroupComponentOutline (juce::Graphics& g, int width, int height,
+                                    const juce::String& text,
+                                    const juce::Justification& justification,
+                                    juce::GroupComponent& group) override
+    {
+        const float halfH = 0.5f * (float) height;
+        g.setColour (group.findColour (juce::GroupComponent::outlineColourId));
+        g.drawRoundedRectangle (1.0f, halfH, (float) width - 2.0f, halfH, 4.0f, 1.0f);
+
+        if (text.isNotEmpty())
+        {
+            g.setColour (group.findColour (juce::GroupComponent::textColourId));
+            g.setFont (showcontrol::audioSettings::labelFont());
+            g.drawText (text, 12, 0, width - 24, (int) halfH,
+                        justification.getOnlyVerticalFlags() | juce::Justification::left, true);
+        }
+    }
+};
+
+//==============================================================================
 /** TextEditor Bus — Enter lưu & đóng, Escape hủy đóng. */
 class BusNameTextEditor : public juce::TextEditor
 {
@@ -90,7 +139,7 @@ public:
         for (int i = 0; i < kNumBuses; ++i)
         {
             indexLabels[i].setText ("Bus " + juce::String (i) + ":", juce::dontSendNotification);
-            indexLabels[i].setFont (ShowTheme::timerFont (11.5f, true));
+            indexLabels[i].setFont (showcontrol::audioSettings::labelFont());
             indexLabels[i].setJustificationType (juce::Justification::centredRight);
             addAndMakeVisible (indexLabels[i]);
 
@@ -102,7 +151,7 @@ public:
             else
                 nameEdits[i].setText ({}, juce::dontSendNotification);
 
-            nameEdits[i].setFont (ShowTheme::font (12.5f));
+            nameEdits[i].setFont (showcontrol::audioSettings::editorFont());
             nameEdits[i].setJustification (juce::Justification::centredLeft);
             nameEdits[i].setIndents (8, 5);
             nameEdits[i].setBorder (juce::BorderSize<int> (1));
@@ -339,7 +388,7 @@ public:
 
         titleLabel.setText (showcontrol::localization::tr (u8"ĐẶT TÊN OUTPUT BUS (OUTPUT ROUTING)"),
                             juce::dontSendNotification);
-        titleLabel.setFont (ShowTheme::fontBold (11.5f));
+        titleLabel.setFont (showcontrol::audioSettings::buttonFont());
         titleLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (titleLabel);
 
@@ -349,6 +398,11 @@ public:
         addAndMakeVisible (closeButton);
 
         addAndMakeVisible (busList);
+    }
+
+    ~OutputBusNamingCard() override
+    {
+        setLookAndFeel (nullptr);
     }
 
     void setDarkMode (bool dark) noexcept
@@ -526,6 +580,7 @@ private:
         : cfg (std::move (configIn))
     {
         addAndMakeVisible (card);
+        card.setLookAndFeel (&themeSource.getLookAndFeel());
         card.setDarkMode (cfg.darkMode);
         card.busList.setPreferencesChrome (true);
         card.busList.initialiseRows (cfg.busNames);
@@ -596,6 +651,9 @@ public:
         busList.setPreferencesChrome (embeddedInPreferences);
         busList.initialiseRows (busNames);
 
+        setLookAndFeel (&panelLaf);
+        panelLaf.setDarkMode (isDark);
+
         okBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
         addAndMakeVisible (okBtn);
         okBtn.onClick = [this] { closeAndApply(); };
@@ -606,12 +664,18 @@ public:
         setSize (540, embeddedInPreferences ? 460 : 500);
     }
 
+    ~AudioDeviceSettingsPanel() override
+    {
+        setLookAndFeel (nullptr);
+    }
+
     void setDarkMode (bool dark) noexcept
     {
         if (isDark == dark)
             return;
 
         isDark = dark;
+        panelLaf.setDarkMode (isDark);
         applyTheme();
         repaint();
     }
@@ -731,6 +795,7 @@ private:
     bool isDark = true;
     bool embeddedInPreferences = false;
     bool hasAppliedOnClose = false;
+    AudioSettingsPanelLookAndFeel panelLaf;
 
     juce::GroupComponent audioGroup;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> deviceSelector;
@@ -775,6 +840,8 @@ private:
     {
         if (auto* showLaf = dynamic_cast<ShowControlLookAndFeel*> (&getLookAndFeel()))
             isDark = showLaf->isDarkMode();
+
+        panelLaf.setDarkMode (isDark);
 
         const auto pal = ShowTheme::get (isDark);
         const auto& laf = getLookAndFeel();
