@@ -7,7 +7,8 @@
 | Thành phần | macOS | Windows |
 |------------|-------|---------|
 | CMake | ≥ 3.22 | ≥ 3.22 |
-| Compiler | Xcode CLT hoặc Xcode | Visual Studio 2022 (Desktop C++) |
+| Compiler | Xcode CLT hoặc Xcode | Visual Studio 2022 hoặc **2026** (Desktop C++) |
+| CMake (VS 2026) | — | ≥ **4.2** (generator `Visual Studio 18 2026`) |
 | Git | clone repo đầy đủ (kèm `ShowCue/JUCE`) | giống macOS |
 
 ## Clone
@@ -39,7 +40,24 @@ Universal Binary (Intel + Apple Silicon) được bật tự động qua root `C
 
 ## Build Windows (Visual Studio)
 
-Mở **x64 Native Tools Command Prompt for VS 2022** hoặc PowerShell:
+Thư mục dự án ví dụ: `D:\app\dgpcorp` (root repo — cùng cấu trúc với macOS).
+
+Mở **x64 Native Tools Command Prompt** (VS 2026 hoặc VS 2022) hoặc PowerShell, `cd` vào root repo:
+
+```bat
+cd /d D:\app\dgpcorp
+```
+
+### Visual Studio 2026 (khuyến nghị nếu máy chỉ có VS 18)
+
+Cần **CMake ≥ 4.2**. Kiểm tra: `cmake --version`
+
+```bat
+cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64
+cmake --build build-win --config Release --target ShowCue -j
+```
+
+### Visual Studio 2022
 
 ```bat
 cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64
@@ -53,6 +71,23 @@ Debug:
 ```bat
 cmake --build build-win --config Debug --target ShowCue -j
 ```
+
+### Cursor trên Windows
+
+1. Mở folder `D:\app\dgpcorp` trong Cursor, đồng bộ git với máy Mac.
+2. Cài workload **Desktop development with C++** trong VS 2026.
+3. Nếu CMake Tools không nhận VS 2026, thêm `.vscode/settings.json`:
+
+```json
+{
+  "cmake.generator": "Visual Studio 18 2026",
+  "cmake.configureSettings": {
+    "CMAKE_GENERATOR_PLATFORM": "x64"
+  }
+}
+```
+
+4. Configure một lần bằng lệnh ở trên, rồi build **Release** (multi-config — không dùng `-DCMAKE_BUILD_TYPE=Release` khi configure).
 
 ### ffmpeg trên Windows
 
