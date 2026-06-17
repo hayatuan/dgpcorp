@@ -125,7 +125,7 @@ public:
         addAndMakeVisible (previewTitleLabel);
         previewTitleLabel.setText (showcontrol::localization::tr (u8"Preview toàn list (trước / sau)"),
                                    juce::dontSendNotification);
-        previewTitleLabel.setFont (juce::FontOptions (14.0f).withStyle ("Bold"));
+        previewTitleLabel.setFont (ShowTheme::fontBold (14.0f));
 
         addAndMakeVisible (previewHeader);
         previewHeader.paintContent = [this] (juce::Graphics& g, juce::Rectangle<int> area)
@@ -136,7 +136,7 @@ public:
             g.setColour (pal.border.withAlpha (0.8f));
             g.drawRoundedRectangle (area.toFloat().reduced (0.5f), 4.0f, 1.0f);
 
-            g.setFont (juce::FontOptions (12.0f).withStyle ("Bold"));
+            g.setFont (ShowTheme::fontBold (12.0f));
             g.setColour (pal.textSecondary);
 
             const auto cols = getPreviewColumns (area.getWidth());
@@ -291,7 +291,7 @@ public:
             g.fillAll (pal.panelElevated.withAlpha (0.35f));
 
         g.setColour (row.analyzing ? pal.textMuted : pal.textPrimary);
-        g.setFont (juce::FontOptions (12.0f));
+        g.setFont (ShowTheme::font (12.0f));
 
         const auto cols = getPreviewColumns (width);
 
