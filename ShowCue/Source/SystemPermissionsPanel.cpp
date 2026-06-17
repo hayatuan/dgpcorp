@@ -7,7 +7,6 @@
  #endif
  #include <shlobj.h>
 #endif
-
 namespace showcontrol::permissions
 {
 namespace
@@ -55,12 +54,23 @@ public:
 
 juce::String resolveMacBundleIdentifier()
 {
-    const auto plist = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                           .getParentDirectory().getParentDirectory()
-                           .getChildFile ("Info.plist");
+   #if JUCE_MAC
+    const auto appFile = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
 
-    if (auto xml = juce::parseXML (plist))
-        return xml->getStringAttribute ("CFBundleIdentifier", "com.dgpco.showcue");
+    if (appFile.exists())
+    {
+        juce::ChildProcess proc;
+        const juce::String appPath = appFile.getFullPathName().quoted();
+
+        if (proc.start (juce::StringArray { "/bin/sh", "-c",
+                                            "/usr/bin/defaults read " + appPath + "/Contents/Info CFBundleIdentifier 2>/dev/null" }))
+        {
+            const auto id = proc.readAllProcessOutput().trim();
+            if (id.isNotEmpty())
+                return id;
+        }
+    }
+   #endif
 
     return "com.dgpco.showcue";
 }
@@ -246,9 +256,9 @@ SystemPermissionsPanel::SystemPermissionsPanel()
                  juce::String::fromUTF8 (
                      u8"Truy cập soundcard / mixer sân khấu để phát CUE & BGM không độ trễ trên FOH.")),
       networkCard (PermissionCardComponent::IconKind::globe,
-                   "Local Network Access",
+                   "Network Connectivity",
                    juce::String::fromUTF8 (
-                       u8"Kết nối Internet & mạng nội bộ để kiểm tra cập nhật từ GitHub và đồng bộ show."))
+                       u8"Trạng thái kết nối Internet/mạng nội bộ để kiểm tra cập nhật từ GitHub và đồng bộ show."))
    #if JUCE_WINDOWS
       , dragDropCard (PermissionCardComponent::IconKind::shield,
                       "Drag & Drop File Access",
@@ -314,7 +324,23 @@ bool SystemPermissionsPanel::checkNetworkPermission()
 {
     juce::Array<juce::IPAddress> activeAddresses;
     juce::IPAddress::findAllAddresses (activeAddresses);
-    return activeAddresses.size() > 1;
+
+    for (const auto& ip : activeAddresses)
+    {
+        if (ip.isNull())
+            continue;
+
+        const auto text = ip.toString();
+        if (text.startsWith ("127.")
+            || text == "::1"
+            || text == "0.0.0.0"
+            || text == "::")
+            continue;
+
+        return true;
+    }
+
+    return false;
 }
 
 bool SystemPermissionsPanel::checkWindowsAdminConflict()

@@ -9,6 +9,8 @@
 #include "ShowFlatIcons.h"
 #include "ShowLocalization.h"
 #include "SystemPermissionsPanel.h"
+#include "BackupSyncPreferencesPanel.h"
+#include "ShowBackupLanDiscovery.h"
 
 namespace showcontrol::preferences
 {
@@ -101,7 +103,7 @@ namespace showcontrol::preferences
         g.fillRoundedRectangle (bounds.reduced (3.0f, 2.0f), 3.0f);
     }
 
-    enum class TabIcon { audio, appearance, permissions };
+    enum class TabIcon { audio, appearance, permissions, network };
 
     inline void drawTabIcon (juce::Graphics& g, juce::Rectangle<float> area, TabIcon icon, juce::Colour colour) noexcept
     {
@@ -111,6 +113,8 @@ namespace showcontrol::preferences
             showcontrol::icons::paintHeadphonesIcon (g, iconBounds, colour);
         else if (icon == TabIcon::appearance)
             showcontrol::icons::paintLayoutIcon (g, iconBounds, colour);
+        else if (icon == TabIcon::network)
+            showcontrol::icons::paintGlobeIcon (g, iconBounds, colour);
         else
             showcontrol::icons::paintShieldCheckIcon (g, iconBounds, colour);
     }
@@ -592,6 +596,11 @@ public:
         std::function<void (int themeId)> onThemeChanged;
         std::function<void (int languageIndex)> onLanguageChanged;
         std::function<void()> onCheckForUpdatesRequested;
+        std::function<void()> onBackupSettingsChanged;
+        std::function<void (bool)> onBackupTakeoverChanged;
+        std::function<bool()> getBackupTakeoverActive;
+        std::function<void (int wantRole,
+                            std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
@@ -605,6 +614,28 @@ public:
         audioPanel = std::make_unique<AudioDeviceSettingsPanel> (deviceManager, darkMode, busNames, true);
         themePanel = std::make_unique<ThemePreferencesPanel> (themeId, languageIndex);
         permissionsPanel = std::make_unique<showcontrol::permissions::SystemPermissionsPanel>();
+        backupPanel      = std::make_unique<BackupSyncPreferencesPanel>();
+
+        if (cb.getBackupTakeoverActive != nullptr)
+            backupPanel->setTakeoverActive (cb.getBackupTakeoverActive());
+
+        backupPanel->onSettingsChanged = [this]
+        {
+            backupPanel->saveToPreferences();
+
+            if (cb.onBackupSettingsChanged != nullptr)
+                cb.onBackupSettingsChanged();
+
+            if (cb.onBackupTakeoverChanged != nullptr)
+                cb.onBackupTakeoverChanged (backupPanel->isTakeoverActive());
+        };
+
+        backupPanel->onScanLanPeers = [this] (int wantRole,
+                                              std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)
+        {
+            if (cb.onScanLanPeers != nullptr)
+                cb.onScanLanPeers (wantRole, std::move (onDone));
+        };
 
         if (cb.onBusNameLiveChanged != nullptr)
             audioPanel->setOnBusNameLiveChanged (cb.onBusNameLiveChanged);
@@ -641,6 +672,7 @@ public:
         addAndMakeVisible (audioPanel.get());
         addAndMakeVisible (themePanel.get());
         addAndMakeVisible (permissionsPanel.get());
+        addAndMakeVisible (backupPanel.get());
 
         audioTabBtn = std::make_unique<PreferencesTabButton> (
             showcontrol::preferences::TabIcon::audio,
@@ -654,17 +686,23 @@ public:
             showcontrol::preferences::TabIcon::permissions,
             u8"Quyền");
 
+        networkTabBtn = std::make_unique<PreferencesTabButton> (
+            showcontrol::preferences::TabIcon::network,
+            u8"Mạng");
+
         addAndMakeVisible (*audioTabBtn);
         addAndMakeVisible (*appearanceTabBtn);
         addAndMakeVisible (*permissionsTabBtn);
+        addAndMakeVisible (*networkTabBtn);
 
         audioTabBtn->onSelected = [this] { selectTab (0); };
         appearanceTabBtn->onSelected = [this] { selectTab (1); };
         permissionsTabBtn->onSelected = [this] { selectTab (2); };
+        networkTabBtn->onSelected = [this] { selectTab (3); };
 
         selectTab (0);
         setWantsKeyboardFocus (true);
-        setSize (680, 560);
+        setSize (680, 620);
     }
 
     ~GlobalPreferencesDialog() override
@@ -688,7 +726,7 @@ public:
 
     void setInitialTabIndex (int tabIndex) noexcept
     {
-        selectTab (juce::jlimit (0, 2, tabIndex));
+        selectTab (juce::jlimit (0, 3, tabIndex));
     }
 
     void lookAndFeelChanged() override
@@ -706,6 +744,9 @@ public:
         if (permissionsPanel != nullptr)
             permissionsPanel->refreshLocalizedText();
 
+        if (backupPanel != nullptr)
+            backupPanel->refreshLocalizedText();
+
         if (audioPanel != nullptr)
             audioPanel->refreshLocalizedText();
 
@@ -717,6 +758,9 @@ public:
 
         if (permissionsTabBtn != nullptr)
             permissionsTabBtn->repaint();
+
+        if (networkTabBtn != nullptr)
+            networkTabBtn->repaint();
     }
 
     void paint (juce::Graphics& g) override
@@ -779,18 +823,20 @@ public:
 
         auto tabBar = bounds.removeFromTop (kTabBarHeight).reduced (10, 8);
 
-        const int tabW = juce::jmax (88, tabBar.getWidth() / 3);
-        const int total = tabW * 3;
+        const int tabW = juce::jmax (72, tabBar.getWidth() / 4);
+        const int total = tabW * 4;
         tabBar = tabBar.withSizeKeepingCentre (total, tabBar.getHeight());
 
         audioTabBtn->setBounds (tabBar.removeFromLeft (tabW));
         appearanceTabBtn->setBounds (tabBar.removeFromLeft (tabW));
         permissionsTabBtn->setBounds (tabBar.removeFromLeft (tabW));
+        networkTabBtn->setBounds (tabBar.removeFromLeft (tabW));
 
         bounds.removeFromTop (1);
         audioPanel->setBounds (bounds);
         themePanel->setBounds (bounds);
         permissionsPanel->setBounds (bounds);
+        backupPanel->setBounds (bounds);
     }
 
     void parentHierarchyChanged() override
@@ -816,12 +862,14 @@ private:
     {
         if (auto* hit = e.eventComponent)
         {
-            if (hit == audioTabBtn.get() || hit == appearanceTabBtn.get() || hit == permissionsTabBtn.get())
+            if (hit == audioTabBtn.get() || hit == appearanceTabBtn.get()
+                || hit == permissionsTabBtn.get() || hit == networkTabBtn.get())
                 return true;
 
             for (auto* p = hit->getParentComponent(); p != nullptr; p = p->getParentComponent())
             {
-                if (p == audioTabBtn.get() || p == appearanceTabBtn.get() || p == permissionsTabBtn.get())
+                if (p == audioTabBtn.get() || p == appearanceTabBtn.get()
+                    || p == permissionsTabBtn.get() || p == networkTabBtn.get())
                     return true;
             }
         }
@@ -830,10 +878,11 @@ private:
     }
 
     Callbacks cb;
-    std::unique_ptr<PreferencesTabButton> audioTabBtn, appearanceTabBtn, permissionsTabBtn;
+    std::unique_ptr<PreferencesTabButton> audioTabBtn, appearanceTabBtn, permissionsTabBtn, networkTabBtn;
     std::unique_ptr<AudioDeviceSettingsPanel> audioPanel;
     std::unique_ptr<ThemePreferencesPanel> themePanel;
     std::unique_ptr<showcontrol::permissions::SystemPermissionsPanel> permissionsPanel;
+    std::unique_ptr<BackupSyncPreferencesPanel> backupPanel;
     int activeTab = 0;
 
     void syncDialogWindowBackground()
@@ -872,11 +921,16 @@ private:
         audioTabBtn->setTabActive (index == 0);
         appearanceTabBtn->setTabActive (index == 1);
         permissionsTabBtn->setTabActive (index == 2);
+        networkTabBtn->setTabActive (index == 3);
         audioPanel->setVisible (index == 0);
         themePanel->setVisible (index == 1);
         permissionsPanel->setVisible (index == 2);
+        backupPanel->setVisible (index == 3);
 
         if (index == 2 && permissionsPanel != nullptr)
             permissionsPanel->resized();
+
+        if (index == 3 && backupPanel != nullptr)
+            backupPanel->refreshLocalizedText();
     }
 };

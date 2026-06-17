@@ -17,7 +17,7 @@ public:
         for (int i = 0; i < kNumBuses; ++i)
         {
             addAndMakeVisible (nameLabels[i]);
-            nameLabels[i].setFont (ShowTheme::fontBold (9.0f));
+            nameLabels[i].setFont (showcontrol::busMixer::busNameFont());
             nameLabels[i].setJustificationType (juce::Justification::centred);
 
             addAndMakeVisible (gainSliders[i]);
@@ -86,7 +86,7 @@ public:
         const auto pal = ShowTheme::get (isDarkMode);
         g.fillAll (pal.panelBg);
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::fontBold (10.0f));
+        g.setFont (showcontrol::busMixer::headerFont());
         g.drawText (showcontrol::localization::tr (u8"Tín hiệu đầu ra"),
                     0, 2, getWidth(), 14, juce::Justification::centred);
         g.setColour (pal.borderSubtle);

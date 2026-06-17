@@ -35,12 +35,17 @@ inline juce::String ffmpegMissingExplanation()
 inline void promptMissingFfmpeg (juce::Component* parent,
                                  std::function<void (FfmpegPromptChoice)> onChoice)
 {
-    const bool hasBrew = VideoAudioExtractor::isHomebrewAvailable();
-
     juce::AlertWindow w (juce::String::fromUTF8 (u8"Tách audio video"),
                          ffmpegMissingExplanation(),
                          juce::MessageBoxIconType::WarningIcon,
                          parent);
+
+   #if JUCE_WINDOWS
+    w.addButton (juce::String::fromUTF8 (u8"Sao chép lệnh winget"), 5,
+                 juce::KeyPress (juce::KeyPress::returnKey));
+    w.addButton (juce::String::fromUTF8 (u8"Mở trang tải ffmpeg"), 4);
+   #else
+    const bool hasBrew = VideoAudioExtractor::isHomebrewAvailable();
 
     if (hasBrew)
         w.addButton (juce::String::fromUTF8 (u8"Cài tự động (Homebrew)"), 1,
@@ -51,9 +56,6 @@ inline void promptMissingFfmpeg (juce::Component* parent,
 
     if (! hasBrew)
         w.addButton (juce::String::fromUTF8 (u8"Mở trang tải ffmpeg"), 4);
-
-   #if JUCE_WINDOWS
-    w.addButton (juce::String::fromUTF8 (u8"Sao chép lệnh winget"), 5);
    #endif
 
     w.addButton (juce::String::fromUTF8 (u8"Để sau"), 0, juce::KeyPress (juce::KeyPress::escapeKey));

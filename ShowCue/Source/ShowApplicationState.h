@@ -6,6 +6,36 @@
 /** Hard flush JSON — ~/Library/Application Support/ShowCue/config.json (macOS). */
 namespace showcontrol::state
 {
+    inline bool writeTextFileAtomically (const juce::File& destination, const juce::String& text)
+    {
+        const auto tmpFile = destination.getSiblingFile (destination.getFileName() + ".tmp");
+        tmpFile.deleteFile();
+
+        if (auto stream = std::unique_ptr<juce::FileOutputStream> (tmpFile.createOutputStream()))
+        {
+            stream->writeText (text, false, false, nullptr);
+            stream->flush();
+
+            if (! stream->getStatus().wasOk())
+            {
+                tmpFile.deleteFile();
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        if (tmpFile.replaceFileIn (destination))
+            return true;
+
+        if (destination.existsAsFile())
+            destination.deleteFile();
+
+        return tmpFile.moveFileTo (destination);
+    }
+
     /** Canonical path: userApplicationDataDirectory đã là ~/Library/Application Support trên macOS. */
     inline juce::File getCanonicalConfigFile() noexcept
     {
@@ -104,30 +134,18 @@ namespace showcontrol::state
         if (! ensureConfigParentDirectory (configFile))
             return false;
 
-        if (configFile.existsAsFile())
-            configFile.deleteFile();
+        const juce::String jsonText = juce::JSON::toString (root, true);
 
-        if (auto stream = std::unique_ptr<juce::FileOutputStream> (configFile.createOutputStream()))
+        if (! writeTextFileAtomically (configFile, jsonText))
         {
-            const juce::String jsonText = juce::JSON::toString (root, true);
-            stream->writeText (jsonText, false, false, nullptr);
-            stream->flush();
-
-            if (stream->getStatus().wasOk())
-            {
-                std::cout << "[CONFIG] [SUCCESS] Saved to: "
-                          << configFile.getFullPathName().toStdString() << std::endl;
-                return true;
-            }
-
-            std::cout << "[CONFIG] [ERROR] Stream write failed at: "
+            std::cout << "[CONFIG] [ERROR] Atomic write failed at: "
                       << configFile.getFullPathName().toStdString() << std::endl;
             return false;
         }
 
-        std::cout << "[CONFIG] [ERROR] Cannot write file! Check permissions at: "
+        std::cout << "[CONFIG] [SUCCESS] Saved to: "
                   << configFile.getFullPathName().toStdString() << std::endl;
-        return false;
+        return true;
     }
 
     inline juce::var readJsonConfig()

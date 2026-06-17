@@ -61,7 +61,7 @@ void ShowControlLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton
                                                           shouldDrawButtonAsHighlighted,
                                                           shouldDrawButtonAsDown);
     g.setColour (cols.text.withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.5f));
-    g.setFont (ShowTheme::fontBold (11.0f));
+    g.setFont (showcontrol::ui::globalButtonFont());
     g.drawText (button.getButtonText(), button.getLocalBounds(), juce::Justification::centred);
 }
 
@@ -119,7 +119,8 @@ juce::Font ShowControlLookAndFeel::getComboBoxFont (juce::ComboBox&)
 
 juce::Font ShowControlLookAndFeel::getTextButtonFont (juce::TextButton&, int buttonHeight)
 {
-    return ShowTheme::fontBold ((float) juce::jlimit (11, 15, buttonHeight / 2));
+    juce::ignoreUnused (buttonHeight);
+    return showcontrol::ui::globalButtonFont();
 }
 
 juce::Font ShowControlLookAndFeel::getAlertWindowTitleFont()
@@ -149,7 +150,7 @@ void ShowControlLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleBu
     g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
 
     g.setColour (cols.text.withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.5f));
-    g.setFont (ShowTheme::fontBold (11.0f));
+    g.setFont (showcontrol::ui::globalButtonFont());
     g.drawText (button.getButtonText(), bounds, juce::Justification::centred);
 }
 

@@ -1133,11 +1133,7 @@ private:
 
         juce::String shortcutText;
         const auto hotkeyChar = showcontrol::keyboard::getHotkeyCharForIndex (displayCount - 1);
-        #if JUCE_MAC
-        shortcutText = juce::String::fromUTF8 (sets[index].isGridMode ? u8"⌘" : u8"^") + hotkeyChar;
-        #else
-        shortcutText = (sets[index].isGridMode ? "Cmd+" : "Ctrl+") + hotkeyChar;
-        #endif
+        shortcutText = showcontrol::keyboard::playlistHotkeyPrefix (sets[index].isGridMode) + hotkeyChar;
         g.setColour (cols.textMuted);
         g.setFont (sidebarListRowHotkeyFont());
         g.drawText (shortcutText, rowLayout.hotkeyArea, juce::Justification::centredRight, true);

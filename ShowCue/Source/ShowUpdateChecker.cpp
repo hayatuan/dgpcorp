@@ -33,6 +33,34 @@ juce::String firstAssetUrl (const juce::Array<juce::var>& assets)
 
     return {};
 }
+
+struct ParsedSemVer
+{
+    int major = 0;
+    int minor = 0;
+    int patch = 0;
+    juce::String preRelease;
+};
+
+ParsedSemVer parseSemVerLoose (juce::String text)
+{
+    ParsedSemVer out;
+    text = normaliseVersionTag (text);
+
+    const auto dash = text.indexOfChar ('-');
+    if (dash >= 0)
+    {
+        out.preRelease = text.substring (dash + 1).trim();
+        text = text.substring (0, dash).trim();
+    }
+
+    const auto parts = juce::StringArray::fromTokens (text, ".", "");
+    if (parts.size() > 0) out.major = parts[0].getIntValue();
+    if (parts.size() > 1) out.minor = parts[1].getIntValue();
+    if (parts.size() > 2) out.patch = parts[2].getIntValue();
+
+    return out;
+}
 } // namespace
 
 juce::String pickBestAssetDownloadUrl (const juce::var& releaseObject)
@@ -66,18 +94,21 @@ juce::String pickBestAssetDownloadUrl (const juce::var& releaseObject)
 
 int compareVersionStrings (const juce::String& lhs, const juce::String& rhs)
 {
-    const auto lhsParts = juce::StringArray::fromTokens (lhs, ".", "");
-    const auto rhsParts = juce::StringArray::fromTokens (rhs, ".", "");
-    const int maxParts = juce::jmax (lhsParts.size(), rhsParts.size());
+    const auto l = parseSemVerLoose (lhs);
+    const auto r = parseSemVerLoose (rhs);
 
-    for (int i = 0; i < maxParts; ++i)
-    {
-        const int l = (i < lhsParts.size()) ? lhsParts[i].getIntValue() : 0;
-        const int r = (i < rhsParts.size()) ? rhsParts[i].getIntValue() : 0;
+    if (l.major != r.major) return l.major - r.major;
+    if (l.minor != r.minor) return l.minor - r.minor;
+    if (l.patch != r.patch) return l.patch - r.patch;
 
-        if (l != r)
-            return l - r;
-    }
+    const bool lHasPre = l.preRelease.isNotEmpty();
+    const bool rHasPre = r.preRelease.isNotEmpty();
+
+    if (lHasPre != rHasPre)
+        return lHasPre ? -1 : 1;
+
+    if (lHasPre && rHasPre)
+        return l.preRelease.compareNatural (r.preRelease);
 
     return 0;
 }

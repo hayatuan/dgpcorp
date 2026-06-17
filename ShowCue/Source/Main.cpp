@@ -88,6 +88,8 @@ public:
 
         if (menuName == showcontrol::localization::tr (u8"Tệp"))
         {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::importShowcuePackage);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::exportShowcuePackage);
             menu.addCommandItem (&commandManager, ShowControlCommandIDs::openPreferences);
             menu.addSeparator();
             menu.addItem (kQuitMenuItemId, showcontrol::localization::tr (u8"Thoát"));
@@ -141,7 +143,7 @@ public:
         return showcontrol::about::marketingVersionLine();
     }
 
-    bool moreThanOneInstanceAllowed() override             { return true; }
+    bool moreThanOneInstanceAllowed() override             { return false; }
 
 
 
@@ -190,6 +192,12 @@ public:
     {
 
         juce::ignoreUnused (commandLine);
+
+        if (mainWindow != nullptr)
+        {
+            mainWindow->setVisible (true);
+            mainWindow->toFront (true);
+        }
 
     }
 
@@ -380,6 +388,10 @@ public:
             extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::checkForUpdates);
 
             extraAppleMenu.addSeparator();
+
+            extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::importShowcuePackage);
+
+            extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::exportShowcuePackage);
 
             extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::openPreferences);
 

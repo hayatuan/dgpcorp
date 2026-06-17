@@ -15,6 +15,8 @@ inline juce::String marketingVersionLine()
 
    #if JUCE_MAC
     line += juce::String::fromUTF8 (u8" (Universal Binary)");
+   #elif JUCE_WINDOWS
+    line += juce::String::fromUTF8 (u8" (Windows x64)");
    #endif
 
     return line;
@@ -22,14 +24,23 @@ inline juce::String marketingVersionLine()
 
 inline juce::File resolveBundledResourceFile (const juce::String& fileName)
 {
+    const auto exeFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+
    #if JUCE_MAC
-    const auto bundled = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                             .getParentDirectory().getParentDirectory()
+    const auto bundled = exeFile.getParentDirectory().getParentDirectory()
                              .getChildFile ("Resources")
                              .getChildFile (fileName);
 
     if (bundled.existsAsFile())
         return bundled;
+   #elif JUCE_WINDOWS
+    const auto resourcesDir = exeFile.getParentDirectory().getChildFile ("Resources").getChildFile (fileName);
+    if (resourcesDir.existsAsFile())
+        return resourcesDir;
+
+    const auto besideExe = exeFile.getSiblingFile (fileName);
+    if (besideExe.existsAsFile())
+        return besideExe;
    #endif
 
     const auto devPath = juce::File::getCurrentWorkingDirectory()
@@ -165,7 +176,7 @@ public:
                           1);
 
         text.removeFromTop (10);
-        g.setFont (ShowTheme::font (11.0f));
+        g.setFont (showcontrol::aboutTypography::featuresFont());
         g.setColour (textPrimary.withAlpha (0.88f));
         g.drawFittedText (juce::String::fromUTF8 (
             u8"Chức năng chính: Phát CUE & BGM độ trễ thấp; "

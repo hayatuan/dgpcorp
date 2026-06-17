@@ -715,7 +715,7 @@ void PadPanel::paint (juce::Graphics& g)
     if (emptyListHint != EmptyListHint::none)
     {
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::font (15.0f));
+        g.setFont (showcontrol::ui::emptyHintFont());
 
         const juce::String message = (emptyListHint == EmptyListHint::cueGrid)
             ? showcontrol::localization::tr (u8"Danh sách CUE trống. Hãy kéo thả file âm thanh vào đây để tự động cấu hình các ô PAD biểu diễn.")

@@ -28,7 +28,7 @@ public:
           activeList (activeListIndex)
     {
         modeLabel.setText (juce::String::fromUTF8 (u8"Chế độ gán"), juce::dontSendNotification);
-        modeLabel.setFont (ShowTheme::fontBold (11.0f));
+        modeLabel.setFont (showcontrol::hotkeyAssign::modeLabelFont());
         addAndMakeVisible (modeLabel);
 
         modeCombo.addItem (juce::String::fromUTF8 (u8"Phím hệ thống (nhấn để gán)"), 1);
@@ -38,7 +38,7 @@ public:
         modeCombo.onChange = [this] { refreshModeUi(); };
 
         captureLabel.setText (juce::String::fromUTF8 (u8"Nhấn tổ hợp phím…"), juce::dontSendNotification);
-        captureLabel.setFont (ShowTheme::font (12.0f));
+        captureLabel.setFont (showcontrol::hotkeyAssign::captureFont());
         captureLabel.setJustificationType (juce::Justification::centred);
         addAndMakeVisible (captureLabel);
 
@@ -59,11 +59,11 @@ public:
             updateConflictLabel();
         };
 
-        statusLabel.setFont (ShowTheme::font (11.0f));
+        statusLabel.setFont (showcontrol::hotkeyAssign::statusFont());
         statusLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (statusLabel);
 
-        conflictLabel.setFont (ShowTheme::font (11.0f));
+        conflictLabel.setFont (showcontrol::hotkeyAssign::statusFont());
         conflictLabel.setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (conflictLabel);
 

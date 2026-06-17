@@ -716,7 +716,7 @@ void CueListPanel::rebuildRowPaintFonts()
     rowFonts.nameBold   = typography.cellPlain;
     rowFonts.timer      = typography.timerPlain;
     rowFonts.timerBold  = typography.timerBold;
-    rowFonts.autoFollow = ShowTheme::fontBold (11.0f);
+    rowFonts.autoFollow = showcontrol::bgmList::cueAutoFollowFont();
 }
 
 bool CueListPanel::shouldSilenceListenersForStateOp() const noexcept

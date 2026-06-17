@@ -421,7 +421,6 @@ public:
             if (mods.isAltDown())      desc += juce::String::fromUTF8 (u8"⌥");
             if (mods.isShiftDown())    desc += juce::String::fromUTF8 (u8"⇧");
         #else
-            if (mods.isCommandDown())  desc += "Cmd+";
             if (mods.isCtrlDown())     desc += "Ctrl+";
             if (mods.isAltDown())      desc += "Alt+";
             if (mods.isShiftDown())    desc += "Shift+";

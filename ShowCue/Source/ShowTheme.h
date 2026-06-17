@@ -216,6 +216,7 @@ namespace showcontrol::inspector
 {
     inline constexpr float kParamLabelFontSize = 14.0f;
     inline constexpr float kButtonFontSize     = 14.5f;
+    inline constexpr float kWaveEmptyHintFontSize = 11.0f;
     inline constexpr float kTrackNameFontSize  = 16.5f;
     inline constexpr float kTrackNameValueFontSize = 14.5f;
     inline constexpr float kTimeRemainingFontSize = 34.0f;
@@ -244,6 +245,11 @@ namespace showcontrol::inspector
     inline juce::Font timeRemainingFont() noexcept
     {
         return ShowTheme::timerFont (kTimeRemainingFontSize, true);
+    }
+
+    inline juce::Font waveEmptyHintFont() noexcept
+    {
+        return ShowTheme::font (kWaveEmptyHintFontSize);
     }
 }
 
@@ -277,6 +283,8 @@ namespace showcontrol::equalizer
 namespace showcontrol::masterDeck
 {
     inline constexpr float kMonitorButtonFontSize   = 15.0f;
+    inline constexpr float kTrackMetaFontSize       = 12.0f;
+    inline constexpr float kVolumeValueFontSize     = 12.0f;
     inline constexpr float kRemainingTimeFontSize   = 46.0f;
     inline constexpr float kTotalTimeFontSize       = 18.0f;
     inline constexpr float kSystemTimeFontSize      = 26.0f;
@@ -288,6 +296,16 @@ namespace showcontrol::masterDeck
     inline juce::Font monitorButtonFont() noexcept
     {
         return ShowTheme::fontBold (kMonitorButtonFontSize);
+    }
+
+    inline juce::Font trackMetaFont() noexcept
+    {
+        return ShowTheme::font (kTrackMetaFontSize);
+    }
+
+    inline juce::Font volumeValueFont() noexcept
+    {
+        return ShowTheme::fontBold (kVolumeValueFontSize);
     }
 
     inline juce::Font remainingTimeFont() noexcept
@@ -306,14 +324,55 @@ namespace showcontrol::masterDeck
     }
 }
 
+/** Typography dialog gán hotkey — tránh hardcode 11pt rải rác. */
+namespace showcontrol::hotkeyAssign
+{
+    inline constexpr float kModeLabelFontSize = 12.0f;
+    inline constexpr float kCaptureFontSize = 12.0f;
+    inline constexpr float kStatusFontSize = 12.0f;
+
+    inline juce::Font modeLabelFont() noexcept { return ShowTheme::fontBold (kModeLabelFontSize); }
+    inline juce::Font captureFont() noexcept { return ShowTheme::font (kCaptureFontSize); }
+    inline juce::Font statusFont() noexcept { return ShowTheme::font (kStatusFontSize); }
+}
+
+/** Typography About dialog — đồng bộ body/feature text. */
+namespace showcontrol::aboutTypography
+{
+    inline constexpr float kFeaturesFontSize = 12.0f;
+    inline juce::Font featuresFont() noexcept { return ShowTheme::font (kFeaturesFontSize); }
+}
+
+/** Typography Bus mixer — header và bus labels. */
+namespace showcontrol::busMixer
+{
+    inline constexpr float kBusNameFontSize = 10.0f;
+    inline constexpr float kHeaderFontSize = 10.5f;
+
+    inline juce::Font busNameFont() noexcept { return ShowTheme::fontBold (kBusNameFontSize); }
+    inline juce::Font headerFont() noexcept { return ShowTheme::fontBold (kHeaderFontSize); }
+}
+
 /** PopupMenu chuột phải + màu nền/chữ nút — đảm bảo tương phản khi hover. */
 namespace showcontrol::ui
 {
     inline constexpr float kPopupMenuFontSize = 15.0f;
+    inline constexpr float kGlobalButtonFontSize = 14.5f;
+    inline constexpr float kEmptyHintFontSize = 15.0f;
 
     inline juce::Font popupMenuFont() noexcept
     {
         return ShowTheme::font (kPopupMenuFontSize);
+    }
+
+    inline juce::Font globalButtonFont() noexcept
+    {
+        return ShowTheme::fontBold (kGlobalButtonFontSize);
+    }
+
+    inline juce::Font emptyHintFont() noexcept
+    {
+        return ShowTheme::font (kEmptyHintFontSize);
     }
 
     struct ButtonSurfaceColours
@@ -425,6 +484,7 @@ namespace showcontrol::bgmList
     /** Monospace tabular — cột CÒN LẠI / ĐÃ CHẠY / THỜI LƯỢNG; cùng cỡ hàng 14.5pt. */
     inline constexpr float kPlaylistTimerFontSize = kPlaylistCellFontSize;
     inline constexpr float kSidebarHotkeyFontSize = 12.5f;
+    inline constexpr float kCueAutoFollowFontSize = 11.0f;
     /** Chiều cao dòng compact — BGM (SoundPad) và CUE list dùng chung. */
     inline constexpr int kPlaylistRowHeight       = 34;
     /** Khoảng thở giữa tiêu đề cột và dòng 1 — BGM header + CUE list. */
@@ -581,6 +641,11 @@ namespace showcontrol::bgmList
     inline juce::Font playlistHeaderFont() noexcept
     {
         return ShowTheme::fontBold (15.0f);
+    }
+
+    inline juce::Font cueAutoFollowFont() noexcept
+    {
+        return ShowTheme::fontBold (kCueAutoFollowFontSize);
     }
 
     /** Typography dòng playlist — BGM (SoundPad) và CUE list dùng chung. */

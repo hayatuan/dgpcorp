@@ -411,7 +411,7 @@ public:
 
         addAndMakeVisible (trackMetaLabel);
         trackMetaLabel.setText ({}, juce::dontSendNotification);
-        trackMetaLabel.setFont (ShowTheme::font (11.0f));
+        trackMetaLabel.setFont (showcontrol::masterDeck::trackMetaFont());
         trackMetaLabel.setJustificationType (juce::Justification::centred);
 
         addAndMakeVisible (positionSlider);
@@ -453,7 +453,7 @@ public:
 
         addAndMakeVisible (volValueLabel);
         volValueLabel.setText ("100%", juce::dontSendNotification);
-        volValueLabel.setFont (ShowTheme::fontBold (11.0f));
+        volValueLabel.setFont (showcontrol::masterDeck::volumeValueFont());
         volValueLabel.setJustificationType (juce::Justification::centred);
         volValueLabel.setEditable (true, true, false);
         volValueLabel.onTextChange = [this] {
@@ -738,6 +738,15 @@ public:
     /** Kept for backward-compat. */
     void setCueTransportControlsVisible (bool showCueControls) { setListMode (!showCueControls); }
 
+    void setBackupRoleStatusText (const juce::String& text)
+    {
+        if (backupRoleStatusText == text)
+            return;
+
+        backupRoleStatusText = text;
+        repaint();
+    }
+
     void timerCallback() override
     {
         systemTimeLabel.setText (juce::Time::getCurrentTime().formatted ("%H:%M:%S"), juce::dontSendNotification);
@@ -871,6 +880,21 @@ public:
         paintWaveformLive (g, waveBounds);
 
         paintVolumeFaderTicks (g);
+        paintBackupRoleStatus (g);
+    }
+
+    void paintBackupRoleStatus (juce::Graphics& g)
+    {
+        if (backupRoleStatusText.isEmpty())
+            return;
+
+        const auto leftCol = getLeftColumnBounds();
+        g.setColour (findColour (MasterDeckComponent::accentTextColourId).withAlpha (0.88f));
+        g.setFont (ShowTheme::fontBold (10.5f));
+        g.drawText (backupRoleStatusText,
+                    leftCol.getX() + 8, leftCol.getBottom() - 20,
+                    leftCol.getWidth() - 16, 16,
+                    juce::Justification::centredRight);
     }
 
     void paintWaveformLive (juce::Graphics& g, juce::Rectangle<int> waveBounds)
@@ -1237,6 +1261,7 @@ private:
 
     bool isDarkMode, isDraggingPlayhead, isPaused, isBgmMode = false;
     bool wasTransportAnimatingLastTick = false;
+    juce::String backupRoleStatusText;
     SoundPad* activePad;
     juce::Colour trackAccent { showcontrol::colours::tagColourAt (7) };
     juce::Label remainingTimeLabel, totalTimeLabel, trackMetaLabel, volLabel, volValueLabel, systemTimeLabel;

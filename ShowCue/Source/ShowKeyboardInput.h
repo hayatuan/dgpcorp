@@ -187,6 +187,34 @@ inline juce::KeyPress normalizedForHotkeyMatch (const juce::KeyPress& key) noexc
 /** Cuốn chiếu phím tắt playlist sidebar: 1–9 → 0 → Q…M (tối đa 36 danh sách / phân khu). */
 inline constexpr int kPlaylistHotkeyMapSize = 36;
 
+/** Mac: ⌘ chuyển BGM grid, ^ chuyển Cue list. Windows: commandModifier ≡ ctrlModifier → Ctrl = grid, Alt = cue. */
+inline bool playlistModifierTargetsGrid (const juce::ModifierKeys& mods) noexcept
+{
+   #if JUCE_MAC
+    return mods.isCommandDown() && ! mods.isCtrlDown() && ! mods.isAltDown();
+   #else
+    return mods.isCtrlDown() && ! mods.isAltDown();
+   #endif
+}
+
+inline bool playlistModifierTargetsCueList (const juce::ModifierKeys& mods) noexcept
+{
+   #if JUCE_MAC
+    return mods.isCtrlDown() && ! mods.isCommandDown() && ! mods.isAltDown();
+   #else
+    return mods.isAltDown() && ! mods.isCtrlDown() && ! mods.isShiftDown();
+   #endif
+}
+
+inline juce::String playlistHotkeyPrefix (bool isGridMode) noexcept
+{
+   #if JUCE_MAC
+    return isGridMode ? juce::String::fromUTF8 (u8"⌘") : juce::String::fromUTF8 (u8"^");
+   #else
+    return isGridMode ? "Ctrl+" : "Alt+";
+   #endif
+}
+
 inline juce::String getHotkeyCharForIndex (int index) noexcept
 {
     static constexpr char hotkeyMap[] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',

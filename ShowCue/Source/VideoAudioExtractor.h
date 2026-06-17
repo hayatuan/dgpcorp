@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_core/juce_core.h>
+#include <limits>
 
 //==============================================================================
 // VideoAudioExtractor: Tách audio từ video qua ffmpeg (background thread).
@@ -204,16 +205,81 @@ inline juce::String brewInstallFfmpegCommand()
 }
 
 inline constexpr const char* showControlWavTag() noexcept { return ".showcontrol"; }
+inline constexpr juce::int64 kAudioCacheMaxBytes = 2ll * 1024ll * 1024ll * 1024ll;
+inline constexpr juce::int64 kAudioCacheProtectRecentMs = 10ll * 60ll * 1000ll;
+
+inline void pruneAudioCacheBySize (const juce::File& cacheDir)
+{
+    juce::Array<juce::File> files;
+    cacheDir.findChildFiles (files, juce::File::findFiles, false, "*.wav");
+
+    struct CacheEntry
+    {
+        juce::File file;
+        juce::Time modified;
+        juce::int64 size = 0;
+    };
+
+    juce::Array<CacheEntry> entries;
+    juce::int64 totalBytes = 0;
+
+    for (const auto& file : files)
+    {
+        CacheEntry e;
+        e.file = file;
+        e.modified = file.getLastModificationTime();
+        e.size = file.getSize();
+        totalBytes += e.size;
+        entries.add (e);
+    }
+
+    if (totalBytes <= kAudioCacheMaxBytes)
+        return;
+
+    const auto now = juce::Time::getCurrentTime();
+    while (totalBytes > kAudioCacheMaxBytes)
+    {
+        int oldestIndex = -1;
+        juce::int64 oldestMs = std::numeric_limits<juce::int64>::max();
+
+        for (int i = 0; i < entries.size(); ++i)
+        {
+            const auto ageMs = now.toMilliseconds() - entries.getReference (i).modified.toMilliseconds();
+            if (ageMs < kAudioCacheProtectRecentMs)
+                continue;
+
+            const auto modifiedMs = entries.getReference (i).modified.toMilliseconds();
+            if (modifiedMs < oldestMs)
+            {
+                oldestMs = modifiedMs;
+                oldestIndex = i;
+            }
+        }
+
+        if (oldestIndex < 0)
+            break;
+
+        auto& victim = entries.getReference (oldestIndex);
+        if (victim.file.deleteFile())
+            totalBytes -= victim.size;
+
+        entries.remove (oldestIndex);
+    }
+}
 
 /** ~/Library/Application Support/ShowCue/AudioCache/ — WAV trích từ video, ẩn khỏi thư mục người dùng. */
 inline juce::File getAudioCacheDirectory()
 {
+    static std::atomic<bool> cleanupDone { false };
     auto cacheDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                       .getChildFile ("ShowCue")
                       .getChildFile ("AudioCache");
 
     if (! cacheDir.exists())
         cacheDir.createDirectory();
+
+    if (! cleanupDone.exchange (true, std::memory_order_acq_rel))
+        pruneAudioCacheBySize (cacheDir);
 
     return cacheDir;
 }

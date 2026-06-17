@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.15)
 
 # ShowCue — trình phát sự kiện cue-based (JUCE 8)
 project(ShowCue VERSION 1.0.0 LANGUAGES C CXX)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json for clangd" FORCE)
+
+if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json for clangd")
+endif()
 
 # Chỉ đường dẫn cho VS Code tìm thấy bộ thư viện JUCE nằm bên cạnh
 add_subdirectory(JUCE)
@@ -23,61 +26,17 @@ juce_add_gui_app(ShowCue
     LOCAL_NETWORK_PERMISSION_TEXT "ShowCue cần truy cập mạng để kiểm tra cập nhật phần mềm và đồng bộ dữ liệu show."
     IS_AUDIO_APPLICATION TRUE)
 
-# Khai báo các file code C++ nằm trong thư mục Source
+# Chỉ khai báo translation units (.cpp/.mm) — header được kéo qua #include.
 target_sources(ShowCue PRIVATE
     Source/Main.cpp
-    Source/ShowControlMacWindow.h
-    Source/ShowControlIDEIndex.cpp
-    Source/ShowTheme.h
-    Source/ShowTagColors.h
-    Source/MasterDeckComponent.h
-    Source/ShowTypography.h
     Source/ShowTypography.cpp
-    Source/ShowControlLookAndFeel.h
     Source/ShowControlLookAndFeel.cpp
-    Source/MainComponent.h
     Source/MainComponent.cpp
-    Source/StageMonitorComponent.h
     Source/StageMonitorComponent.cpp
-    Source/SoundPad.h
-    Source/PadRealtimeSource.h
-    Source/ShowOutputRouting.h
-    Source/ShowDsp.h
-    Source/ShowGraphicsSafe.h
-    Source/ShowFlatIcons.h
-    Source/PadCueState.h
-    Source/SidebarPanel.h
-    Source/InspectorPanel.h
-    Source/MasterDeckPanel.h
-    Source/AudioAnalyzer.h
-    Source/ErrorHandler.h
-    Source/CueListPanel.h
     Source/CueListPanel.cpp
-    Source/AudioEngine.h
     Source/AudioEngine.cpp
-    Source/HotkeyManager.h
-    Source/HotkeyAssignDialog.h
-    Source/PadEqualizerDialog.h
-    Source/LoudnessManagerDialog.h
-    Source/VideoAudioExtractor.h
-    Source/FfmpegSetupDialog.h
-    Source/AudioDeviceSettingsPanel.h
-    Source/GlobalPreferencesDialog.h
-    Source/ShowLocalization.h
-    Source/ShowAppPreferences.h
-    Source/ShowApplicationState.h
-    Source/ShowAboutDialog.h
-    Source/ShowUpdateChecker.h
     Source/ShowUpdateChecker.cpp
-    Source/SystemPermissionsPanel.h
     Source/SystemPermissionsPanel.cpp
-    Source/BusMixerPanel.h
-    Source/AudioMetadataReader.h
-    Source/ShowPadGridMatrix.h
-    Source/ShowLoudnessNormalize.h
-    Source/ShowAudioEditor.h
-    Source/ShowCrossComponentDrag.h
-    Source/PadPanel.h
     Source/PadPanel.cpp
     )
 
@@ -104,6 +63,21 @@ if (APPLE)
     endif()
 endif()
 
+if(WIN32)
+    set(_showcue_resources_dir "${CMAKE_CURRENT_SOURCE_DIR}/Resources")
+    foreach(_runtime_asset IN ITEMS AppIcon.png DonateQR.png)
+        set(_runtime_src "${_showcue_resources_dir}/${_runtime_asset}")
+        if(EXISTS "${_runtime_src}")
+            add_custom_command(TARGET ShowCue POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ShowCue>/Resources"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_runtime_src}"
+                    "$<TARGET_FILE_DIR:ShowCue>/Resources/${_runtime_asset}"
+                COMMENT "Bundle Resources/${_runtime_asset} for Windows")
+        endif()
+    endforeach()
+endif()
+
 # Nạp tất cả các module xử lý Mixer và driver phần cứng âm thanh
 target_link_libraries(ShowCue PRIVATE
     ShowCueAssets
@@ -116,10 +90,47 @@ target_link_libraries(ShowCue PRIVATE
     juce::juce_gui_basics
     juce::juce_graphics
     juce::juce_data_structures
+    juce::juce_osc
     juce::juce_core)
 
 # Tự động tạo file Header hệ thống
 juce_generate_juce_header(ShowCue)
+
+# --- P4: target tùy chọn cho clangd (không link vào app, EXCLUDE_FROM_ALL) ---
+option(SHOWCUE_BUILD_IDE_INDEX "Build ShowCueIDEIndex for clangd header indexing" ON)
+
+if(SHOWCUE_BUILD_IDE_INDEX)
+    add_library(ShowCueIDEIndex STATIC EXCLUDE_FROM_ALL
+        Source/ShowControlIDEIndex.cpp)
+
+    set_target_properties(ShowCueIDEIndex PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+
+    target_include_directories(ShowCueIDEIndex PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/Source"
+        "${CMAKE_CURRENT_BINARY_DIR}/ShowCue_artefacts/JuceLibraryCode")
+
+    target_link_libraries(ShowCueIDEIndex PRIVATE
+        ShowCueAssets
+        juce::juce_audio_utils
+        juce::juce_audio_devices
+        juce::juce_audio_formats
+        juce::juce_audio_basics
+        juce::juce_dsp
+        juce::juce_gui_extra
+        juce::juce_gui_basics
+        juce::juce_graphics
+        juce::juce_data_structures
+        juce::juce_core)
+
+    add_dependencies(ShowCueIDEIndex ShowCue)
+
+    add_custom_target(showcue_ide_index
+        DEPENDS ShowCueIDEIndex sync_clangd_db
+        COMMENT "Build optional TU + sync compile_commands for clangd")
+endif()
 
 # Bundle ffmpeg cạnh binary (.app/Contents/MacOS) — ưu tiên ThirdParty tĩnh, rồi ffmpeg hệ thống lúc build.
 set(_showcontrol_ffmpeg_src "")
@@ -176,6 +187,10 @@ if(CMAKE_EXPORT_COMPILE_COMMANDS)
         COMMAND ${CMAKE_COMMAND} ${_sync_ide_db_args}
         COMMENT "Sync compile_commands.json + compile_flags.txt for clangd")
 
+    if(SHOWCUE_BUILD_IDE_INDEX)
+        add_dependencies(sync_clangd_db ShowCueIDEIndex)
+    endif()
+
     add_custom_command(
         TARGET ShowCue POST_BUILD
         COMMAND ${CMAKE_COMMAND} ${_sync_ide_db_args}
@@ -188,4 +203,11 @@ if(CMAKE_EXPORT_COMPILE_COMMANDS)
             execute_process(COMMAND ${CMAKE_COMMAND} ${_sync_ide_db_args})
         endif()
     endif()
+endif()
+
+# --- Phase A: unit tests (ctest / CI) ---
+option(SHOWCUE_BUILD_TESTS "Build ShowCue unit tests" ON)
+
+if(SHOWCUE_BUILD_TESTS)
+    add_subdirectory(Tests)
 endif()

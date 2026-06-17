@@ -195,7 +195,7 @@ public:
         if (thumbnail == nullptr || thumbnail->getTotalLength() <= 0.0)
         {
             g.setColour (pal.border);
-            g.setFont (ShowTheme::font (11.0f));
+            g.setFont (showcontrol::inspector::waveEmptyHintFont());
             g.drawText (juce::String::fromUTF8 (u8"Chưa có file âm thanh"), getLocalBounds(), juce::Justification::centred);
             return;
         }

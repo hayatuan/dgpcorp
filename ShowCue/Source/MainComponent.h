@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <atomic>
+#include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -29,16 +30,21 @@
 #include "SetSecondaryWindow.h"
 #include "StageMonitorComponent.h"
 #include "ShowUndoActions.h"
+#include "ShowBackupLanDiscovery.h"
 
 namespace showcontrol::update { class ShowUpdateChecker; }
+namespace showcontrol::osc { class ShowOscListener; }
+namespace showcontrol::backup { class ShowBackupSyncBroadcaster; }
 
 namespace ShowControlCommandIDs
 {
     enum
     {
-        showAboutDialog  = 0x53430001,
-        checkForUpdates  = 0x53430002,
-        openPreferences  = 0x53430003
+        showAboutDialog       = 0x53430001,
+        checkForUpdates       = 0x53430002,
+        openPreferences       = 0x53430003,
+        exportShowcuePackage  = 0x53430004,
+        importShowcuePackage  = 0x53430005
     };
 }
 
@@ -136,6 +142,16 @@ public:
     void triggerGlobalPanicFadeAll();
     void executePanicFadeAllLocked();
     void applyPanicFadeUiAftermath (int fadedCount);
+    bool triggerExternalGo (int listIndex, int padIndex);
+    bool triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs = 0.0f);
+    void triggerGlobalStopAll();
+    void triggerGlobalPauseAll();
+    void exportProjectShowcuePackage();
+    void importProjectShowcuePackage();
+    void restartBackupSync();
+    void restartOscListener() { restartBackupSync(); }
+    void setBackupTakeoverActive (bool active);
+    bool isBackupTakeoverActive() const noexcept { return backupTakeoverActive; }
     void finalizeStartupPlaylistUi();
     juce::var buildPlaylistJson() const;
     bool loadPlaylistFromJson (const juce::var& playlistVar);
@@ -179,6 +195,28 @@ public:
 
 private:
     void finishDeferredStartup();
+    bool shouldBlockLocalPlaybackCommand() const noexcept;
+    void broadcastSyncIfPrimary (const std::function<void (showcontrol::backup::ShowBackupSyncBroadcaster&)>& action);
+    void handleSyncPanic();
+    void handleSyncGo (int listIndex, int padIndex, float preWaitMs);
+    void handleSyncStopAll();
+    void handleSyncPauseAll();
+    void handleSyncStopCue (int listIndex, int padIndex);
+    void handleSyncPauseCue (int listIndex, int padIndex);
+    void handleSyncHeartbeat (juce::uint32 sequence);
+    void handleSyncTakeover (bool active);
+    void handleSyncSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
+    void applySyncedSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
+    void broadcastSelectionSyncIfPrimary();
+    int currentSyncViewMode() const noexcept;
+    void setPlayoutModeInternal (bool isPadMode, bool persistToDisk);
+    void updateBackupStatusLabel();
+    void tickBackupHeartbeat();
+    void pollBackupDiscoverySocket();
+    void startBackupDiscoveryResponder();
+    void stopBackupDiscoveryResponder();
+    void scanLanPeersAsync (int wantRole,
+                            std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone);
     void shutdownActiveTimers() noexcept;
     void applyFactoryDefaultApplicationState();
     void handleAsyncUpdate() override;
@@ -225,7 +263,7 @@ private:
     void syncBgmListHeaderScrollbar();
     int getPlaylistViewportContentWidth() noexcept;
     void refreshCueListPanel (bool resetScrollToTop = true);
-    bool triggerCueGo (int padIndex);
+    bool triggerCueGo (int padIndex, bool fromSync = false);
     bool triggerCueListPlay (int padIndex);
     bool triggerCueListPause (int padIndex);
     bool triggerCueListStop (int padIndex);
@@ -253,7 +291,7 @@ private:
     void finishPlayoutViewHeavySync (bool isPadMode);
     void applyPlayoutViewFocus (bool isPadMode);
     SoundPad* findPlayingPadInActiveBgmList() const;
-    bool triggerPadFromHotkey (const HotkeyBinding& binding);
+    bool triggerPadFromHotkey (const HotkeyBinding& binding, bool fromSync = false);
     void rebuildDefaultHotkeysForList (int listIndex);
     void ensureDefaultHotkeysForList (int listIndex);
     juce::OwnedArray<ListData> allLists;
@@ -634,6 +672,7 @@ private:
 
     juce::TooltipWindow tooltipWindow { this };
     std::atomic<bool> isPerformingStateOperation { false };
+    juce::InterProcessLock stateIoLock { "ShowCue_StateIO_Lock" };
     bool deferredStartupComplete = false;
     int activeListIndex = -1; int selectedBgmIndex = 0; bool isDarkMode = true;
     /** 0 = BÀN PAD, 1 = DANH SÁCH CUE QLab — định tuyến Space/P/S (không đè GO/Panic). */
@@ -743,6 +782,20 @@ private:
     std::unique_ptr<SplitterButtonLookAndFeel> splitterButtonLaf;
 
     std::unique_ptr<showcontrol::update::ShowUpdateChecker> updateChecker;
+    std::unique_ptr<showcontrol::osc::ShowOscListener> oscListener;
+    std::unique_ptr<showcontrol::backup::ShowBackupSyncBroadcaster> backupBroadcaster;
+    std::atomic<bool> syncApplying { false };
+    bool backupTakeoverActive = false;
+    juce::uint32 lastPrimaryHeartbeatRxMs = 0;
+    int lastBroadcastSelectionList = -2;
+    int lastBroadcastSelectionPad  = -2;
+    int lastBroadcastSelectionView = -2;
+    juce::Array<int> lastBroadcastSelectionMulti;
+    juce::uint32 heartbeatSendSeq = 0;
+    juce::uint32 lastHeartbeatTickMs = 0;
+    std::unique_ptr<juce::DatagramSocket> backupDiscoverySocket;
+    juce::uint32 lastAutosaveAtMs = 0;
+    void maybeRunAutosave();
 
     /** Khai báo cuối — hủy sau cùng (sau pads/audio) để tránh leak AudioFormat. */
     juce::AudioFormatManager formatManager;

@@ -11,9 +11,33 @@
 #include "ShowControlMacWindow.h"
 #include "ShowAppPreferences.h"
 #include "ShowApplicationState.h"
+#include "ShowProjectPersistence.h"
+#include "ShowOscListener.h"
+#include "ShowBackupSync.h"
+#include "ShowBackupLanDiscovery.h"
+#include <cstdlib>
 
 namespace
 {
+juce::String importPackageErrorMessage (showcontrol::persistence::ImportPackageError error)
+{
+    using E = showcontrol::persistence::ImportPackageError;
+
+    switch (error)
+    {
+        case E::fileNotFound:        return showcontrol::localization::tr (u8"Không tìm thấy file");
+        case E::emptyPackage:        return showcontrol::localization::tr (u8"Gói cấu hình không hợp lệ hoặc rỗng");
+        case E::missingEntries:      return showcontrol::localization::tr (u8"Thiếu manifest, config hoặc project trong gói");
+        case E::wrongFormat:         return showcontrol::localization::tr (u8"Không phải gói cấu hình ShowCue");
+        case E::unsupportedSchema:   return showcontrol::localization::tr (u8"Phiên bản gói cấu hình không được hỗ trợ");
+        case E::invalidManifest:     return showcontrol::localization::tr (u8"manifest.json không hợp lệ");
+        case E::invalidConfig:       return showcontrol::localization::tr (u8"config.json không hợp lệ");
+        case E::invalidProject:      return showcontrol::localization::tr (u8"project.xml không hợp lệ");
+        case E::none:
+        default:                     return showcontrol::localization::tr (u8"File không hợp lệ.");
+    }
+}
+
 class StateOperationScope
 {
 public:
@@ -33,6 +57,16 @@ public:
 private:
     std::atomic<bool>& flag;
     bool entered = false;
+};
+
+class InterProcessUnlockScope
+{
+public:
+    explicit InterProcessUnlockScope (juce::InterProcessLock& lockIn) : lock (lockIn) {}
+    ~InterProcessUnlockScope() { lock.exit(); }
+
+private:
+    juce::InterProcessLock& lock;
 };
 
 #if JUCE_MAC
@@ -59,6 +93,23 @@ void logHotkeyTrace (const juce::String& msg)
 {
     if (kEnableHotkeyTrace)
         ErrorHandler::log ("[HOTKEY] " + msg, ErrorHandler::Severity::Info);
+}
+
+bool writeXmlAtomically (const juce::File& destination, const juce::XmlElement& xml)
+{
+    const auto tmpFile = destination.getSiblingFile (destination.getFileName() + ".tmp");
+    tmpFile.deleteFile();
+
+    if (! xml.writeTo (tmpFile))
+        return false;
+
+    if (tmpFile.replaceFileIn (destination))
+        return true;
+
+    if (destination.existsAsFile())
+        destination.deleteFile();
+
+    return tmpFile.moveFileTo (destination);
 }
 
 // ── Spacebar global debounce (file-scope, không nằm trong header)
@@ -255,7 +306,7 @@ public:
         const auto pal = ShowTheme::get (isDarkMode);
         g.fillAll (pal.centerBg);
         g.setColour (pal.textMuted);
-        g.setFont (ShowTheme::font (15.0f));
+        g.setFont (showcontrol::ui::emptyHintFont());
         g.drawFittedText (juce::String::fromUTF8 (u8"Không có kịch bản nào được mở. Bấm nút [+] ở góc dưới Sidebar để tạo mới."),
                           getLocalBounds().reduced (32),
                           juce::Justification::centred,
@@ -648,11 +699,14 @@ void MainComponent::MultiOutputAudioCallback::registerSource (PadRealtimeSource*
     if (isPrepared.load (std::memory_order_relaxed))
         src->prepareToPlay (currentBlockSize, currentSampleRate);
 
+    // Publish fully-initialized source state before making the pointer visible to audio thread.
+    std::atomic_thread_fence (std::memory_order_release);
+
     for (int i = 0; i < kMaxPadSlots; ++i)
     {
         PadRealtimeSource* expected = nullptr;
 
-        if (slots[(size_t) i].compare_exchange_strong (expected, src, std::memory_order_acq_rel))
+        if (slots[(size_t) i].compare_exchange_strong (expected, src, std::memory_order_release, std::memory_order_relaxed))
             return;
     }
 }
@@ -1115,6 +1169,8 @@ void MainComponent::prepareForApplicationShutdown()
 MainComponent::~MainComponent()
 {
     shutdownActiveTimers();
+    oscListener.reset();
+    backupBroadcaster.reset();
     updateChecker.reset();
 
     juce::Desktop::getInstance().removeDarkModeSettingListener (this);
@@ -1630,6 +1686,10 @@ void MainComponent::timerCallback()
     updateMainDeskDisplay();
 
     pushStageMonitorUpdate();
+
+    maybeRunAutosave();
+    tickBackupHeartbeat();
+    pollBackupDiscoverySocket();
 }
 
 SoundPad* MainComponent::findAnyActivePlayingPad() const
@@ -6700,6 +6760,8 @@ void MainComponent::applySelectionForPadClick (int clickedIndex, const juce::Mod
 
     if (isShowing())
         grabKeyboardFocus();
+
+    broadcastSelectionSyncIfPrimary();
 }
 
 void MainComponent::crossfadeOtherPadsOnSameBus (SoundPad* starter, int listIndex)
@@ -6728,9 +6790,15 @@ void MainComponent::offerFfmpegSetupThenIngestVideo (const juce::File& videoFile
     if (targetPad == nullptr || ! videoFile.existsAsFile())
         return;
 
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::Component::SafePointer<SoundPad> safePad (targetPad);
+
     showcontrol::ui::promptMissingFfmpeg (this,
-        [this, videoFile, targetPad] (showcontrol::ui::FfmpegPromptChoice choice)
+        [safeThis, safePad, videoFile] (showcontrol::ui::FfmpegPromptChoice choice)
         {
+            if (safeThis == nullptr || safePad == nullptr)
+                return;
+
             if (choice == showcontrol::ui::FfmpegPromptChoice::copyInstallCommand)
             {
                 ErrorHandler::logAndShow (juce::String::fromUTF8 (u8"Tách audio video"),
@@ -6743,15 +6811,18 @@ void MainComponent::offerFfmpegSetupThenIngestVideo (const juce::File& videoFile
             if (choice != showcontrol::ui::FfmpegPromptChoice::installHomebrew)
                 return;
 
-            showcontrol::ui::installFfmpegWithProgress (this,
-                [this, videoFile, targetPad] (bool ok, juce::String err)
+            showcontrol::ui::installFfmpegWithProgress (safeThis.getComponent(),
+                [safeThis, safePad, videoFile] (bool ok, juce::String err)
                 {
+                    if (safeThis == nullptr || safePad == nullptr)
+                        return;
+
                     if (ok)
                     {
                         ErrorHandler::logAndShow (juce::String::fromUTF8 (u8"Tách audio video"),
                                                   juce::String::fromUTF8 (u8"Đã cài ffmpeg. Đang tách audio…"),
                                                   ErrorHandler::Severity::Info);
-                        ingestVideoFileToPad (videoFile, targetPad);
+                        safeThis->ingestVideoFileToPad (videoFile, safePad.getComponent());
                         return;
                     }
 
@@ -6767,6 +6838,9 @@ void MainComponent::ingestVideoFileToPad (const juce::File& videoFile, SoundPad*
     if (targetPad == nullptr || ! videoFile.existsAsFile())
         return;
 
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::Component::SafePointer<SoundPad> safePad (targetPad);
+
     if (! VideoAudioExtractor::isFfmpegAvailable())
     {
         offerFfmpegSetupThenIngestVideo (videoFile, targetPad);
@@ -6774,13 +6848,22 @@ void MainComponent::ingestVideoFileToPad (const juce::File& videoFile, SoundPad*
     }
 
     VideoAudioExtractor::extractAudioToWavAsync (videoFile,
-        [this, targetPad, videoFile] (bool ok, juce::File wavFile, juce::String error)
+        [safeThis, safePad, videoFile] (bool ok, juce::File wavFile, juce::String error)
         {
+            if (safeThis == nullptr || safePad == nullptr)
+                return;
+
+            auto* mainComp = safeThis.getComponent();
+            auto* pad = safePad.getComponent();
+
+            if (pad == nullptr || MainComponent::findListIndexForPad (mainComp->allLists, pad) < 0)
+                return;
+
             if (! ok)
             {
                 if (error == "MISSING_FFMPEG")
                 {
-                    offerFfmpegSetupThenIngestVideo (videoFile, targetPad);
+                    mainComp->offerFfmpegSetupThenIngestVideo (videoFile, pad);
                     return;
                 }
 
@@ -6793,32 +6876,32 @@ void MainComponent::ingestVideoFileToPad (const juce::File& videoFile, SoundPad*
 
             const juce::String cleanTrackName = VideoAudioExtractor::displayNameFromVideoFile (videoFile);
 
-            applyProjectDefaultsToPad (targetPad);
-            targetPad->setCustomName (cleanTrackName);
-            targetPad->configurePad (wavFile.getFullPathName(), 1.0f, false);
+            mainComp->applyProjectDefaultsToPad (pad);
+            pad->setCustomName (cleanTrackName);
+            pad->configurePad (wavFile.getFullPathName(), 1.0f, false);
 
-            const int listIdx = findListIndexForPad (allLists, targetPad);
+            const int listIdx = MainComponent::findListIndexForPad (mainComp->allLists, pad);
             if (listIdx >= 0)
             {
-                if (auto* list = allLists[listIdx])
+                if (auto* list = mainComp->allLists[listIdx])
                 {
-                    syncCueMetadataFromPads (*list);
+                    mainComp->syncCueMetadataFromPads (*list);
 
-                    if (listIdx == activeListIndex)
-                        refreshCueListPanel();
+                    if (listIdx == mainComp->activeListIndex)
+                        mainComp->refreshCueListPanel();
                 }
             }
 
-            saveProject();
+            mainComp->saveProject();
 
-            if (activeListIndex >= 0)
-                rebuildDefaultHotkeysForList (activeListIndex);
+            if (mainComp->activeListIndex >= 0)
+                mainComp->rebuildDefaultHotkeysForList (mainComp->activeListIndex);
 
-            if (inspectorPanel.getCurrentPad() == targetPad)
-                inspectorPanel.selectPad (targetPad);
+            if (mainComp->inspectorPanel.getCurrentPad() == pad)
+                mainComp->inspectorPanel.selectPad (pad);
 
-            resized();
-            repaint();
+            mainComp->resized();
+            mainComp->repaint();
         });
 }
 
@@ -7746,29 +7829,9 @@ MainComponent::MainComponent()
     for (int b = 0; b < BusMixerPanel::kNumBuses; ++b)
         busMixerPanel.setBusGain (b, multiOutputCallback.getBusGain (b), juce::dontSendNotification);
 
-    masterDeckPanel.onPauseAll = [this] {
-        for (auto* list : allLists) {
-            if (list == nullptr || ! list->isGrid)
-                continue;
+    masterDeckPanel.onPauseAll = [this] { triggerGlobalPauseAll(); };
 
-            for (auto* pad : list->pads)
-            {
-                if (pad != nullptr && pad->isPlaying())
-                    pad->triggerPause();
-            }
-        }
-    };
-
-    masterDeckPanel.onStopAll = [this] {
-        for (auto* list : allLists) {
-            if (list != nullptr) {
-                for (auto* pad : list->pads) {
-                    if (pad != nullptr)
-                        pad->triggerStop();
-                }
-            }
-        }
-    };
+    masterDeckPanel.onStopAll = [this] { triggerGlobalStopAll(); };
 
     masterDeckPanel.onFadeAll = [this] { triggerGlobalPanicFadeAll(); };
 
@@ -8020,6 +8083,8 @@ MainComponent::MainComponent()
                     deferredPad->prepareForInstantPlay();
             }
         });
+
+        broadcastSelectionSyncIfPrimary();
     };
 
     cueListPanel->onDeleteKeyPressed = [this] { handleDeleteKeyForActiveSelection(); };
@@ -8070,6 +8135,8 @@ MainComponent::MainComponent()
 
         if (auto* pad = list->pads[selectedBgmIndex])
             inspectorPanel.selectPad (pad);
+
+        broadcastSelectionSyncIfPrimary();
     };
 
     cueListPanel->onCuesBlockReordered = [this] (const juce::Array<int>& sourceIndices, int insertBeforeIndex)
@@ -8158,6 +8225,7 @@ MainComponent::MainComponent()
 
         loadList (idx, count, allLists[idx]->isGrid);
         updateMainDeskDisplay();
+        broadcastSelectionSyncIfPrimary();
     };
     sidebarPanel.onAddList = [this] (int idx, juce::String name, int count, bool isGrid)
     {
@@ -8519,6 +8587,8 @@ void MainComponent::finishDeferredStartup()
 
     if (updateChecker != nullptr)
         updateChecker->checkForUpdatesAsync (false);
+
+    restartBackupSync();
 }
 
 void MainComponent::triggerManualMusicIngestion()
@@ -9208,13 +9278,12 @@ void MainComponent::resized()
 bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
 {
     const auto mods = key.getModifiers();
-    const bool ctrlOnly = mods.isCtrlDown() && ! mods.isCommandDown() && ! mods.isAltDown();
-    const bool cmdOnly  = mods.isCommandDown() && ! mods.isCtrlDown() && ! mods.isAltDown();
 
-    if (! ctrlOnly && ! cmdOnly)
+    if (! showcontrol::keyboard::playlistModifierTargetsGrid (mods)
+        && ! showcontrol::keyboard::playlistModifierTargetsCueList (mods))
         return false;
 
-    const bool targetIsGrid = cmdOnly;
+    const bool targetIsGrid = showcontrol::keyboard::playlistModifierTargetsGrid (mods);
     const int hotkeyIndex = showcontrol::keyboard::hotkeyIndexForKeyPress (key);
 
     if (hotkeyIndex < 0)
@@ -9712,6 +9781,9 @@ void MainComponent::triggerGlobalPanicFadeAll()
         return;
     }
 
+    if (shouldBlockLocalPlaybackCommand())
+        return;
+
     const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
 
     if (nowMs - lastPanicFadeRequestMs < 120)
@@ -9736,6 +9808,14 @@ void MainComponent::triggerGlobalPanicFadeAll()
 void MainComponent::executePanicFadeAllLocked()
 {
     static constexpr double kPanicFadeMs = 1500.0;
+
+    if (! syncApplying.load())
+    {
+        broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendPanic();
+        });
+    }
 
     if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
     {
@@ -10701,6 +10781,11 @@ void MainComponent::flushPlayoutViewGraphics (bool isPadMode)
 
 void MainComponent::setPlayoutMode (bool isPadMode)
 {
+    setPlayoutModeInternal (isPadMode, true);
+}
+
+void MainComponent::setPlayoutModeInternal (bool isPadMode, bool persistToDisk)
+{
     if (isOperatingState())
         return;
 
@@ -10731,8 +10816,10 @@ void MainComponent::setPlayoutMode (bool isPadMode)
     finishPlayoutViewHeavySync (isPadMode);
     applyPlayoutViewFocus (isPadMode);
 
-    if (! isOperatingState())
+    if (persistToDisk && ! isOperatingState())
         saveProject();
+
+    broadcastSelectionSyncIfPrimary();
 }
 
 void MainComponent::syncPlayoutModeBarFromActiveList()
@@ -10952,6 +11039,9 @@ bool MainComponent::triggerCueListPlay (int padIndex)
 
 bool MainComponent::triggerCueListPause (int padIndex)
 {
+    if (shouldBlockLocalPlaybackCommand())
+        return false;
+
     if (activeListIndex < 0 || activeListIndex >= allLists.size())
         return false;
 
@@ -10962,11 +11052,23 @@ bool MainComponent::triggerCueListPause (int padIndex)
     const bool ok = audioEngine.toggleCuePauseResume (list->pads[padIndex]);
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
+
+    if (ok)
+    {
+        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendPauseCue (activeListIndex, padIndex);
+        });
+    }
+
     return ok;
 }
 
 bool MainComponent::triggerCueListStop (int padIndex)
 {
+    if (shouldBlockLocalPlaybackCommand())
+        return false;
+
     if (activeListIndex < 0 || activeListIndex >= allLists.size())
         return false;
 
@@ -10986,11 +11088,23 @@ bool MainComponent::triggerCueListStop (int padIndex)
 
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
+
+    if (ok)
+    {
+        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendStopCue (activeListIndex, padIndex);
+        });
+    }
+
     return ok;
 }
 
-bool MainComponent::triggerCueGo (int padIndex)
+bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
 {
+    if (! fromSync && shouldBlockLocalPlaybackCommand())
+        return false;
+
     if (isPlaybackCommandBlocked())
         return false;
 
@@ -11067,6 +11181,15 @@ bool MainComponent::triggerCueGo (int padIndex)
     if (preWaitMs > 1.0)
     {
         pendingGoPadIndex = padIndex;
+
+        if (! fromSync)
+        {
+            broadcastSyncIfPrimary ([this, padIndex, preWaitMs] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+            {
+                b.sendGo (activeListIndex, padIndex, (float) preWaitMs);
+            });
+        }
+
         auto* timer = new PendingCueGoTimer();
         pendingGoTimer.reset (timer);
         timer->onFire = [this, padIndex, runCueGoPad]
@@ -11088,6 +11211,15 @@ bool MainComponent::triggerCueGo (int padIndex)
     }
 
     runCueGoPad (pad);
+
+    if (! fromSync)
+    {
+        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendGo (activeListIndex, padIndex, 0.0f);
+        });
+    }
+
     return true;
 }
 
@@ -11131,8 +11263,11 @@ void MainComponent::setSoloPad (SoundPad* pad, bool enable)
     }
 }
 
-bool MainComponent::triggerPadFromHotkey (const HotkeyBinding& binding)
+bool MainComponent::triggerPadFromHotkey (const HotkeyBinding& binding, bool fromSync)
 {
+    if (! fromSync && shouldBlockLocalPlaybackCommand())
+        return false;
+
     if (isPlaybackCommandBlocked())
         return false;
 
@@ -11177,7 +11312,7 @@ bool MainComponent::triggerPadFromHotkey (const HotkeyBinding& binding)
     if (list->isGrid)
     {
         // Guard duy nhất nằm trong triggerCueGo (tryClaimPadHotkeyTrigger) — không claim 2 lần.
-        if (! triggerCueGo (binding.padIndex))
+        if (! triggerCueGo (binding.padIndex, fromSync))
             return false;
 
         logHotkeyTrace ("go cue list=" + juce::String (binding.padListIndex)
@@ -11332,6 +11467,25 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
         checkForUpdates();
     };
 
+    callbacks.onBackupSettingsChanged = [this]
+    {
+        restartBackupSync();
+        updateBackupStatusLabel();
+    };
+
+    callbacks.getBackupTakeoverActive = [this] { return backupTakeoverActive; };
+
+    callbacks.onBackupTakeoverChanged = [this] (bool active)
+    {
+        setBackupTakeoverActive (active);
+    };
+
+    callbacks.onScanLanPeers = [this] (int wantRole,
+                                       std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)
+    {
+        scanLanPeersAsync (wantRole, std::move (onDone));
+    };
+
     auto* dialog = new GlobalPreferencesDialog (deviceManager,
                                                 isDarkMode,
                                                 multiOutputCallback.getAllBusNames(),
@@ -11380,6 +11534,8 @@ void MainComponent::getAllCommands (juce::Array<juce::CommandID>& commands)
     commands.add (ShowControlCommandIDs::showAboutDialog);
     commands.add (ShowControlCommandIDs::checkForUpdates);
     commands.add (ShowControlCommandIDs::openPreferences);
+    commands.add (ShowControlCommandIDs::importShowcuePackage);
+    commands.add (ShowControlCommandIDs::exportShowcuePackage);
 }
 
 void MainComponent::getCommandInfo (juce::CommandID commandID, juce::ApplicationCommandInfo& result)
@@ -11440,6 +11596,20 @@ void MainComponent::getCommandInfo (juce::CommandID commandID, juce::Application
             result.addDefaultKeypress (',', juce::ModifierKeys::commandModifier);
             break;
 
+        case ShowControlCommandIDs::importShowcuePackage:
+            result.setInfo (showcontrol::localization::tr (u8"Nhập file cấu hình..."),
+                            showcontrol::localization::tr (u8"Khôi phục project từ gói .showcue"),
+                            showcontrol::localization::tr (u8"Tệp"),
+                            0);
+            break;
+
+        case ShowControlCommandIDs::exportShowcuePackage:
+            result.setInfo (showcontrol::localization::tr (u8"Xuất file cấu hình..."),
+                            showcontrol::localization::tr (u8"Đóng gói project để copy sang máy Backup"),
+                            showcontrol::localization::tr (u8"Tệp"),
+                            0);
+            break;
+
         default:
             break;
     }
@@ -11465,6 +11635,14 @@ bool MainComponent::perform (const juce::ApplicationCommandTarget::InvocationInf
 
         case ShowControlCommandIDs::openPreferences:
             showPreferencesDialog (0);
+            return true;
+
+        case ShowControlCommandIDs::importShowcuePackage:
+            importProjectShowcuePackage();
+            return true;
+
+        case ShowControlCommandIDs::exportShowcuePackage:
+            exportProjectShowcuePackage();
             return true;
 
         default:
@@ -12133,6 +12311,13 @@ void MainComponent::loadApplicationState()
     if (! stateGuard.enteredSuccessfully())
         return;
 
+    if (! stateIoLock.enter (3000))
+    {
+        std::cout << "[CONFIG] [WARN] Cannot acquire state lock for load." << std::endl;
+        return;
+    }
+    InterProcessUnlockScope ioUnlock (stateIoLock);
+
     const auto configPath = showcontrol::state::getCanonicalConfigFile().getFullPathName();
     std::cout << "[CONFIG] loadApplicationState() — target: " << configPath.toStdString() << std::endl;
 
@@ -12597,6 +12782,13 @@ void MainComponent::saveApplicationState()
 
 void MainComponent::saveApplicationStateInternal()
 {
+    if (! stateIoLock.enter (3000))
+    {
+        std::cout << "[CONFIG] [WARN] Cannot acquire state lock for save." << std::endl;
+        return;
+    }
+    InterProcessUnlockScope ioUnlock (stateIoLock);
+
     const auto configFile = showcontrol::state::getCanonicalConfigFile();
 
     if (! showcontrol::state::ensureConfigParentDirectory (configFile))
@@ -12607,9 +12799,21 @@ void MainComponent::saveApplicationStateInternal()
     if (xml == nullptr)
         return;
 
-    xml->writeTo (getProjectFile());
+    if (! writeXmlAtomically (getProjectFile(), *xml))
+    {
+        std::cout << "[CONFIG] [ERROR] Atomic XML write failed." << std::endl;
+        return;
+    }
+
+    if (const char* failpoint = std::getenv ("SHOWCUE_FAIL_STATE_SAVE_AFTER_XML"))
+    {
+        juce::ignoreUnused (failpoint);
+        std::cout << "[CONFIG] [TEST] Save aborted by failpoint SHOWCUE_FAIL_STATE_SAVE_AFTER_XML." << std::endl;
+        return;
+    }
 
     juce::DynamicObject::Ptr root (new juce::DynamicObject());
+    root->setProperty ("projectSchema", showcontrol::persistence::kProjectSchemaVersion);
     root->setProperty ("appTheme", themePreferenceId);
     root->setProperty ("appLanguage", languagePreferenceIndex);
     root->setProperty ("projectXml", xml->toString());
@@ -12617,7 +12821,853 @@ void MainComponent::saveApplicationStateInternal()
     root->setProperty ("configPath", configFile.getFullPathName());
     root->setProperty ("playlist", buildPlaylistJson());
 
-    showcontrol::state::hardFlushJsonConfig (juce::var (root.get()));
+    if (! showcontrol::state::hardFlushJsonConfig (juce::var (root.get())))
+    {
+        std::cout << "[CONFIG] [ERROR] Atomic JSON write failed." << std::endl;
+        return;
+    }
+
+    showcontrol::persistence::snapshotProjectAfterSave (configFile, getProjectFile());
+}
+
+void MainComponent::maybeRunAutosave()
+{
+    if (isOperatingState() || ! deferredStartupComplete)
+        return;
+
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (lastAutosaveAtMs != 0
+        && now - lastAutosaveAtMs < (juce::uint32) showcontrol::persistence::kAutosaveIntervalMs)
+        return;
+
+    lastAutosaveAtMs = now;
+    saveApplicationStateInternal();
+}
+
+bool MainComponent::triggerExternalGo (int listIndex, int padIndex)
+{
+    return triggerExternalSyncGo (listIndex, padIndex, 0.0f);
+}
+
+bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs)
+{
+    const bool wasSyncing = syncApplying.exchange (true);
+
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    if (listIndex >= 0 && listIndex < allLists.size() && listIndex != activeListIndex)
+    {
+        auto* list = allLists[listIndex];
+
+        if (list != nullptr)
+        {
+            sidebarPanel.setSelectedIndex (listIndex);
+            loadList (listIndex, sidebarPanel.getListTrackCount (listIndex), list->isGrid);
+        }
+    }
+
+    if (preWaitMs > 1.0f
+        && listIndex >= 0 && listIndex < allLists.size()
+        && listIndex == activeListIndex)
+    {
+        return triggerCueGo (padIndex, true);
+    }
+
+    HotkeyBinding binding;
+    binding.padListIndex = listIndex;
+    binding.padIndex     = padIndex;
+    return triggerPadFromHotkey (binding, true);
+}
+
+void MainComponent::triggerGlobalStopAll()
+{
+    if (shouldBlockLocalPlaybackCommand())
+        return;
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr)
+                pad->triggerStop();
+        }
+    }
+
+    broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendStopAll();
+    });
+}
+
+void MainComponent::triggerGlobalPauseAll()
+{
+    if (shouldBlockLocalPlaybackCommand())
+        return;
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr || ! list->isGrid)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isPlaying())
+                pad->triggerPause();
+        }
+    }
+
+    broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendPauseAll();
+    });
+}
+
+bool MainComponent::shouldBlockLocalPlaybackCommand() const noexcept
+{
+    if (syncApplying.load (std::memory_order_acquire))
+        return false;
+
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return false;
+
+    if (backupTakeoverActive)
+        return false;
+
+    return showcontrol::prefs::loadBackupFollowerLock();
+}
+
+void MainComponent::broadcastSyncIfPrimary (
+    const std::function<void (showcontrol::backup::ShowBackupSyncBroadcaster&)>& action)
+{
+    if (syncApplying.load (std::memory_order_acquire))
+        return;
+
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::primary)
+        return;
+
+    if (backupBroadcaster == nullptr || ! backupBroadcaster->isConnected())
+        return;
+
+    action (*backupBroadcaster);
+}
+
+void MainComponent::setBackupTakeoverActive (bool active)
+{
+    backupTakeoverActive = active;
+    updateBackupStatusLabel();
+
+    if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup
+        && backupBroadcaster != nullptr
+        && backupBroadcaster->isConnected())
+    {
+        backupBroadcaster->sendTakeover (active);
+    }
+}
+
+void MainComponent::handleSyncPanic()
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    executePanicFadeAllLocked();
+}
+
+void MainComponent::handleSyncGo (int listIndex, int padIndex, float preWaitMs)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    triggerExternalSyncGo (listIndex, padIndex, preWaitMs);
+}
+
+void MainComponent::handleSyncStopAll()
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr)
+                pad->triggerStop();
+        }
+    }
+}
+
+void MainComponent::handleSyncPauseAll()
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr || ! list->isGrid)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr && pad->isPlaying())
+                pad->triggerPause();
+        }
+    }
+}
+
+void MainComponent::handleSyncStopCue (int listIndex, int padIndex)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    if (listIndex >= 0 && listIndex < allLists.size() && listIndex != activeListIndex)
+    {
+        auto* list = allLists[listIndex];
+
+        if (list != nullptr)
+        {
+            sidebarPanel.setSelectedIndex (listIndex);
+            loadList (listIndex, sidebarPanel.getListTrackCount (listIndex), list->isGrid);
+        }
+    }
+
+    if (listIndex == activeListIndex)
+        triggerCueListStop (padIndex);
+}
+
+void MainComponent::handleSyncPauseCue (int listIndex, int padIndex)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    if (listIndex >= 0 && listIndex < allLists.size() && listIndex != activeListIndex)
+    {
+        auto* list = allLists[listIndex];
+
+        if (list != nullptr)
+        {
+            sidebarPanel.setSelectedIndex (listIndex);
+            loadList (listIndex, sidebarPanel.getListTrackCount (listIndex), list->isGrid);
+        }
+    }
+
+    if (listIndex == activeListIndex)
+        triggerCueListPause (padIndex);
+}
+
+void MainComponent::handleSyncHeartbeat (juce::uint32 /*sequence*/)
+{
+    if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup)
+    {
+        lastPrimaryHeartbeatRxMs = juce::Time::getMillisecondCounter();
+        updateBackupStatusLabel();
+    }
+}
+
+void MainComponent::handleSyncTakeover (bool active)
+{
+    if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::primary)
+    {
+        std::cout << "[BACKUP] Backup takeover " << (active ? "armed" : "released") << std::endl;
+        updateBackupStatusLabel();
+    }
+}
+
+int MainComponent::currentSyncViewMode() const noexcept
+{
+    const auto* list = getActiveListSafe();
+
+    if (list == nullptr || ! list->isGrid)
+        return -1;
+
+    return list->useCueListPanel ? 1 : 0;
+}
+
+void MainComponent::broadcastSelectionSyncIfPrimary()
+{
+    if (syncApplying.load (std::memory_order_acquire))
+        return;
+
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::primary)
+        return;
+
+    if (backupBroadcaster == nullptr || ! backupBroadcaster->isConnected())
+        return;
+
+    if (activeListIndex < 0)
+        return;
+
+    const int padIndex  = selectedBgmIndex;
+    const int viewMode  = currentSyncViewMode();
+    juce::Array<int> multi = selectedPadIndices;
+
+    if (multi.isEmpty() && padIndex >= 0)
+        multi.add (padIndex);
+
+    if (lastBroadcastSelectionList == activeListIndex
+        && lastBroadcastSelectionPad == padIndex
+        && lastBroadcastSelectionView == viewMode
+        && lastBroadcastSelectionMulti == multi)
+    {
+        return;
+    }
+
+    lastBroadcastSelectionList = activeListIndex;
+    lastBroadcastSelectionPad  = padIndex;
+    lastBroadcastSelectionView = viewMode;
+    lastBroadcastSelectionMulti = multi;
+
+    backupBroadcaster->sendSelection (activeListIndex, padIndex, viewMode, multi);
+}
+
+void MainComponent::applySyncedSelection (int listIndex,
+                                          int padIndex,
+                                          int viewMode,
+                                          const juce::Array<int>& multiIndices)
+{
+    if (listIndex < 0 || listIndex >= allLists.size())
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    auto* listMeta = allLists[listIndex];
+
+    if (listMeta == nullptr)
+        return;
+
+    if (listIndex != activeListIndex)
+    {
+        sidebarPanel.setSelectedIndex (listIndex);
+        loadList (listIndex, sidebarPanel.getListTrackCount (listIndex), listMeta->isGrid);
+    }
+
+    if (viewMode >= 0 && listMeta->isGrid)
+    {
+        const bool wantPadMode = (viewMode == 0);
+        const bool hasPadMode  = ! listMeta->useCueListPanel;
+
+        if (wantPadMode != hasPadMode)
+            setPlayoutModeInternal (wantPadMode, false);
+    }
+
+    juce::Array<int> indices = multiIndices;
+
+    if (indices.isEmpty() && padIndex >= 0)
+        indices.add (padIndex);
+
+    indices.sort();
+
+    for (int i = indices.size(); --i > 0;)
+    {
+        if (indices[i] == indices[i - 1])
+            indices.remove (i);
+    }
+
+    selectedPadIndices = indices;
+
+    if (padIndex >= 0)
+        selectedBgmIndex = padIndex;
+    else if (! indices.isEmpty())
+        selectedBgmIndex = indices.getLast();
+    else
+        selectedBgmIndex = -1;
+
+    applyPadSelectionVisualState();
+
+    if (cueListPanel != nullptr && listMeta->isGrid && listMeta->useCueListPanel)
+    {
+        if (indices.size() > 1)
+            cueListPanel->setSelectedIndices (indices);
+        else
+            cueListPanel->setSelectedIndex (selectedBgmIndex);
+    }
+
+    if (activeListIndex == listIndex
+        && juce::isPositiveAndBelow (selectedBgmIndex, listMeta->pads.size()))
+    {
+        if (auto* pad = listMeta->pads[selectedBgmIndex])
+            presentPadInInspector (pad);
+    }
+
+    updateMainDeskDisplay();
+}
+
+void MainComponent::handleSyncSelection (int listIndex,
+                                         int padIndex,
+                                         int viewMode,
+                                         const juce::Array<int>& multiIndices)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    applySyncedSelection (listIndex, padIndex, viewMode, multiIndices);
+}
+
+void MainComponent::updateBackupStatusLabel()
+{
+    const int role = showcontrol::prefs::loadBackupRole();
+
+    if (role == (int) showcontrol::backup::Role::standalone)
+    {
+        masterDeckPanel.setBackupRoleStatusText ({});
+        return;
+    }
+
+    juce::String text;
+
+    if (role == (int) showcontrol::backup::Role::primary)
+    {
+        text = showcontrol::localization::tr (u8"Máy chính");
+        const auto peers = showcontrol::prefs::loadBackupPeerHosts();
+
+        if (peers.size() == 1)
+            text += " \u2192 " + peers[0];
+        else if (peers.size() > 1)
+            text += " \u2192 " + juce::String (peers.size()) + " "
+                   + showcontrol::localization::tr (u8"máy phụ");
+    }
+    else
+    {
+        text = backupTakeoverActive
+             ? showcontrol::localization::tr (u8"Máy phụ — TAKEOVER")
+             : showcontrol::localization::tr (u8"Máy phụ — Follower");
+
+        const auto now = juce::Time::getMillisecondCounter();
+
+        if (lastPrimaryHeartbeatRxMs > 0
+            && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
+        {
+            text += " · " + showcontrol::localization::tr (u8"Mất kết nối Primary");
+        }
+    }
+
+    masterDeckPanel.setBackupRoleStatusText (text);
+}
+
+void MainComponent::scanLanPeersAsync (
+    int wantRole,
+    std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)
+{
+    const int syncPort = showcontrol::prefs::loadBackupSyncPort();
+
+    std::thread ([wantRole, syncPort, onDone = std::move (onDone)]() mutable
+    {
+        const auto peers = showcontrol::backup::scanLanPeers (wantRole, syncPort);
+
+        juce::MessageManager::callAsync ([peers, onDone = std::move (onDone)]() mutable
+        {
+            if (onDone)
+                onDone (peers);
+        });
+    }).detach();
+}
+
+void MainComponent::startBackupDiscoveryResponder()
+{
+    stopBackupDiscoveryResponder();
+
+    const int role = showcontrol::prefs::loadBackupRole();
+
+    if (role == (int) showcontrol::backup::Role::standalone)
+        return;
+
+    const int discoveryPort = showcontrol::backup::discoveryPortForSyncPort (
+        showcontrol::prefs::loadBackupSyncPort());
+
+    backupDiscoverySocket = std::make_unique<juce::DatagramSocket>();
+
+    if (backupDiscoverySocket->bindToPort (discoveryPort) <= 0)
+    {
+        backupDiscoverySocket.reset();
+        std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort << std::endl;
+    }
+}
+
+void MainComponent::stopBackupDiscoveryResponder()
+{
+    backupDiscoverySocket.reset();
+}
+
+void MainComponent::pollBackupDiscoverySocket()
+{
+    if (backupDiscoverySocket == nullptr)
+        return;
+
+    const int ourRole = showcontrol::prefs::loadBackupRole();
+
+    if (ourRole == (int) showcontrol::backup::Role::standalone)
+        return;
+
+    for (int safety = 0; safety < 8; ++safety)
+    {
+        if (backupDiscoverySocket->waitUntilReady (true, 0) <= 0)
+            break;
+
+        char buffer[512] = {};
+        juce::String senderHost;
+        int senderPort = 0;
+        const int bytes = backupDiscoverySocket->read (buffer, (int) sizeof (buffer) - 1, false,
+                                                       senderHost, senderPort);
+
+        if (bytes <= 0)
+            continue;
+
+        buffer[bytes] = '\0';
+
+        int wantRole  = 0;
+        int replyPort = 0;
+
+        if (! showcontrol::backup::parseDiscoverProbe (juce::String::fromUTF8 (buffer),
+                                                       wantRole, replyPort))
+            continue;
+
+        if (! showcontrol::backup::roleMatchesDiscoverRequest (ourRole, wantRole))
+            continue;
+
+        const auto announce = showcontrol::backup::makeDiscoverAnnounce (
+            ourRole,
+            juce::SystemStats::getComputerName(),
+            showcontrol::prefs::loadBackupSyncPort());
+
+        juce::DatagramSocket replySocket;
+        replySocket.write (senderHost, replyPort, announce.toRawUTF8(),
+                         (int) announce.getNumBytesAsUTF8());
+    }
+}
+
+void MainComponent::tickBackupHeartbeat()
+{
+    const int role = showcontrol::prefs::loadBackupRole();
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (role == (int) showcontrol::backup::Role::backup)
+    {
+        if (lastPrimaryHeartbeatRxMs > 0
+            && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
+        {
+            updateBackupStatusLabel();
+        }
+
+        return;
+    }
+
+    if (role != (int) showcontrol::backup::Role::primary)
+        return;
+
+    if (lastHeartbeatTickMs != 0
+        && now - lastHeartbeatTickMs < (juce::uint32) showcontrol::backup::kHeartbeatIntervalMs)
+        return;
+
+    lastHeartbeatTickMs = now;
+
+    if (backupBroadcaster != nullptr && backupBroadcaster->isConnected())
+        backupBroadcaster->sendHeartbeat (++heartbeatSendSeq);
+}
+
+void MainComponent::restartBackupSync()
+{
+    oscListener.reset();
+    backupBroadcaster.reset();
+    stopBackupDiscoveryResponder();
+
+    const int role     = showcontrol::prefs::loadBackupRole();
+    const int port     = showcontrol::prefs::loadBackupSyncPort();
+    const auto peers   = showcontrol::prefs::loadBackupPeerHosts();
+    bool listenEnabled = showcontrol::prefs::loadOscEnabled();
+
+    if (const char* env = std::getenv ("SHOWCUE_OSC_ENABLE"))
+        listenEnabled = (env[0] != '0' && env[0] != '\0');
+
+    if (role != (int) showcontrol::backup::Role::standalone)
+        listenEnabled = true;
+
+    if (role == (int) showcontrol::backup::Role::primary)
+    {
+        backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
+
+        if (! backupBroadcaster->configure (peers, port))
+            std::cout << "[BACKUP] [WARN] Primary: no backup peer IP configured." << std::endl;
+        else
+            std::cout << "[BACKUP] Primary broadcasting to " << peers.size()
+                      << " peer(s) on port " << port << std::endl;
+    }
+
+    if (role == (int) showcontrol::backup::Role::backup)
+    {
+        lastPrimaryHeartbeatRxMs = 0;
+
+        if (peers.size() > 0)
+        {
+            backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
+            backupBroadcaster->configure (peers[0], port);
+        }
+    }
+
+    startBackupDiscoveryResponder();
+
+    if (! listenEnabled)
+    {
+        updateBackupStatusLabel();
+        return;
+    }
+
+    showcontrol::osc::ShowOscCallbacks callbacks;
+    const bool isBackupRole = (role == (int) showcontrol::backup::Role::backup);
+
+    callbacks.onPanic = [this, isBackupRole]
+    {
+        if (isBackupRole)
+            handleSyncPanic();
+        else
+            triggerGlobalPanicFadeAll();
+    };
+    callbacks.onGo = [this, isBackupRole] (int listIndex, int padIndex, float preWaitMs)
+    {
+        if (isBackupRole)
+            handleSyncGo (listIndex, padIndex, preWaitMs);
+        else
+            triggerExternalSyncGo (listIndex, padIndex, preWaitMs);
+    };
+    callbacks.onStopAll = [this, isBackupRole]
+    {
+        if (isBackupRole)
+            handleSyncStopAll();
+        else
+            triggerGlobalStopAll();
+    };
+    callbacks.onPauseAll = [this, isBackupRole]
+    {
+        if (isBackupRole)
+            handleSyncPauseAll();
+        else
+            triggerGlobalPauseAll();
+    };
+    callbacks.onStopCue = [this, isBackupRole] (int listIndex, int padIndex)
+    {
+        if (isBackupRole)
+            handleSyncStopCue (listIndex, padIndex);
+        else if (listIndex == activeListIndex)
+            triggerCueListStop (padIndex);
+    };
+    callbacks.onPauseCue = [this, isBackupRole] (int listIndex, int padIndex)
+    {
+        if (isBackupRole)
+            handleSyncPauseCue (listIndex, padIndex);
+        else if (listIndex == activeListIndex)
+            triggerCueListPause (padIndex);
+    };
+    callbacks.onHeartbeat = [this] (juce::uint32 sequence)
+    {
+        handleSyncHeartbeat (sequence);
+    };
+    callbacks.onTakeover = [this] (bool active)
+    {
+        handleSyncTakeover (active);
+    };
+    callbacks.onSelection = [this] (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices)
+    {
+        handleSyncSelection (listIndex, padIndex, viewMode, multiIndices);
+    };
+
+    auto listener = std::make_unique<showcontrol::osc::ShowOscListener> (callbacks);
+
+    if (! listener->start (port))
+    {
+        std::cout << "[BACKUP] [WARN] Cannot bind UDP port " << port << std::endl;
+        updateBackupStatusLabel();
+        return;
+    }
+
+    std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
+    oscListener = std::move (listener);
+    updateBackupStatusLabel();
+}
+
+
+void MainComponent::exportProjectShowcuePackage()
+{
+    auto xml = buildProjectXml();
+
+    if (xml == nullptr)
+        return;
+
+    juce::DynamicObject::Ptr root (new juce::DynamicObject());
+    root->setProperty ("projectSchema", showcontrol::persistence::kProjectSchemaVersion);
+    root->setProperty ("appTheme", themePreferenceId);
+    root->setProperty ("appLanguage", languagePreferenceIndex);
+    root->setProperty ("projectXml", xml->toString());
+    root->setProperty ("savedAtMs", juce::Time::getMillisecondCounterHiRes());
+    root->setProperty ("playlist", buildPlaylistJson());
+
+    const juce::String jsonText = juce::JSON::toString (juce::var (root.get()), true);
+
+    mainFileChooser = std::make_unique<juce::FileChooser> (
+        showcontrol::localization::tr (u8"Xuất file cấu hình"),
+        juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+        "*.showcue");
+
+    const int chooserFlags = juce::FileBrowserComponent::saveMode
+                           | juce::FileBrowserComponent::canSelectFiles;
+
+    mainFileChooser->launchAsync (chooserFlags, [this, jsonText, xmlText = xml->toString()] (const juce::FileChooser& fc)
+    {
+        auto dest = fc.getResult();
+
+        if (dest == juce::File())
+            return;
+
+        if (! dest.hasFileExtension ("showcue"))
+            dest = dest.withFileExtension ("showcue");
+
+        if (! showcontrol::persistence::exportShowcuePackage (dest, jsonText, xmlText))
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                showcontrol::localization::tr (u8"Xuất file cấu hình"),
+                showcontrol::localization::tr (u8"Không ghi được file cấu hình."),
+                showcontrol::localization::tr (u8"Đóng"));
+            return;
+        }
+
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+            showcontrol::localization::tr (u8"Xuất file cấu hình"),
+            showcontrol::localization::tr (u8"Đã lưu: ") + dest.getFullPathName(),
+            showcontrol::localization::tr (u8"Đóng"));
+    });
+}
+
+void MainComponent::importProjectShowcuePackage()
+{
+    if (isOperatingState())
+    {
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Nhập file cấu hình"),
+            showcontrol::localization::tr (u8"Không thể nhập khi đang phát cue. Dừng phát trước."),
+            showcontrol::localization::tr (u8"Đóng"));
+        return;
+    }
+
+    mainFileChooser = std::make_unique<juce::FileChooser> (
+        showcontrol::localization::tr (u8"Nhập file cấu hình"),
+        juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+        "*.showcue");
+
+    const int chooserFlags = juce::FileBrowserComponent::openMode
+                           | juce::FileBrowserComponent::canSelectFiles;
+
+    mainFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    {
+        const auto source = fc.getResult();
+
+        if (source == juce::File())
+            return;
+
+        const auto package = showcontrol::persistence::readShowcuePackage (source);
+
+        if (! package.success)
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                showcontrol::localization::tr (u8"Nhập file cấu hình"),
+                importPackageErrorMessage (package.error),
+                showcontrol::localization::tr (u8"Đóng"));
+            return;
+        }
+
+        const juce::String confirmMessage =
+            showcontrol::localization::tr (u8"Ghi đè cấu hình hiện tại bằng file:\n")
+            + source.getFileName()
+            + "\n\n"
+            + showcontrol::localization::tr (u8"Bản hiện tại sẽ được sao lưu vào thư mục backups/.");
+
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::WarningIcon)
+                .withTitle (showcontrol::localization::tr (u8"Nhập file cấu hình"))
+                .withMessage (confirmMessage)
+                .withButton (showcontrol::localization::tr (u8"Nhập"))
+                .withButton (showcontrol::localization::tr (u8"Hủy")),
+            [safeThis = juce::Component::SafePointer<MainComponent> (this), package] (int result)
+            {
+                if (safeThis == nullptr || result != 0)
+                    return;
+
+                if (! showcontrol::persistence::installImportedConfiguration (package.configJson,
+                                                                              package.projectXml))
+                {
+                    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                        showcontrol::localization::tr (u8"Nhập file cấu hình"),
+                        showcontrol::localization::tr (u8"Không ghi được cấu hình."),
+                        showcontrol::localization::tr (u8"Đóng"));
+                    return;
+                }
+
+                safeThis->forceStopActiveAudioForSafety();
+                safeThis->loadApplicationState();
+
+                juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+                    showcontrol::localization::tr (u8"Nhập file cấu hình"),
+                    showcontrol::localization::tr (u8"Đã nhập cấu hình. Kiểm tra media nếu đường dẫn file âm thanh khác máy nguồn."),
+                    showcontrol::localization::tr (u8"Đóng"));
+            });
+    });
 }
 
 void MainComponent::triggerSave()
