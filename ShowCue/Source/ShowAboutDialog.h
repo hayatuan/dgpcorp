@@ -7,12 +7,17 @@
 
 namespace showcontrol::about
 {
-/** Chuỗi phiên bản marketing — đồng bộ ProjectInfo::versionString với nhãn Beta 2 Universal. */
+/** Chuỗi phiên bản marketing — đồng bộ ProjectInfo::versionString. */
 inline juce::String marketingVersionLine()
 {
-    return juce::String::fromUTF8 (u8"v")
-         + juce::String (ProjectInfo::versionString)
-         + juce::String::fromUTF8 (u8" - Beta 2 (Universal Binary)");
+    juce::String line = juce::String::fromUTF8 (u8"v")
+                     + juce::String (ProjectInfo::versionString);
+
+   #if JUCE_MAC
+    line += juce::String::fromUTF8 (u8" (Universal Binary)");
+   #endif
+
+    return line;
 }
 
 inline juce::File resolveBundledResourceFile (const juce::String& fileName)
@@ -147,26 +152,25 @@ public:
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (4);
-        g.drawFittedText (juce::String::fromUTF8 (
-                              u8"CÔNG TY TNHH CÔNG NGHỆ KỸ THUẬT DƯƠNG GIA PHÁT (DGP CORP)"),
-                          text.removeFromTop (34),
+        text.removeFromTop (6);
+        g.drawFittedText (showcontrol::localization::tr (u8"Thiết kế & lập trình: Hayatuan"),
+                          text.removeFromTop (20),
                           juce::Justification::centredLeft,
-                          2);
+                          1);
 
         text.removeFromTop (2);
-        g.drawFittedText (juce::String::fromUTF8 (u8"© 2026 DGP CORP. All rights reserved."),
+        g.drawFittedText (showcontrol::localization::tr (u8"© 2026 Hayatuan. All rights reserved."),
                           text.removeFromTop (18),
                           juce::Justification::centredLeft,
-                          2);
+                          1);
 
         text.removeFromTop (10);
         g.setFont (ShowTheme::font (11.0f));
         g.setColour (textPrimary.withAlpha (0.88f));
         g.drawFittedText (juce::String::fromUTF8 (
-            u8"Chức năng chính: Phát nhạc kịch bản CUE & BGM không độ trễ; "
-            u8"Kéo thả dòng thông minh; Đồng bộ tên bài hát Live Update; "
-            u8"Phanh tay Toggle Pause phím P."),
+            u8"Chức năng chính: Phát CUE & BGM độ trễ thấp; "
+            u8"Kéo thả sắp xếp nhanh; Đồng bộ tên bài hát theo thời gian thực; "
+            u8"Phím tắt điều khiển sân khấu."),
                           text.removeFromTop (52),
                           juce::Justification::topLeft,
                           5);

@@ -129,7 +129,9 @@ public:
     void crossfadeOtherPadsOnSameBus (SoundPad* starter, int listIndex);
     void ingestVideoFileToPad (const juce::File& videoFile, SoundPad* targetPad);
     void offerFfmpegSetupThenIngestVideo (const juce::File& videoFile, SoundPad* targetPad);
-    void normalizeActiveList (bool useLufs);
+    void normalizeActiveListWithSettings (const showcontrol::loudness::LoudnessSettings& settings);
+    juce::Array<showcontrol::loudness::ListPreviewRow> buildLoudnessPreviewForActiveList (
+        const showcontrol::loudness::LoudnessSettings& settings) const;
     void applyProjectDefaultsToPad (SoundPad* pad) const;
     void triggerGlobalPanicFadeAll();
     void executePanicFadeAllLocked();
@@ -143,6 +145,8 @@ public:
     void refreshStartupPlaylistDisplay();
 
     juce::UndoManager& getUndoManager() noexcept { return undoManager; }
+    bool performApplicationUndo();
+    bool performApplicationRedo();
     void forceStopActiveAudioForSafety();
     void applyPadGridDropAt (int listIdx, SoundPad* sourcePad, int targetRow, int targetCol);
 
@@ -197,11 +201,21 @@ private:
         bool autoArmOnSelect = true;
         bool isLocked = false;
         juce::Colour themeColour = showcontrol::colours::defaultTagColour();
+        juce::Array<int> savedPadSelection;
+        int savedPrimaryPadIndex = -1;
     };
 
     SoundPad* ensurePadSlotAtIndex (ListData& list, int index);
     void syncCueMetadataFromPads (ListData& list);
     void applyTagColourToPadAndCue (ListData& list, int index, juce::Colour colour);
+    void applyTagColourWithUndo (int listIdx, int index, juce::Colour colour);
+    void applyTrackRenameAtIndex (int listIdx, int cueIndex, const juce::String& newName, bool saveNow = true);
+    void applyTrackRenameWithUndo (int listIdx, int cueIndex, const juce::String& newName, const juce::String& oldName);
+    void performActiveListIngestWithUndo (std::function<void (ListData&)> ingestFn);
+    void beginInspectorPadUndoSession (SoundPad* pad);
+    void commitInspectorPadUndoSession (SoundPad* pad);
+    void performPadAudioCutWithUndo (SoundPad* pad, double cutStart, double cutEnd,
+                                     std::function<void (bool success)> onDone);
     void refreshTagColourLiveUi (ListData& list, int changedIndex);
     void updateListThemeColour (int listIndex, juce::Colour colour);
     void refreshGlobalTrackAccent();
@@ -209,6 +223,7 @@ private:
     void presentPadInInspector (SoundPad* pad);
     SoundPad* getActiveSoundPad() const noexcept { return inspectorPanel.getCurrentPad(); }
     void syncBgmListHeaderScrollbar();
+    int getPlaylistViewportContentWidth() noexcept;
     void refreshCueListPanel (bool resetScrollToTop = true);
     bool triggerCueGo (int padIndex);
     bool triggerCueListPlay (int padIndex);
@@ -230,6 +245,7 @@ private:
     void updateTrackPlayingInfo (SoundPad* pad);
     void showNoTrackPlayingState();
     void refreshMasterDeckBgmTransportState();
+    void resetPlaybackDisplayCaches() noexcept;
     /** Đồng bộ selection + inspector + master deck theo pad đang phát (single source of truth). */
     void syncUiToPlayingPad (SoundPad* pad, bool scrollIntoView);
     /** Sau toggle sang PAD grid — đồng bộ armed/playing + mở khóa tương tác. */
@@ -330,6 +346,8 @@ private:
     void movePadsBlockInList (int listIdx, const juce::Array<int>& sourceIndices, int insertBeforeIndex);
     void applySelectionForPadClick (int clickedIndex, const juce::ModifierKeys& mods);
     void applyPadSelectionVisualState();
+    void saveActiveListSelection();
+    void restoreListSelection (ListData& list);
     bool isPadSelectedInActiveList (int padIndex) const;
     void beginMarqueeSelection (juce::Point<int> posInScrollContent, const juce::ModifierKeys& mods);
     void updateMarqueeSelection (juce::Point<int> posInScrollContent);
@@ -343,6 +361,8 @@ private:
     void syncContextMenuTargetSelection (int listIdx, int padIdx);
     void promptReplaceTrackAudioFile (SoundPad* pad);
     void handleAudioFileReplacement (SoundPad* pad, const juce::File& file);
+    void duplicatePadImpl (SoundPad* sourcePad);
+    void duplicateSelectedPadsImpl();
     void duplicatePad (SoundPad* sourcePad);
     void duplicateSelectedPads();
     void duplicatePadAtIndex (int listIdx, int padIdx);
@@ -457,8 +477,8 @@ private:
         // Cross-thread atomics: master gain = bus 0 gain; VU = bus 0 peak
         void  setMasterGain (float gain) noexcept { buses[0].gain.store (gain, std::memory_order_relaxed); }
         float getMasterGain() const noexcept      { return buses[0].gain.load  (std::memory_order_relaxed); }
-        float getLevelLeft()  const noexcept      { return buses[0].peakL.load (std::memory_order_relaxed); }
-        float getLevelRight() const noexcept      { return buses[0].peakR.load (std::memory_order_relaxed); }
+        float getLevelLeft()  const noexcept      { return masterMeterL.load (std::memory_order_relaxed); }
+        float getLevelRight() const noexcept      { return masterMeterR.load (std::memory_order_relaxed); }
 
         void  setBusGain (int bus, float gain) noexcept
         {
@@ -494,6 +514,8 @@ private:
         juce::AudioBuffer<float> tempBuffer;
 
         std::atomic<bool> isPrepared    { false };
+        std::atomic<float> masterMeterL { 0.0f };
+        std::atomic<float> masterMeterR { 0.0f };
         int    currentBlockSize  = 512;
         double currentSampleRate = 44100.0;
 
@@ -513,12 +535,16 @@ private:
     {
         juce::Array<SoundPad*> padOrder;
         juce::Array<CueItem> cueMeta;
+        juce::Array<int> padSelection;
+        int primaryPadIndex = -1;
     };
 
     struct GridPositionsUndoState
     {
         struct Entry { SoundPad* pad = nullptr; int row = 0; int col = 0; };
         juce::Array<Entry> entries;
+        juce::Array<int> padSelection;
+        int primaryPadIndex = -1;
     };
 
     struct DeletedPadUndoEntry
@@ -531,12 +557,16 @@ private:
     {
         int listIdx = -1;
         juce::Array<DeletedPadUndoEntry> removedPads;
+        juce::Array<int> padSelection;
+        int primaryPadIndex = -1;
     };
 
     struct PlaylistSnapshotUndoState
     {
         int listIdx = -1;
         int activeListIndexAtCapture = -1;
+        juce::Array<int> activePadSelection;
+        int activePrimaryPadIndex = -1;
         juce::String sidebarName;
         bool isGrid = true;
         bool isLooping = false;
@@ -569,6 +599,16 @@ private:
     void performUndoableMutation (const juce::String& transactionName,
                                   std::function<void()> performMutation,
                                   std::function<void()> undoMutation);
+    void captureSelectionForUndoSnapshot (int listIdx,
+                                          juce::Array<int>& outSelection,
+                                          int& outPrimary) const;
+    void applySelectionFromUndoSnapshot (int listIdx,
+                                         const juce::Array<int>& selection,
+                                         int primary);
+    void hidePadsForAllListsExcept (int visibleListIdx);
+    std::unique_ptr<juce::XmlElement> capturePadUndoSnapshot (const ListData& list, int padIdx) const;
+    void applyPadUndoSnapshot (int listIdx, int padIdx, const juce::XmlElement& xml);
+    void restoreListOrderAndDeleteOrphanPads (int listIdx, const ListOrderUndoState& before);
     void clearAllPanelsSelectionLive();
     void refreshAllPanelsAfterDataMutation (int listIdx);
     void refreshGridLayoutAfterMutation (int listIdx);
@@ -578,6 +618,15 @@ private:
 
     juce::UndoManager undoManager { 50 };
     std::atomic<bool> isPerformingUndoRedo { false };
+    juce::HashMap<juce::uint64, juce::String> pendingPadRenameOldNames;
+    struct InspectorPadUndoSession
+    {
+        int listIdx = -1;
+        int padIdx = -1;
+        std::unique_ptr<juce::XmlElement> beforeXml;
+    };
+    InspectorPadUndoSession inspectorPadUndoSession;
+    juce::String inspectorNameEditOldValue;
 
     juce::TimeSliceThread timeSliceThread { "ShowCue ReadAhead" };
     juce::AudioDeviceManager deviceManager;
@@ -590,6 +639,12 @@ private:
     /** 0 = BÀN PAD, 1 = DANH SÁCH CUE QLab — định tuyến Space/P/S (không đè GO/Panic). */
     int activeList = 0;
     SoundPad* lastUiSyncedPlayingPad = nullptr;
+    /** Cache updateMainDeskDisplay — tránh cập nhật MasterDeck mỗi 100 ms khi pad không đổi. */
+    SoundPad* lastDeskDisplayPad = nullptr;
+    juce::Array<bool> cachedSidebarListPlayingActive;
+    int lastCuePlaybackListIndex = -1;
+    int lastCuePlaybackPlayingIdx = -1;
+    int lastCuePlaybackArmedIdx = -1;
     /** Token UI playback — pad user vừa chọn/phát; fade-out pad khác không được bẻ selection. */
     SoundPad* uiPlaybackFocusPad = nullptr;
     /** 1 = Dark, 2 = Light, 3 = Match System */

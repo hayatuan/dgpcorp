@@ -11,11 +11,7 @@ namespace
 {
     juce::String formatCueTimeString (double timeInSeconds)
     {
-        timeInSeconds = juce::jmax (0.0, timeInSeconds);
-        const int mins = static_cast<int> (timeInSeconds) / 60;
-        const int secs = static_cast<int> (timeInSeconds) % 60;
-        const int ms   = static_cast<int> (timeInSeconds * 10.0) % 10;
-        return juce::String::formatted ("%02d:%02d.%d", mins, secs, ms);
+        return showcontrol::bgmList::formatPlaylistTime (timeInSeconds);
     }
 
     bool cueListHasLoadedContent (const juce::Array<CueItem>& cues)
@@ -162,6 +158,26 @@ void CueListBox::mouseDown (const juce::MouseEvent& e)
 {
     if (e.mods.isPopupMenu())
     {
+        const auto rel = e.getEventRelativeTo (this);
+        const int rowUnderMouse = hitRowIndexAt (rel.x, rel.y);
+
+        if (rowUnderMouse >= 0 && rowUnderMouse < owner.cues.size())
+        {
+            const auto selectedRows = getSelectedRows();
+            const bool clickedInsideSelection = selectedRows.contains (rowUnderMouse) && selectedRows.size() > 0;
+
+            // Keep existing multi-selection when right-clicking inside it.
+            // Avoid forwarding to ListBox default popup selection logic.
+            if (clickedInsideSelection)
+            {
+                if (owner.onCueRightClick)
+                    owner.onCueRightClick (rowUnderMouse);
+
+                owner.showTrackContextMenu (rowUnderMouse);
+                return;
+            }
+        }
+
         juce::ListBox::mouseDown (e);
         return;
     }
@@ -170,7 +186,7 @@ void CueListBox::mouseDown (const juce::MouseEvent& e)
     owner.endCueMarquee();
 
     const auto rel = e.getEventRelativeTo (this);
-    const int rowUnderMouse = hitRowIndexAt (rel.x, rel.y);
+    const int rowUnderMouse = getRowContainingPosition (rel.x, rel.y);
 
     // Cụm đã chọn — giữ highlight, chọn trên mouseUp (selectOnMouseUp).
     if (rowUnderMouse >= 0 && rowUnderMouse < owner.cues.size()
@@ -535,9 +551,17 @@ public:
             if (! juce::isPositiveAndBelow (row, owner.cues.size()))
                 return;
 
-            owner.listBox.selectRow (row, false, true);
-            owner.selectedIndex = row;
-            owner.fireSelectionFromListBox();
+            const auto selectedRows = owner.listBox.getSelectedRows();
+            const bool clickedInsideSelection = selectedRows.contains (row) && selectedRows.size() > 0;
+
+            // Right-click on an already-selected row keeps the current multi-selection.
+            // Right-click outside the selection resets to the clicked row.
+            if (! clickedInsideSelection)
+            {
+                owner.listBox.selectRow (row, false, true);
+                owner.selectedIndex = row;
+                owner.fireSelectionFromListBox();
+            }
 
             if (owner.onCueRightClick)
                 owner.onCueRightClick (row);
@@ -650,8 +674,18 @@ void CueListPanel::haltActiveTimers() noexcept
 {
     stopTimer();
 
+    cancelCueRowReorder();
+    clearCueRowReorderJuceDropPending();
+    marqueePrimed = false;
+    marqueeActive = false;
+    marqueeAdditive = false;
+    marqueeBaseSelection.clear();
+
     if (reorderOverlay != nullptr)
+    {
+        reorderOverlay->setBufferedToImage (false);
         reorderOverlay->setVisible (false);
+    }
 }
 
 void CueListPanel::lookAndFeelChanged()
@@ -773,12 +807,15 @@ void CueListPanel::updateListBoxContentIfLaidOut() noexcept
         listBox.updateContent();
 }
 
-void CueListPanel::refreshListBoxData()
+void CueListPanel::refreshListBoxData (bool resetScroll)
 {
     resized();
     updateListBoxContentIfLaidOut();
     syncHeaderToListScrollbar();
-    resetListScrollToTop();
+
+    if (resetScroll)
+        resetListScrollToTop();
+
     listBox.repaint();
     repaint();
 }
@@ -849,9 +886,9 @@ void CueListPanel::applySelectionAnchorAfterRowRemoval (int firstDeletedRow)
     setSelectedIndex (targetRow);
 }
 
-void CueListPanel::updateTableContent()
+void CueListPanel::updateTableContent (bool resetScroll)
 {
-    refreshListBoxData();
+    refreshListBoxData (resetScroll);
 }
 
 void CueListPanel::deleteSelectedCues()
@@ -883,7 +920,7 @@ void CueListPanel::removeSelectedCues()
     for (const int row : rowsDescending)
         removeCueFromDataModelAtIndex (row);
 
-    updateTableContent();
+    updateTableContent (false);
     applySelectionAnchorAfterRowRemoval (lowestDeletedRow);
 
     if (auto* mainComp = findParentComponentOfClass<MainComponent>())
@@ -1200,6 +1237,12 @@ void CueListPanel::paintCueReorderOverlay (juce::Graphics& g) const
 
 bool CueListPanel::keyPressed (const juce::KeyPress& key)
 {
+    if (showcontrol::keyboard::isUndoRedoKeyPress (key))
+    {
+        if (onChainedKeyPressed != nullptr && onChainedKeyPressed (key))
+            return true;
+    }
+
     if (handleTransportKey (key))
         return true;
 
@@ -1530,9 +1573,9 @@ bool CueListPanel::commitTrackRenameFromLabel (int rowIndex)
     }
 
     if (onTrackRenamed)
-        onTrackRenamed (rowIndex, newName);
+        onTrackRenamed (rowIndex, newName, previousName);
 
-    refreshListBoxData();
+    refreshListBoxData (false);
     pendingRenameRowIndex = -1;
     return true;
 }
@@ -2150,22 +2193,11 @@ bool CueListPanel::tryImmediateCueRowDrag (const juce::MouseEvent& e)
     if (e.getDistanceFromDragStart() <= 4)
         return false;
 
-    const auto rel = e.getEventRelativeTo (&listBox);
-    const int startRow = listBox.hitRowIndexAt (rel.getMouseDownX(), rel.getMouseDownY());
-
-    if (startRow < 0 || startRow >= cues.size())
+    // Reorder drag only starts from an already-selected press-lock gesture.
+    // Otherwise dragging should be reserved for marquee selection.
+    if (! cueRowReorderPressLocked)
         return false;
 
-    if (listBox.getSelectedRows().contains (startRow))
-    {
-        triggerCueDragSession (e);
-        return true;
-    }
-
-    // Kịch bản B — kéo dòng chưa chọn: ép chọn ngay rồi bốc nhả tức thì.
-    listBox.selectRow (startRow, false, true);
-    selectedIndex = startRow;
-    fireSelectionFromListBox();
     triggerCueDragSession (e);
     return true;
 }
@@ -2195,7 +2227,7 @@ void CueListPanel::mouseDown (const juce::MouseEvent& e)
         return;
 
     const auto local = listBox.getLocalPoint (e.eventComponent, e.getPosition());
-    const int row = listBox.hitRowIndexAt (local.x, local.y);
+    const int row = listBox.getRowContainingPosition (local.x, local.y);
 
     const auto& selectedRows = listBox.getSelectedRows();
 
@@ -2247,7 +2279,8 @@ void CueListPanel::fireSelectionFromListBox()
     if (onCueSelectionChanged)
         onCueSelectionChanged (selected);
 
-    if (onCueSelected && selectedIndex >= 0)
+    // onCueSelected is a single-target callback. Avoid collapsing multi-selection in MainComponent.
+    if (onCueSelected && selected.size() == 1 && selectedIndex >= 0)
         onCueSelected (selectedIndex);
 }
 
@@ -2373,7 +2406,7 @@ void CueListPanel::itemDropped (const SourceDetails& dragSourceDetails)
     if (reorderOverlay != nullptr && ! cueRowReorderActive && ! marqueeActive)
         reorderOverlay->setVisible (false);
 
-    refreshListBoxData();
+    refreshListBoxData (false);
     listBox.repaint();
     repaint();
 

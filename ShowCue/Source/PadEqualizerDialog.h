@@ -144,6 +144,23 @@ public:
         repaint();
     }
 
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        const int band = hitTestBand (e.position);
+        if (band < 0)
+            return;
+
+        bandGainDb[(size_t) band] = 0.0f;
+        rebuildCoeffCache();
+
+        if (onBandGainFinished)
+            onBandGainFinished (band, 0.0f);
+        else
+            pushGainToAudio (true);
+
+        repaint();
+    }
+
 private:
     static constexpr uint32_t kDragAudioIntervalMs = 45;
 
@@ -383,7 +400,7 @@ public:
 
         addAndMakeVisible (enableToggle);
         enableToggle.setButtonText (showcontrol::localization::tr (u8"Bật EQ"));
-        enableToggle.setTooltip (showcontrol::localization::tr (u8"Bỏ qua (Bypass)"));
+        enableToggle.setTooltip (showcontrol::localization::tr (u8"Bật/tắt EQ cho track này"));
         enableToggle.setToggleState (currentPad != nullptr && currentPad->getDspEqEnabled(),
                                    juce::dontSendNotification);
         enableToggle.onClick = [this] { applyEnableFromUi(); };

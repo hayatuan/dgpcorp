@@ -100,9 +100,9 @@ namespace showcontrol::icons
             "M 12 22s8-4 8-10V5l-8-3l-8 3v7c0 6 8 10 8 10"
             " M 9 12l2 2l4-4";
 
-        /** Fade wedge outline — đường dốc mảnh. */
+        /** Fade-out — dốc xuống phải (volume giảm dần); đồng bộ Inspector + Master Deck. */
         inline constexpr const char* fadeSlope =
-            "M 6 18 L 18 6";
+            "M 6 6 L 18 18";
     }
 
     /** Alias tương thích call-site cũ. */
@@ -302,7 +302,7 @@ namespace showcontrol::icons
 
     inline void paintFadeSlopeIcon (juce::Graphics& g, juce::Rectangle<float> bounds, juce::Colour colour)
     {
-        drawSVGPathIcon (g, "lucide:fade-slope", Lucide::fadeSlope, bounds, colour, kOutlineStroke);
+        drawSVGPathIcon (g, "lucide:fade-out-slope", Lucide::fadeSlope, bounds, colour, kOutlineStroke);
     }
 
     //==========================================================================

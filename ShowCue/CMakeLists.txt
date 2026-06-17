@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # ShowCue — trình phát sự kiện cue-based (JUCE 8)
-project(ShowCue VERSION 0.2.0 LANGUAGES C CXX)
+project(ShowCue VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json for clangd" FORCE)
 
 # Chỉ đường dẫn cho VS Code tìm thấy bộ thư viện JUCE nằm bên cạnh
@@ -12,7 +12,8 @@ add_subdirectory(JUCE)
 # PNG 1024×1024 cho macOS; ICO riêng cho Windows khi cross-build.
 juce_add_gui_app(ShowCue
     PRODUCT_NAME "ShowCue"
-    VERSION 0.2.0
+    VERSION 1.0.0
+    COMPANY_NAME "DGP Corp"
     BUNDLE_ID "com.dgpco.showcue"
     ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.ico"
@@ -57,6 +58,7 @@ target_sources(ShowCue PRIVATE
     Source/HotkeyManager.h
     Source/HotkeyAssignDialog.h
     Source/PadEqualizerDialog.h
+    Source/LoudnessManagerDialog.h
     Source/VideoAudioExtractor.h
     Source/FfmpegSetupDialog.h
     Source/AudioDeviceSettingsPanel.h
@@ -72,6 +74,8 @@ target_sources(ShowCue PRIVATE
     Source/BusMixerPanel.h
     Source/AudioMetadataReader.h
     Source/ShowPadGridMatrix.h
+    Source/ShowLoudnessNormalize.h
+    Source/ShowAudioEditor.h
     Source/ShowCrossComponentDrag.h
     Source/PadPanel.h
     Source/PadPanel.cpp

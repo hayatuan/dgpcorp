@@ -217,6 +217,8 @@ namespace showcontrol::inspector
     inline constexpr float kParamLabelFontSize = 14.0f;
     inline constexpr float kButtonFontSize     = 14.5f;
     inline constexpr float kTrackNameFontSize  = 16.5f;
+    inline constexpr float kTrackNameValueFontSize = 14.5f;
+    inline constexpr float kTimeRemainingFontSize = 34.0f;
 
     inline juce::Font paramLabelFont() noexcept
     {
@@ -231,6 +233,17 @@ namespace showcontrol::inspector
     inline juce::Font trackNameFont() noexcept
     {
         return ShowTheme::fontBold (kTrackNameFontSize);
+    }
+
+    /** Ô giá trị tên track — Roboto plain, canh trái đồng bộ Inspector. */
+    inline juce::Font trackNameValueFont() noexcept
+    {
+        return ShowTheme::font (kTrackNameValueFontSize);
+    }
+
+    inline juce::Font timeRemainingFont() noexcept
+    {
+        return ShowTheme::timerFont (kTimeRemainingFontSize, true);
     }
 }
 
@@ -260,14 +273,36 @@ namespace showcontrol::equalizer
     inline juce::Font hintFont() noexcept      { return ShowTheme::font (kHintFontSize); }
 }
 
-/** Main deck — nút Monitor cạnh đồng hồ. */
+/** Main deck — đồng hồ hệ thống, đếm ngược và nút Monitor. */
 namespace showcontrol::masterDeck
 {
-    inline constexpr float kMonitorButtonFontSize = 15.0f;
+    inline constexpr float kMonitorButtonFontSize   = 15.0f;
+    inline constexpr float kRemainingTimeFontSize   = 46.0f;
+    inline constexpr float kTotalTimeFontSize       = 18.0f;
+    inline constexpr float kSystemTimeFontSize      = 26.0f;
+    inline constexpr int kSystemClockWidth          = 140;
+    inline constexpr int kAdminRowHeight            = 40;
+    inline constexpr int kRemainingTimeBlockHeight  = 58;
+    inline constexpr int kTotalTimeBlockHeight      = 22;
 
     inline juce::Font monitorButtonFont() noexcept
     {
         return ShowTheme::fontBold (kMonitorButtonFontSize);
+    }
+
+    inline juce::Font remainingTimeFont() noexcept
+    {
+        return ShowTheme::timerFont (kRemainingTimeFontSize, true);
+    }
+
+    inline juce::Font totalTimeFont() noexcept
+    {
+        return ShowTheme::timerFont (kTotalTimeFontSize, true);
+    }
+
+    inline juce::Font systemTimeFont() noexcept
+    {
+        return ShowTheme::timerFont (kSystemTimeFontSize, true);
     }
 }
 
@@ -385,8 +420,10 @@ namespace showcontrol::audioSettings
 /** Cột BGM list — header (MainComponent) và dòng (SoundPad) dùng chung bounds. */
 namespace showcontrol::bgmList
 {
-    /** Cỡ chữ thống nhất mọi cột dòng (số thứ tự, tên, thời gian) — Sidebar + Table. */
+    /** Cỡ chữ thống nhất mọi cột dòng (số thứ tự, tên) — Sidebar + Table. */
     inline constexpr float kPlaylistCellFontSize  = 14.5f;
+    /** Monospace tabular — cột CÒN LẠI / ĐÃ CHẠY / THỜI LƯỢNG; cùng cỡ hàng 14.5pt. */
+    inline constexpr float kPlaylistTimerFontSize = kPlaylistCellFontSize;
     inline constexpr float kSidebarHotkeyFontSize = 12.5f;
     /** Chiều cao dòng compact — BGM (SoundPad) và CUE list dùng chung. */
     inline constexpr int kPlaylistRowHeight       = 34;
@@ -395,6 +432,9 @@ namespace showcontrol::bgmList
     inline constexpr int kPlaylistHeaderGap       = 4;
     /** Dải biên dọc mép trái dòng — đồng bộ CUE tag rail / BGM list. */
     inline constexpr int kLeftRailWidth           = 4;
+    /** Lề ngang vùng chọn hàng — tránh bo góc bị viewport cắt (BGM list). */
+    inline constexpr int kPlaylistRowSelectInsetX = 4;
+    inline constexpr int kPlaylistRowSelectInsetY = 2;
 
     inline constexpr int kTimeRemainingWidth      = 140;
     inline constexpr int kTotalDurationWidth      = 130;
@@ -477,12 +517,22 @@ namespace showcontrol::bgmList
         return { panelWidth - kTotalDurationRightOffset, 0, kTotalDurationWidth, height };
     }
 
-    /** Vẽ chữ số thời gian canh giữa tâm cột — BGM + CUE list dùng chung. */
+    /** Vẽ chữ số thời gian canh giữa cột — BGM + CUE list dùng chung. */
     inline void drawPlaylistTimeCell (juce::Graphics& g,
                                       const juce::String& text,
                                       juce::Rectangle<int> columnBounds) noexcept
     {
-        g.drawText (text, columnBounds, juce::Justification::centred, true);
+        g.drawFittedText (text, columnBounds, juce::Justification::centred, 1, 0.92f);
+    }
+
+    /** Định dạng MM:SS.d — đồng bộ BGM (SoundPad) và CUE list. */
+    inline juce::String formatPlaylistTime (double timeInSeconds) noexcept
+    {
+        timeInSeconds = juce::jmax (0.0, timeInSeconds);
+        const int mins = static_cast<int> (timeInSeconds) / 60;
+        const int secs = static_cast<int> (timeInSeconds) % 60;
+        const int ms   = static_cast<int> (timeInSeconds * 10.0) % 10;
+        return juce::String::formatted ("%02d:%02d.%d", mins, secs, ms);
     }
 
     /** Tiêu đề cột playlist — xám đậm (sáng) / bạc (tối). */
@@ -521,10 +571,10 @@ namespace showcontrol::bgmList
         return playlistCellFont();
     }
 
-    /** Cùng cỡ/khối Roboto với tên bài — tránh lệch số nhỏ chữ to. */
+    /** Monospace tabular — cột thời gian playlist (BGM + CUE). */
     inline juce::Font playlistTimerFont (bool bold = false) noexcept
     {
-        return bold ? playlistCellFontBold() : playlistCellFont();
+        return ShowTheme::timerFont (kPlaylistTimerFontSize, bold);
     }
 
     /** Tiêu đề cột playlist — Semi-Bold 15pt đồng bộ hàng con 14.5pt. */
@@ -544,12 +594,11 @@ namespace showcontrol::bgmList
 
     inline PlaylistRowTypography makePlaylistRowTypography() noexcept
     {
-        const auto plain = playlistCellFont();
         return {
             playlistCellFontBold(),
-            plain,
-            plain,
-            plain
+            playlistCellFont(),
+            playlistTimerFont (false),
+            playlistTimerFont (true)
         };
     }
 
@@ -560,7 +609,8 @@ namespace showcontrol::bgmList
     {
         if (isRowSelected)
         {
-            const auto frame = bounds.reduced (2).toFloat();
+            const auto frame = bounds.reduced (kPlaylistRowSelectInsetX,
+                                             kPlaylistRowSelectInsetY).toFloat();
 
             g.setColour (pal.accent.withAlpha (0.14f));
             g.fillRoundedRectangle (frame, 4.0f);

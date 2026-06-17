@@ -3,6 +3,7 @@
 #include "MainComponent.h"
 #include "ShowAboutDialog.h"
 #include "ShowTypography.h"
+#include "ShowLocalization.h"
 
 #if JUCE_MAC
 
@@ -18,7 +19,7 @@ namespace
 
 #if JUCE_MAC
 
-/** Menu bar tối giản — không có tab File/Edit/Settings; menu ShowCue qua extraAppleMenu. */
+/** Menu bar tối giản — Edit (Undo/Redo) + menu ShowCue qua extraAppleMenu. */
 
 class ShowControlMacMenuBar final : public juce::MenuBarModel
 
@@ -26,15 +27,28 @@ class ShowControlMacMenuBar final : public juce::MenuBarModel
 
 public:
 
-    juce::StringArray getMenuBarNames() override { return {}; }
+    explicit ShowControlMacMenuBar (juce::ApplicationCommandManager& managerIn)
+        : commandManager (managerIn)
+    {
+    }
+
+    juce::StringArray getMenuBarNames() override { return { showcontrol::localization::tr (u8"Chỉnh sửa") }; }
 
 
 
-    juce::PopupMenu getMenuForIndex (int /*topLevelMenuIndex*/, const juce::String& /*menuName*/) override
+    juce::PopupMenu getMenuForIndex (int /*topLevelMenuIndex*/, const juce::String& menuName) override
 
     {
 
-        return {};
+        juce::PopupMenu menu;
+
+        if (menuName == showcontrol::localization::tr (u8"Chỉnh sửa"))
+        {
+            menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::undo);
+            menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::redo);
+        }
+
+        return menu;
 
     }
 
@@ -42,8 +56,66 @@ public:
 
     void menuItemSelected (int /*menuItemID*/, int /*topLevelMenuIndex*/) override {}
 
+private:
+    juce::ApplicationCommandManager& commandManager;
+
 };
 
+#endif
+
+#if ! JUCE_MAC
+/** Menu bar desktop (Windows/Linux) — File/Edit/Help ngay trong cửa sổ app. */
+class ShowControlDesktopMenuBar final : public juce::MenuBarModel
+{
+public:
+    explicit ShowControlDesktopMenuBar (juce::ApplicationCommandManager& managerIn)
+        : commandManager (managerIn)
+    {
+    }
+
+    juce::StringArray getMenuBarNames() override
+    {
+        return {
+            showcontrol::localization::tr (u8"Tệp"),
+            showcontrol::localization::tr (u8"Chỉnh sửa"),
+            showcontrol::localization::tr (u8"Trợ giúp")
+        };
+    }
+
+    juce::PopupMenu getMenuForIndex (int /*topLevelMenuIndex*/, const juce::String& menuName) override
+    {
+        juce::PopupMenu menu;
+
+        if (menuName == showcontrol::localization::tr (u8"Tệp"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::openPreferences);
+            menu.addSeparator();
+            menu.addItem (kQuitMenuItemId, showcontrol::localization::tr (u8"Thoát"));
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Chỉnh sửa"))
+        {
+            menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::undo);
+            menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::redo);
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Trợ giúp"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::showAboutDialog);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::checkForUpdates);
+        }
+
+        return menu;
+    }
+
+    void menuItemSelected (int menuItemID, int /*topLevelMenuIndex*/) override
+    {
+        if (menuItemID == kQuitMenuItemId)
+            juce::JUCEApplication::getInstance()->systemRequestedQuit();
+    }
+
+private:
+    static constexpr int kQuitMenuItemId = 9001;
+    juce::ApplicationCommandManager& commandManager;
+};
 #endif
 
 } // namespace
@@ -167,6 +239,10 @@ public:
 
            #endif
 
+           #if ! JUCE_MAC
+            setMenuBar (&desktopMenuBar);
+           #endif
+
 
 
            #if JUCE_IOS || JUCE_ANDROID
@@ -237,6 +313,10 @@ public:
 
             juce::MenuBarModel::setMacMainMenu (nullptr);
 
+           #endif
+
+           #if ! JUCE_MAC
+            setMenuBar (nullptr);
            #endif
 
         }
@@ -315,10 +395,14 @@ public:
 
        #if JUCE_MAC
 
-        ShowControlMacMenuBar macMenuBar;
+        ShowControlMacMenuBar macMenuBar { commandManager };
 
         juce::PopupMenu extraAppleMenu;
 
+       #endif
+
+       #if ! JUCE_MAC
+        ShowControlDesktopMenuBar desktopMenuBar { commandManager };
        #endif
 
 

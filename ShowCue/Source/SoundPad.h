@@ -18,6 +18,7 @@
 #include "ShowLocalization.h"
 #include "ShowWaveformCache.h"
 #include "VideoAudioExtractor.h"
+#include "ShowLoudnessNormalize.h"
 
 namespace showcontrol::audio
 {
@@ -95,26 +96,23 @@ inline void shutdownPool() noexcept
 class VolumeNormalizer
 {
 public:
-    /** useLufs: true → LUFS; false → RMS. Đo trên thread pool, callback luôn trên message thread. */
+    /** Đo đầy đủ trên thread pool — callback luôn trên message thread. */
     void analyzeAudioFile (const juce::File& file,
-                           bool useLufs,
-                           std::function<void (double measured, bool isLufs)> onComplete)
+                           std::function<void (AudioAnalyzer::FileLoudnessAnalysis)> onComplete)
     {
         if (! file.existsAsFile() || ! onComplete)
             return;
 
         isAnalyzing.store (true, std::memory_order_release);
 
-        showcontrol::background::enqueue ([file, useLufs, cb = std::move (onComplete)]() mutable
+        showcontrol::background::enqueue ([file, cb = std::move (onComplete)]() mutable
         {
             auto& localFormatManager = showcontrol::audio::sharedFormatManager();
+            const auto analysis = AudioAnalyzer::analyzeFile (file, localFormatManager);
 
-            const double measured = useLufs ? AudioAnalyzer::calculateFileLUFS (file, localFormatManager)
-                                            : AudioAnalyzer::calculateFileRMS (file, localFormatManager);
-
-            juce::MessageManager::callAsync ([cb = std::move (cb), measured, useLufs]() mutable
+            juce::MessageManager::callAsync ([cb = std::move (cb), analysis]() mutable
             {
-                cb (measured, useLufs);
+                cb (analysis);
             });
         });
     }
@@ -133,6 +131,15 @@ class SoundPad : public juce::Component,
                  private juce::Label::Listener
 {
 public:
+    struct LoadedAudioPayload
+    {
+        juce::File file;
+        std::unique_ptr<juce::AudioFormatReader> reader;
+        double sampleRate = 44100.0;
+        juce::String displayName;
+        AudioMetadata meta;
+    };
+
     /** ~0.74s @ 44.1kHz — đọc đĩa trên TimeSliceThread, không trong audio callback. */
     static constexpr int kReadAheadBufferSamples = 32768;
 
@@ -540,6 +547,7 @@ public:
     }
 
     std::function<void (SoundPad*)> onTrackNameChanged;
+    std::function<void (SoundPad*)> onTrackNameEditBegan;
 
     juce::String getSearchableTokens() const
     {
@@ -607,6 +615,24 @@ public:
             onPlaybackStateChanged();
     }
 
+    /** Sau khi kéo trim xong: đưa playhead về trong vùng IN/OUT nếu đang phát. */
+    void syncPlaybackPositionToTrimRange()
+    {
+        if (! isTransportActive())
+            return;
+
+        const double pos = getPlaybackPosition();
+        const double len = getPlaybackLength();
+        const double effectiveEnd = (trimEnd > 0.0) ? std::min (trimEnd, len) : len;
+
+        if (pos < trimStart)
+            seekTo (trimStart);
+        else if (trimEnd > 0.0 && pos > trimEnd)
+            seekTo (trimEnd);
+        else if (trimEnd <= 0.0 && pos > len)
+            seekTo (len);
+    }
+
     double getEffectiveLength() const
     {
         const double total = getPlaybackLength();
@@ -663,6 +689,55 @@ public:
 
         loadAudioFileInternal (f);
         notifyPlaybackStateChanged();
+    }
+
+    /** Đọc payload trên background thread — dùng sau cắt nhạc để gắn file ngay, không queue load lần 2. */
+    static std::unique_ptr<LoadedAudioPayload> readPayloadFromFile (const juce::File& f)
+    {
+        if (! f.existsAsFile())
+            return {};
+
+        juce::AudioFormatManager localFormatManager;
+        localFormatManager.registerBasicFormats();
+
+        auto payload = std::make_unique<LoadedAudioPayload>();
+        payload->file = f;
+        payload->reader.reset (localFormatManager.createReaderFor (f));
+
+        if (payload->reader == nullptr)
+            return {};
+
+        payload->sampleRate = payload->reader->sampleRate;
+        payload->displayName = VideoAudioExtractor::displayNameFromAudioPath (f);
+        payload->meta = AudioMetadataReader::readFromReader (payload->reader.get(), f);
+        return payload;
+    }
+
+    /** Message thread: gắn file đã đọc sẵn — hủy load async đang chờ, refresh waveform ngay. */
+    void adoptPreloadedAudioPayload (std::unique_ptr<LoadedAudioPayload> payload)
+    {
+        audioLoadGeneration.fetch_add (1, std::memory_order_acq_rel);
+        commitLoadedAudioPayload (std::move (payload));
+        reloadThumbnailImmediately();
+    }
+
+    /** Buộc thumbnail đọc lại file hiện tại — Inspector / Trim Editor cập nhật waveform tức thì. */
+    void reloadThumbnailImmediately()
+    {
+        invalidateWaveformBaseCache();
+
+        if (! musicFile.existsAsFile())
+            return;
+
+        thumbnail.setSource (nullptr);
+        thumbnail.clear();
+        thumbnailLoaded = false;
+        thumbnailPendingFile = musicFile;
+
+        if (thumbnailLoadAllowedNow)
+            ensureThumbnailLoaded();
+
+        repaint();
     }
 
     void setPadIndex (int index)
@@ -1035,6 +1110,7 @@ public:
     void setAutoNormalize (bool enable)
     {
         autoNormalizeEnabled = enable;
+        loudnessSettings.enabled = enable;
         refreshLufsSyncGain();
     }
     bool getAutoNormalize() const { return autoNormalizeEnabled; }
@@ -1042,9 +1118,39 @@ public:
     void setNormalizeUseLufs (bool useLufs) noexcept
     {
         normalizeUseLufs = useLufs;
+        loudnessSettings.mode = useLufs ? showcontrol::loudness::MeasureMode::lufs
+                                        : showcontrol::loudness::MeasureMode::rms;
         refreshLufsSyncGain();
     }
     bool getNormalizeUseLufs() const noexcept { return normalizeUseLufs; }
+
+    void setLoudnessSettings (const showcontrol::loudness::LoudnessSettings& settings) noexcept
+    {
+        loudnessSettings = settings;
+        autoNormalizeEnabled = settings.enabled;
+        normalizeUseLufs = settings.mode == showcontrol::loudness::MeasureMode::lufs;
+        abCompareBypass = settings.abCompareOriginal;
+        refreshLufsSyncGain();
+    }
+
+    const showcontrol::loudness::LoudnessSettings& getLoudnessSettings() const noexcept
+    {
+        return loudnessSettings;
+    }
+
+    const AudioAnalyzer::FileLoudnessAnalysis& getFileLoudnessAnalysis() const noexcept
+    {
+        return fileLoudnessAnalysis;
+    }
+
+    void setAbCompareBypass (bool bypass) noexcept
+    {
+        abCompareBypass = bypass;
+        loudnessSettings.abCompareOriginal = bypass;
+        refreshLufsSyncGain();
+    }
+
+    bool isAbCompareBypass() const noexcept { return abCompareBypass; }
 
     // ── DSP: EQ 6-band (JUCE) + LUFS sync — UI/message thread cập nhật coeffs; audio chỉ process
     void setDspEqEnabled (bool on) noexcept
@@ -1120,6 +1226,10 @@ public:
         float  outputGain = 1.0f;
         bool   autoNormalize = true;
         bool   normalizeUseLufs = false;
+        int    normalizePreset = (int) showcontrol::loudness::Preset::liveShow;
+        int    normalizeProfile = (int) showcontrol::loudness::ContentProfile::general;
+        bool   normalizeSafeMode = true;
+        double normalizeCustomTargetLufs = -16.0;
         int    outputBus = 0;   // Bus routing index cho MultiOutputAudioCallback
         AudioMetadata cachedMeta;   // Restore nhanh không cần đọc lại file
         double fadeInMs  = 0.0;     // 0 = không fade in khi phát
@@ -1273,22 +1383,18 @@ public:
 
     float getNormalizedGain() const
     {
+        if (abCompareBypass)
+            return 1.0f;
+
         if (! hasValidLoudnessMeasurement())
             return 1.0f;
 
-        return normalizeUseLufs ? AudioAnalyzer::getGainMultiplierFromLUFS (measuredLoudness)
-                                 : AudioAnalyzer::getGainMultiplier (measuredLoudness);
+        return showcontrol::loudness::computeSafeGain (fileLoudnessAnalysis, loudnessSettings);
     }
 
     bool hasValidLoudnessMeasurement() const noexcept
     {
-        if (! hasFile)
-            return false;
-
-        if (normalizeUseLufs)
-            return measuredLoudness <= -0.01;
-
-        return measuredLoudness > AudioAnalyzer::MIN_RMS_THRESHOLD;
+        return fileLoudnessAnalysis.valid;
     }
 
     /** Ghi gain chuẩn hoá vào output fader + mixer (RT ramp 20 ms, không pop). */
@@ -1316,20 +1422,21 @@ public:
         if (! autoNormalizeEnabled || ! hasFile)
             return {};
 
+        if (! hasValidLoudnessMeasurement())
+            return showcontrol::localization::tr (u8"Chưa đo");
+
         const auto gainStr = juce::String (getNormalizedGain(), 2);
+        juce::String text;
 
-        if (normalizeUseLufs)
-        {
-            if (measuredLoudness < -0.01)
-                return AudioAnalyzer::formatLUFSValue (measuredLoudness) + " · Gain " + gainStr + "x";
+        if (loudnessSettings.mode == showcontrol::loudness::MeasureMode::lufs)
+            text = AudioAnalyzer::formatLUFSValue (fileLoudnessAnalysis.integratedLufs);
+        else
+            text = juce::String::fromUTF8 (u8"RMS ") + juce::String (fileLoudnessAnalysis.rms, 4);
 
-            return juce::String::fromUTF8 (u8"LUFS: tín hiệu quá nhỏ · Gain ") + gainStr + "x";
-        }
-
-        if (measuredLoudness > AudioAnalyzer::MIN_RMS_THRESHOLD)
-            return juce::String::fromUTF8 (u8"RMS ") + juce::String (measuredLoudness, 4) + " · Gain " + gainStr + "x";
-
-        return juce::String::fromUTF8 (u8"RMS: tín hiệu quá nhỏ · Gain ") + gainStr + "x";
+        text += showcontrol::localization::tr (u8" · Peak ")
+              + juce::String (fileLoudnessAnalysis.truePeakDbfs, 1) + " dBFS";
+        text += showcontrol::localization::tr (u8" · Gain ") + gainStr + "x";
+        return text;
     }
 
     juce::String getTimeRemainingString()
@@ -1343,11 +1450,7 @@ public:
     }
 
     juce::String formatTimeString (double timeInSeconds) {
-        timeInSeconds = std::max (0.0, timeInSeconds);
-        int mins = static_cast<int> (timeInSeconds) / 60;
-        int secs = static_cast<int> (timeInSeconds) % 60;
-        int ms   = static_cast<int> (timeInSeconds * 10) % 10; 
-        return juce::String::formatted ("%02d:%02d.%d", mins, secs, ms);
+        return showcontrol::bgmList::formatPlaylistTime (timeInSeconds);
     }
 
     bool ownsPlaybackUiUpdates() const noexcept
@@ -1699,7 +1802,7 @@ public:
                 g.setColour (pal.textSecondary);
             }
 
-            g.setFont (paintResources.listTimerBold);
+            g.setFont (paintResources.listTimer);
             showcontrol::bgmList::drawPlaylistTimeCell (g, formatTimeString (remainingTime),
                                                         paintResources.listRemainingRect);
 
@@ -1766,14 +1869,6 @@ private:
     AudioMetadata cachedMeta;
     double fadeInMs  = 0.0;
     double fadeOutMs = 0.0;
-    struct LoadedAudioPayload
-    {
-        juce::File file;
-        std::unique_ptr<juce::AudioFormatReader> reader;
-        double sampleRate = 44100.0;
-        juce::String displayName;
-        AudioMetadata meta;
-    };
 
     juce::AudioFormatManager& formatManager;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
@@ -1782,6 +1877,9 @@ private:
     juce::AudioThumbnail thumbnail;
     VolumeNormalizer normalizer;
     double measuredLoudness = 0.0;
+    AudioAnalyzer::FileLoudnessAnalysis fileLoudnessAnalysis;
+    showcontrol::loudness::LoudnessSettings loudnessSettings;
+    bool abCompareBypass = false;
     bool autoNormalizeEnabled = true;
     bool normalizeUseLufs = false;
     uint32_t lastTrackFinishedGen = 0;
@@ -2001,6 +2099,14 @@ private:
         setTrimEnd (pendingProjectState.trimEnd);
         setAutoNormalize (pendingProjectState.autoNormalize);
         setNormalizeUseLufs (pendingProjectState.normalizeUseLufs);
+        loudnessSettings.preset = (showcontrol::loudness::Preset) juce::jlimit (0, 3, pendingProjectState.normalizePreset);
+        loudnessSettings.profile = (showcontrol::loudness::ContentProfile) juce::jlimit (0, 4, pendingProjectState.normalizeProfile);
+        loudnessSettings.safeMode = pendingProjectState.normalizeSafeMode;
+        loudnessSettings.customTargetLufs = pendingProjectState.normalizeCustomTargetLufs;
+        loudnessSettings.enabled = pendingProjectState.autoNormalize;
+        loudnessSettings.mode = pendingProjectState.normalizeUseLufs
+                                    ? showcontrol::loudness::MeasureMode::lufs
+                                    : showcontrol::loudness::MeasureMode::rms;
 
         if (! pendingProjectState.autoNormalize)
             setOutputGain (pendingProjectState.outputGain);
@@ -2177,6 +2283,9 @@ private:
         if (label != &trackNameLabel)
             return;
 
+        if (onTrackNameEditBegan)
+            onTrackNameEditBegan (this);
+
         ShowControlLookAndFeel::applyInlineListNameEditorStyle (editor, isDarkMode, isSelectedRowState);
 
         if (isRenderAsGridMode)
@@ -2253,10 +2362,10 @@ private:
         const auto fileToAnalyze = pendingNormalizationFile;
         juce::Component::SafePointer<SoundPad> safePad (this);
 
-        normalizer.analyzeAudioFile (fileToAnalyze, normalizeUseLufs,
-            [safePad, fileToAnalyze] (double measured, bool isLufs)
+        normalizer.analyzeAudioFile (fileToAnalyze,
+            [safePad, fileToAnalyze] (AudioAnalyzer::FileLoudnessAnalysis analysis)
             {
-                dispatchNormalizationComplete (safePad, fileToAnalyze, measured, isLufs);
+                dispatchNormalizationComplete (safePad, fileToAnalyze, analysis);
             });
     }
 
@@ -2432,11 +2541,8 @@ private:
 
     static void dispatchNormalizationComplete (juce::Component::SafePointer<SoundPad> safePad,
                                                const juce::File& fileToAnalyze,
-                                               double measured,
-                                               bool isLufs) noexcept
+                                               const AudioAnalyzer::FileLoudnessAnalysis& analysis) noexcept
     {
-        juce::ignoreUnused (isLufs);
-
         if (safePad == nullptr)
             return;
 
@@ -2445,7 +2551,10 @@ private:
         if (fileToAnalyze != safePad->musicFile)
             return;
 
-        safePad->measuredLoudness = measured;
+        safePad->fileLoudnessAnalysis = analysis;
+        safePad->measuredLoudness = analysis.integratedLufs < -0.01
+                                        ? analysis.integratedLufs
+                                        : analysis.rms;
 
         if (safePad->autoNormalizeEnabled)
         {

@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <memory>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -63,15 +64,26 @@ public:
 
     void setLevels (float left, float right)
     {
-        const float peak = juce::jmax (left, right);
-        const float attackCoeff = 0.35f;
-        currentPeak = juce::jmax (peak, currentPeak * attackCoeff);
+        currentLeft  = juce::jmax (0.0f, left);
+        currentRight = juce::jmax (0.0f, right);
+        peakHoldLeft  = currentLeft;
+        peakHoldRight = currentRight;
+
+        if (left >= 1.0f)
+            clipFramesLeft = 14;
+        if (right >= 1.0f)
+            clipFramesRight = 14;
+
         repaint();
     }
 
     void timerCallback() override
     {
-        currentPeak *= 0.88f;
+        if (clipFramesLeft > 0)
+            --clipFramesLeft;
+        if (clipFramesRight > 0)
+            --clipFramesRight;
+
         repaint();
     }
 
@@ -94,29 +106,104 @@ public:
         g.setColour (laf.findColour (juce::ListBox::outlineColourId));
         g.drawRoundedRectangle (b, 4.0f, 1.0f);
 
-        constexpr float kTrackH = 12.0f;
-        auto track = b.reduced (3.0f, 0.0f).withSizeKeepingCentre (b.getWidth() - 6.0f, kTrackH);
-        g.setColour (src.findColour (MasterDeckComponent::meterTrackColourId));
-        g.fillRoundedRectangle (track, 2.0f);
+        auto content = b.reduced (4.0f, 3.0f);
+        auto labelCol = content.removeFromLeft (12.0f);
+        auto meterArea = content;
 
-        const float level = juce::jlimit (0.0f, 1.0f, currentPeak);
-        if (level > 0.001f)
-        {
-            auto fill = track.withWidth (track.getWidth() * level);
-            const auto low  = src.findColour (MasterDeckComponent::meterFillLowColourId);
-            const auto mid  = src.findColour (MasterDeckComponent::meterFillMidColourId);
-            const auto high = src.findColour (MasterDeckComponent::meterFillHighColourId);
-            juce::Colour fillCol = (level < 0.72f)
-                ? low.interpolatedWith (mid, level / 0.72f)
-                : mid.interpolatedWith (high, juce::jlimit (0.0f, 1.0f, (level - 0.72f) / 0.28f));
-            g.setColour (fillCol.withAlpha (0.92f));
-            g.fillRoundedRectangle (fill, 2.0f);
-        }
+        constexpr float kRowGap = 2.0f;
+        const float rowH = juce::jmax (4.0f, (meterArea.getHeight() - kRowGap) * 0.5f);
+        auto leftTrack  = meterArea.removeFromTop (rowH);
+        meterArea.removeFromTop (kRowGap);
+        auto rightTrack = meterArea.removeFromTop (rowH);
+
+        const auto low   = src.findColour (MasterDeckComponent::meterFillLowColourId);
+        const auto mid   = src.findColour (MasterDeckComponent::meterFillMidColourId);
+        const auto high  = src.findColour (MasterDeckComponent::meterFillHighColourId);
+        const auto track = src.findColour (MasterDeckComponent::meterTrackColourId);
+        const auto label = src.findColour (MasterDeckComponent::standbyTextColourId);
+
+        g.setColour (label);
+        g.setFont (ShowTheme::fontBold (9.0f));
+        g.drawText ("L", labelCol.removeFromTop ((int) rowH).toNearestInt(), juce::Justification::centred);
+        g.drawText ("R", labelCol.removeFromTop ((int) kRowGap + (int) rowH).toNearestInt(), juce::Justification::centred);
+
+        paintStereoTrack (g, leftTrack, currentLeft, peakHoldLeft, clipFramesLeft > 0, track, low, mid, high);
+        paintStereoTrack (g, rightTrack, currentRight, peakHoldRight, clipFramesRight > 0, track, low, mid, high);
+
+        paintDbGuide (g, leftTrack.getX(), rightTrack.getBottom(), leftTrack.getWidth(), label.withAlpha (0.28f));
     }
 
 private:
+    static float normaliseDb (float linear) noexcept
+    {
+        const float safe = juce::jmax (0.0001f, linear);
+        const float db = 20.0f * std::log10 (safe);
+        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
+    }
+
+    static juce::Colour levelColour (float norm, juce::Colour low, juce::Colour mid, juce::Colour high) noexcept
+    {
+        if (norm < 0.72f)
+            return low.interpolatedWith (mid, norm / 0.72f);
+
+        return mid.interpolatedWith (high, juce::jlimit (0.0f, 1.0f, (norm - 0.72f) / 0.28f));
+    }
+
+    static void paintDbGuide (juce::Graphics& g, float x, float yBottom, float width, juce::Colour guide) 
+    {
+        const float marks[] = { 0.70f, 0.90f, 1.0f }; // ~-18dB, -6dB, 0dB
+        g.setColour (guide);
+        for (float m : marks)
+        {
+            const float xPos = x + width * m;
+            g.drawVerticalLine ((int) std::round (xPos), yBottom - 16.0f, yBottom);
+        }
+    }
+
+    static void paintStereoTrack (juce::Graphics& g,
+                                  juce::Rectangle<float> trackRect,
+                                  float currentLevel,
+                                  float holdLevel,
+                                  bool clip,
+                                  juce::Colour trackColour,
+                                  juce::Colour low,
+                                  juce::Colour mid,
+                                  juce::Colour high)
+    {
+        g.setColour (trackColour);
+        g.fillRoundedRectangle (trackRect, 1.6f);
+
+        const float norm = normaliseDb (currentLevel);
+        if (norm > 0.001f)
+        {
+            auto fill = trackRect.withWidth (trackRect.getWidth() * norm);
+            g.setColour (levelColour (norm, low, mid, high).withAlpha (0.94f));
+            g.fillRoundedRectangle (fill, 1.6f);
+        }
+
+        const float holdNorm = normaliseDb (holdLevel);
+        if (holdNorm > 0.02f)
+        {
+            const float holdX = trackRect.getX() + trackRect.getWidth() * holdNorm;
+            g.setColour (juce::Colours::white.withAlpha (0.78f));
+            g.drawVerticalLine ((int) std::round (holdX), trackRect.getY() + 0.5f, trackRect.getBottom() - 0.5f);
+        }
+
+        if (clip)
+        {
+            auto clipArea = trackRect.removeFromRight (juce::jmax (4.0f, trackRect.getWidth() * 0.035f));
+            g.setColour (juce::Colour (0xffff3b30).withAlpha (0.95f));
+            g.fillRoundedRectangle (clipArea, 1.2f);
+        }
+    }
+
     juce::Component* colourHost = nullptr;
-    float currentPeak = 0.0f;
+    float currentLeft = 0.0f;
+    float currentRight = 0.0f;
+    float peakHoldLeft = 0.0f;
+    float peakHoldRight = 0.0f;
+    int clipFramesLeft = 0;
+    int clipFramesRight = 0;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HorizontalPeakMeter)
 };
 
@@ -308,14 +395,16 @@ public:
     {
         addAndMakeVisible (remainingTimeLabel);
         remainingTimeLabel.setText ("00:00.0", juce::dontSendNotification);
-        remainingTimeLabel.setFont (ShowTheme::timerFont (54.0f, true));
+        remainingTimeLabel.setFont (showcontrol::masterDeck::remainingTimeFont());
+        remainingTimeLabel.setMinimumHorizontalScale (0.88f);
         remainingTimeLabel.setJustificationType (juce::Justification::centred);
         remainingTimeLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         remainingTimeLabel.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
 
         addAndMakeVisible (totalTimeLabel);
         totalTimeLabel.setText ("00:00.0", juce::dontSendNotification);
-        totalTimeLabel.setFont (ShowTheme::timerFont (16.0f, true));
+        totalTimeLabel.setFont (showcontrol::masterDeck::totalTimeFont());
+        totalTimeLabel.setMinimumHorizontalScale (1.0f);
         totalTimeLabel.setJustificationType (juce::Justification::centred);
         totalTimeLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         totalTimeLabel.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
@@ -351,7 +440,8 @@ public:
 
         addAndMakeVisible (systemTimeLabel);
         systemTimeLabel.setText ("00:00:00", juce::dontSendNotification);
-        systemTimeLabel.setFont (ShowTheme::timerFont (22.0f, true));
+        systemTimeLabel.setFont (showcontrol::masterDeck::systemTimeFont());
+        systemTimeLabel.setMinimumHorizontalScale (1.0f);
         systemTimeLabel.setJustificationType (juce::Justification::centredRight);
         systemTimeLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         systemTimeLabel.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
@@ -564,9 +654,9 @@ public:
 
     void refreshTypography()
     {
-        remainingTimeLabel.setFont (ShowTheme::timerFont (54.0f, true));
-        totalTimeLabel.setFont (ShowTheme::timerFont (16.0f, true));
-        systemTimeLabel.setFont (ShowTheme::timerFont (22.0f, true));
+        remainingTimeLabel.setFont (showcontrol::masterDeck::remainingTimeFont());
+        totalTimeLabel.setFont (showcontrol::masterDeck::totalTimeFont());
+        systemTimeLabel.setFont (showcontrol::masterDeck::systemTimeFont());
     }
 
     void refreshLocalizedText()
@@ -796,10 +886,15 @@ public:
             activePad->getTrimmedDisplayRange (tStart, tEnd);
             const double effectiveLen = juce::jmax (0.0, tEnd - tStart);
 
-            juce::Colour waveInk = pal.waveformFill.withAlpha (0.85f);
+            juce::Colour waveInk = pal.waveformFill.withAlpha (0.62f);
+            juce::Colour playedInk = findColour (MasterDeckComponent::waveformPlayedColourId).withAlpha (0.96f);
 
             if (! showcontrol::colours::isDefaultTagColour (activePad->getTagColour()))
-                waveInk = activePad->getTagColour().withAlpha (0.85f);
+            {
+                const auto tag = activePad->getTagColour();
+                waveInk = tag.interpolatedWith (pal.waveformFill, 0.55f).darker (0.34f).withAlpha (0.58f);
+                playedInk = tag.brighter (0.24f).withAlpha (0.97f);
+            }
 
             g.setColour (waveInk);
             thumb.drawChannel (g, waveBounds.reduced (2), tStart, tEnd, 0, 1.0f);
@@ -818,7 +913,7 @@ public:
                 {
                     g.saveState();
                     g.reduceClipRegion (playedRect);
-                    g.setColour (findColour (MasterDeckComponent::waveformPlayedColourId));
+                    g.setColour (playedInk);
                     thumb.drawChannel (g, waveBounds.reduced (2), tStart, tEnd, 0, 1.0f);
                     g.restoreState();
                 }
@@ -829,18 +924,28 @@ public:
                 const auto waveArea = waveBounds.reduced (2).toFloat();
                 const float playheadX = waveArea.getX() + waveArea.getWidth() * progress;
 
+                g.saveState();
+                g.reduceClipRegion (waveBounds);
+
                 if (progress > 0.0f)
                 {
-                    g.setColour (juce::Colours::white.withAlpha (0.06f));
+                    g.setColour (juce::Colours::white.withAlpha (0.12f));
                     g.fillRect (waveArea.withWidth (playheadX - waveArea.getX()));
                 }
 
-                g.setColour (findColour (MasterDeckComponent::playheadColourId));
+                g.setColour (juce::Colours::white.withAlpha (0.94f));
                 showcontrol::gfx::safeDrawVerticalLine (g, (int) std::round (playheadX),
                                                         waveArea.getY(),
                                                         waveArea.getBottom());
 
-                g.fillEllipse (playheadX - 3.0f, waveArea.getY() - 3.0f, 6.0f, 6.0f);
+                // Giữ playhead nằm trong waveform để tránh ghost khi repaint vùng hẹp.
+                const float dotR = 2.75f;
+                const float dotY = waveArea.getY() + 2.0f;
+                g.fillEllipse (playheadX - dotR, dotY, dotR * 2.0f, dotR * 2.0f);
+                g.setColour (playedInk.withAlpha (0.95f));
+                g.drawEllipse (playheadX - dotR - 1.0f, dotY - 1.0f, dotR * 2.0f + 2.0f, dotR * 2.0f + 2.0f, 1.0f);
+
+                g.restoreState();
             }
 
             if (activePad->isLooping())
@@ -868,8 +973,9 @@ public:
 
         leftCol.removeFromTop (34);
         auto timeArea = leftCol.reduced (8, 4);
-        remainingTimeLabel.setBounds (timeArea.removeFromTop (juce::jmin (58, timeArea.getHeight() * 3 / 5)));
-        totalTimeLabel.setBounds (timeArea.removeFromTop (22));
+        remainingTimeLabel.setBounds (timeArea.removeFromTop (juce::jmin (showcontrol::masterDeck::kRemainingTimeBlockHeight,
+                                                                          timeArea.getHeight() * 3 / 5)));
+        totalTimeLabel.setBounds (timeArea.removeFromTop (showcontrol::masterDeck::kTotalTimeBlockHeight));
         trackMetaLabel.setBounds (0, 0, 0, 0);
         trackMetaLabel.setVisible (false);
 
@@ -880,16 +986,16 @@ public:
 
     void layoutTransportAndVolume()
     {
-        constexpr int kMeterH      = 14;
+        constexpr int kMeterH      = 22;
         constexpr int kMeterGap      = 7;
         constexpr int kBtnGap        = 6;
         constexpr int kBtnH          = 30;
         constexpr int kBgmRowGap     = 4;
-        constexpr int kAdminRowH     = 35;
+        constexpr int kAdminRowH     = showcontrol::masterDeck::kAdminRowHeight;
         constexpr int kAdminGap      = 6;
         constexpr int kAudioBtnW     = 34;
         constexpr int kMonitorBtnW   = 92;
-        constexpr int kClockW        = 120;
+        constexpr int kClockW        = showcontrol::masterDeck::kSystemClockWidth;
         constexpr int kVolValueH     = 14;
         constexpr int kVolLabelH     = 12;
         constexpr int kVolPad        = 3;

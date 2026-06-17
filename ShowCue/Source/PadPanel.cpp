@@ -770,6 +770,12 @@ bool PadPanel::isSearchWindowFocused() const noexcept
 
 bool PadPanel::keyPressed (const juce::KeyPress& key)
 {
+    if (showcontrol::keyboard::isUndoRedoKeyPress (key))
+    {
+        if (onChainedKeyPressed != nullptr && onChainedKeyPressed (key))
+            return true;
+    }
+
     if (isSearchWindowFocused())
         return false;
 
@@ -810,17 +816,126 @@ bool PadPanel::keyPressed (const juce::KeyPress& key)
         }
     }
 
+    if (currentlyFocusedPad == nullptr)
+    {
+        // Nếu chưa có focus/selection (vừa chuyển view hoặc vừa load list),
+        // chọn PAD hợp lệ đầu tiên để mũi tên bắt đầu hoạt động ngay.
+        SoundPad* first = nullptr;
+
+        for (auto* pad : *pads)
+        {
+            if (pad != nullptr && pad->occupiesCueGridSlot())
+            {
+                first = pad;
+                break;
+            }
+        }
+
+        if (first != nullptr)
+        {
+            first->grabKeyboardFocus();
+
+            if (onGridFocusPadChanged != nullptr)
+                onGridFocusPadChanged (first);
+
+            first->repaint();
+        }
+
+        return (first != nullptr);
+    }
+
     if (currentlyFocusedPad != nullptr)
     {
         const int curRow = currentlyFocusedPad->getGridRow();
         const int curCol = currentlyFocusedPad->getGridCol();
+
+        // For arrow navigation: walk the grid cell-by-cell in the pressed direction.
+        // This skips empty cells and avoids diagonal "jumping".
+        if (arrowCode == juce::KeyPress::rightKey
+            || arrowCode == juce::KeyPress::leftKey
+            || arrowCode == juce::KeyPress::upKey
+            || arrowCode == juce::KeyPress::downKey)
+        {
+            SoundPad* occupancy[showcontrol::padgrid::kRows][showcontrol::padgrid::kCols] = {};
+
+            for (auto* pad : *pads)
+            {
+                if (pad == nullptr || ! pad->occupiesCueGridSlot())
+                    continue;
+
+                const int r = pad->getGridRow();
+                const int c = pad->getGridCol();
+
+                if (showcontrol::padgrid::isValidGridCell (r, c))
+                    occupancy[r][c] = pad;
+            }
+
+            SoundPad* target = nullptr;
+
+            if (arrowCode == juce::KeyPress::rightKey)
+            {
+                for (int c = curCol + 1; c < showcontrol::padgrid::kCols && target == nullptr; ++c)
+                    target = occupancy[curRow][c];
+
+                for (int r = curRow + 1; r < showcontrol::padgrid::kRows && target == nullptr; ++r)
+                {
+                    for (int c = 0; c < showcontrol::padgrid::kCols && target == nullptr; ++c)
+                        target = occupancy[r][c];
+                }
+            }
+            else if (arrowCode == juce::KeyPress::leftKey)
+            {
+                for (int c = curCol - 1; c >= 0 && target == nullptr; --c)
+                    target = occupancy[curRow][c];
+
+                for (int r = curRow - 1; r >= 0 && target == nullptr; --r)
+                {
+                    for (int c = showcontrol::padgrid::kCols - 1; c >= 0 && target == nullptr; --c)
+                        target = occupancy[r][c];
+                }
+            }
+            else if (arrowCode == juce::KeyPress::downKey)
+            {
+                for (int r = curRow + 1; r < showcontrol::padgrid::kRows && target == nullptr; ++r)
+                    target = occupancy[r][curCol];
+
+                for (int c = curCol + 1; c < showcontrol::padgrid::kCols && target == nullptr; ++c)
+                {
+                    for (int r = 0; r < showcontrol::padgrid::kRows && target == nullptr; ++r)
+                        target = occupancy[r][c];
+                }
+            }
+            else // upKey
+            {
+                for (int r = curRow - 1; r >= 0 && target == nullptr; --r)
+                    target = occupancy[r][curCol];
+
+                for (int c = curCol - 1; c >= 0 && target == nullptr; --c)
+                {
+                    for (int r = showcontrol::padgrid::kRows - 1; r >= 0 && target == nullptr; --r)
+                        target = occupancy[r][c];
+                }
+            }
+
+            if (target != nullptr && target != currentlyFocusedPad)
+            {
+                currentlyFocusedPad->repaint();
+                target->grabKeyboardFocus();
+
+                if (onGridFocusPadChanged != nullptr)
+                    onGridFocusPadChanged (target);
+
+                target->repaint();
+                return true;
+            }
+        }
 
         SoundPad* bestTargetPad = nullptr;
         float minScore = std::numeric_limits<float>::max();
 
         for (auto* pad : *pads)
         {
-            if (pad == nullptr || pad == currentlyFocusedPad || ! pad->hasAudioFile())
+            if (pad == nullptr || pad == currentlyFocusedPad || ! pad->occupiesCueGridSlot())
                 continue;
 
             const int pRow = pad->getGridRow();

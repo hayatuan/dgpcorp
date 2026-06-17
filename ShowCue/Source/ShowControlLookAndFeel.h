@@ -70,6 +70,9 @@ public:
     juce::Font getPopupMenuFont() override;
 
     juce::Font getLabelFont (juce::Label&) override;
+
+    /** Đồng hồ / đếm ngược: drawText cố định — không shrink qua drawFittedText. */
+    void drawLabel (juce::Graphics& g, juce::Label& label) override;
     juce::Font getComboBoxFont (juce::ComboBox&) override;
     juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override;
     juce::Font getAlertWindowTitleFont() override;

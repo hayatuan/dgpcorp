@@ -75,7 +75,8 @@ public:
     std::function<void(int)>                         onCueListPlay;
     std::function<void(int)>                         onCueListPause;
     std::function<void(int)>                         onCueListStop;
-    std::function<void(int, const juce::String&)>    onTrackRenamed;
+    std::function<void(int, const juce::String&, const juce::String&)> onTrackRenamed;
+    std::function<bool(const juce::KeyPress&)>       onChainedKeyPressed;
 
     enum class TrackMenuId : int
     {
@@ -114,7 +115,7 @@ public:
     void syncCueTagColourAt (int index, juce::Colour colour);
 
     /** Ép ListBox đọc lại mảng cues và vẽ lại tức thì (live rename). */
-    void refreshListBoxData();
+    void refreshListBoxData (bool resetScroll = true);
 
     /** Vẽ lại một dòng (loop icon, highlight) — không repaint toàn list. */
     void repaintCueRow (int rowIndex);
@@ -125,7 +126,7 @@ public:
     void deleteSelectedCues();
     /** Xóa hàng loạt — duyệt index giảm dần, một giao dịch undo (BGM/CUE qua MainComponent). */
     void removeSelectedCues();
-    void updateTableContent();
+    void updateTableContent (bool resetScroll = true);
 
     juce::Array<int> getSelectedRowIndices() const;
 

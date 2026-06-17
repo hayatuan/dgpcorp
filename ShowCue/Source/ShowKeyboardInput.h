@@ -122,6 +122,27 @@ inline int resolveTelexAwareTopRowKeyCode (const juce::KeyPress& key) noexcept
     return 0;
 }
 
+inline bool isUndoKeyPress (const juce::KeyPress& key) noexcept
+{
+    const int code = physicalKeyCode (key);
+    return key.getModifiers().isCommandDown()
+        && ! key.getModifiers().isShiftDown()
+        && (code == (int) 'Z' || code == (int) 'z');
+}
+
+inline bool isRedoKeyPress (const juce::KeyPress& key) noexcept
+{
+    const int code = physicalKeyCode (key);
+    return key.getModifiers().isCommandDown()
+        && key.getModifiers().isShiftDown()
+        && (code == (int) 'Z' || code == (int) 'z');
+}
+
+inline bool isUndoRedoKeyPress (const juce::KeyPress& key) noexcept
+{
+    return isUndoKeyPress (key) || isRedoKeyPress (key);
+}
+
 inline bool hasSystemModifierKeysDown() noexcept
 {
     const auto mods = juce::ModifierKeys::getCurrentModifiers();

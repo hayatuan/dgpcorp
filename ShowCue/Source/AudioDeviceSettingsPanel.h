@@ -134,6 +134,21 @@ public:
                                                  placeholderCol);
     }
 
+    /** Cập nhật placeholder + tên mặc định khi đổi ngôn ngữ (giữ tên tùy chỉnh). */
+    void refreshLocalizedDefaultBusTexts()
+    {
+        for (int i = 0; i < kNumBuses; ++i)
+        {
+            const auto current = nameEdits[i].getText().trim();
+
+            if (showcontrol::routing::isDefaultBusName (i, current))
+                nameEdits[i].setText ({}, juce::dontSendNotification);
+        }
+
+        refreshLocalizedPlaceholders();
+        applyRowTheme();
+    }
+
     void initialiseRows (const juce::StringArray& busNames)
     {
         for (int i = 0; i < kNumBuses; ++i)
@@ -194,11 +209,7 @@ public:
     void applyRowTheme()
     {
         const auto pal = ShowTheme::get (isDark);
-        const auto& laf = resolveLookAndFeel();
-
-        const auto labelCol = preferencesChrome
-            ? laf.findColour (ShowControlLookAndFeel::textSecondaryColourId)
-            : pal.textSecondary;
+        const auto labelCol = pal.textSecondary;
 
         for (int i = 0; i < kNumBuses; ++i)
             indexLabels[i].setColour (juce::Label::textColourId, labelCol);
@@ -211,15 +222,11 @@ public:
         const auto pal = ShowTheme::get (isDark);
 
         const auto textColour      = lf.findColour (juce::TextEditor::textColourId);
-        const auto lafBgColour     = lf.findColour (juce::TextEditor::backgroundColourId);
         const auto highlightColour = lf.findColour (juce::TextEditor::highlightColourId);
         const auto outlineColour   = lf.findColour (juce::TextEditor::outlineColourId);
         const auto focusedOutline  = lf.findColour (juce::TextEditor::focusedOutlineColourId);
         const auto caretColour     = lf.findColour (juce::CaretComponent::caretColourId);
         const auto placeholderCol  = textColour.withAlpha (0.40f);
-
-        const auto chromeRowA = lf.findColour (juce::ListBox::backgroundColourId);
-        const auto chromeRowB = lf.findColour (ShowControlLookAndFeel::panelBackgroundColourId).brighter (0.04f);
 
         BusNameTextEditor* editors[kNumBuses] = {
             &nameEdits[0], &nameEdits[1], &nameEdits[2],
@@ -240,10 +247,8 @@ public:
             editor->removeColour (juce::TextEditor::highlightedTextColourId);
             editor->removeColour (juce::CaretComponent::caretColourId);
 
-            const auto rowBg = preferencesChrome
-                ? (((i & 1) == 0) ? chromeRowA : chromeRowB)
-                : (((i & 1) == 0) ? pal.listRowBg : pal.panelElevated);
-            const auto bgColour = preferencesChrome ? rowBg : lafBgColour;
+            const auto rowBg = ((i & 1) == 0) ? pal.listRowBg : pal.panelElevated;
+            const auto bgColour = rowBg;
 
             editor->setColour (juce::TextEditor::textColourId, textColour);
             editor->setColour (juce::TextEditor::backgroundColourId, bgColour);
@@ -284,13 +289,10 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        const auto& laf = resolveLookAndFeel();
         syncDarkModeFromLookAndFeel();
         const auto pal = ShowTheme::get (isDark);
-        const auto rowA = preferencesChrome ? laf.findColour (juce::ListBox::backgroundColourId) : pal.listRowBg;
-        const auto rowB = preferencesChrome
-            ? laf.findColour (ShowControlLookAndFeel::panelBackgroundColourId).brighter (0.04f)
-            : pal.panelElevated;
+        const auto rowA = pal.listRowBg;
+        const auto rowB = pal.panelElevated;
 
         for (int i = 0; i < kNumBuses; ++i)
         {
@@ -425,6 +427,13 @@ public:
         repaint();
     }
 
+    void refreshLocalizedText()
+    {
+        titleLabel.setText (showcontrol::localization::tr (u8"ĐẶT TÊN OUTPUT BUS (OUTPUT ROUTING)"),
+                            juce::dontSendNotification);
+        closeButton.setTooltip (showcontrol::localization::tr (u8"Đóng"));
+    }
+
     void wireEditorDismiss (std::function<void (bool)> dismissHandler)
     {
         onRequestDismiss = std::move (dismissHandler);
@@ -522,6 +531,16 @@ public:
             parent->removeChildComponent (&overlay);
 
         activeOverlay.reset();
+    }
+
+    static void refreshLocalizedActive() noexcept
+    {
+        if (activeOverlay == nullptr)
+            return;
+
+        activeOverlay->card.refreshLocalizedText();
+        activeOverlay->card.busList.refreshLocalizedDefaultBusTexts();
+        activeOverlay->card.repaint();
     }
 
     static void present (juce::Component* parent, Config config)
@@ -638,21 +657,20 @@ public:
         audioGroup.setTextLabelPosition (juce::Justification::centredLeft);
         addAndMakeVisible (audioGroup);
 
+        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output Bus"),
+                                 juce::dontSendNotification);
+        busSectionLabel.setFont (showcontrol::audioSettings::labelFont().withHeight (13.0f));
+        busSectionLabel.setJustificationType (juce::Justification::centredLeft);
+        addAndMakeVisible (busSectionLabel);
+
         deviceSelector = std::make_unique<juce::AudioDeviceSelectorComponent> (
             deviceManager, 0, 0, 2, 16, false, false, false, false);
         addAndMakeVisible (*deviceSelector);
 
-        busNamingBtn.setButtonText (showcontrol::localization::tr (u8"Đặt tên Output Bus"));
-        busNamingBtn.setTooltip (showcontrol::localization::tr (u8"Cấu hình đường Bus"));
-        busNamingBtn.onClick = [this] { presentBusNamingPopup(); };
-        addAndMakeVisible (busNamingBtn);
-
         busList.setDarkMode (isDark);
         busList.setPreferencesChrome (embeddedInPreferences);
         busList.initialiseRows (busNames);
-
-        setLookAndFeel (&panelLaf);
-        panelLaf.setDarkMode (isDark);
+        addAndMakeVisible (busList);
 
         okBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
         addAndMakeVisible (okBtn);
@@ -664,10 +682,7 @@ public:
         setSize (540, embeddedInPreferences ? 460 : 500);
     }
 
-    ~AudioDeviceSettingsPanel() override
-    {
-        setLookAndFeel (nullptr);
-    }
+    ~AudioDeviceSettingsPanel() override = default;
 
     void setDarkMode (bool dark) noexcept
     {
@@ -675,7 +690,6 @@ public:
             return;
 
         isDark = dark;
-        panelLaf.setDarkMode (isDark);
         applyTheme();
         repaint();
     }
@@ -737,18 +751,25 @@ public:
         audioGroup.setColour (juce::GroupComponent::outlineColourId, groupOutline);
         audioGroup.repaint();
 
-        busList.setPreferencesChrome (embeddedInPreferences);
         busList.applyThemeColoursDirectly (lf);
+
+        if (deviceSelector != nullptr)
+        {
+            deviceSelector->lookAndFeelChanged();
+            deviceSelector->repaint();
+        }
+
         repaint();
     }
 
     void refreshLocalizedText()
     {
         audioGroup.setText (showcontrol::localization::tr (u8"Cấu hình Audio"));
-        busNamingBtn.setButtonText (showcontrol::localization::tr (u8"Đặt tên Output Bus"));
-        busNamingBtn.setTooltip (showcontrol::localization::tr (u8"Cấu hình đường Bus"));
+        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output Bus"),
+                                 juce::dontSendNotification);
         okBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
-        busList.refreshLocalizedPlaceholders();
+        busList.refreshLocalizedDefaultBusTexts();
+        OutputBusNamingOverlay::refreshLocalizedActive();
         repaint();
     }
 
@@ -771,7 +792,7 @@ public:
     void resized() override
     {
         constexpr int outerPad   = 12;
-        constexpr int sectionGap = 10;
+        constexpr int sectionGap = 6;
         const int footerH = embeddedInPreferences ? 0 : 44;
 
         auto bounds = getLocalBounds().reduced (outerPad);
@@ -782,66 +803,41 @@ public:
             okBtn.setBounds (footer.removeFromRight (108).withHeight (32).reduced (0, 4));
         }
 
-        constexpr int busBtnH = 30;
-        audioGroup.setBounds (bounds.removeFromTop (bounds.getHeight() - busBtnH - sectionGap));
-        bounds.removeFromTop (sectionGap);
-        busNamingBtn.setBounds (bounds.removeFromTop (busBtnH));
+        audioGroup.setBounds (bounds);
 
-        auto audioInner = audioGroup.getBounds().reduced (10, 22);
-        deviceSelector->setBounds (audioInner);
+        auto audioInner = audioGroup.getBounds().reduced (10, 14);
+        constexpr int busLabelH = 18;
+        constexpr int busListH  = 124;
+        constexpr int deviceMinH = 164;
+        const int deviceH = juce::jmax (deviceMinH,
+                                        audioInner.getHeight() - busLabelH - busListH - sectionGap * 2);
+
+        auto deviceArea = audioInner.removeFromTop (deviceH);
+        deviceSelector->setBounds (deviceArea);
+
+        audioInner.removeFromTop (sectionGap);
+        busSectionLabel.setBounds (audioInner.removeFromTop (busLabelH));
+        audioInner.removeFromTop (sectionGap);
+        busList.setBounds (audioInner.removeFromTop (busListH));
+        busList.resized();
     }
 
 private:
     bool isDark = true;
     bool embeddedInPreferences = false;
     bool hasAppliedOnClose = false;
-    AudioSettingsPanelLookAndFeel panelLaf;
 
     juce::GroupComponent audioGroup;
+    juce::Label busSectionLabel;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> deviceSelector;
     juce::TextButton okBtn;
-    juce::TextButton busNamingBtn;
     AudioBusNamingList busList;
     std::function<void (int busIndex, const juce::String& text)> onBusNameLiveChanged;
-
-    void presentBusNamingPopup()
-    {
-        auto* parent = getTopLevelComponent();
-        if (parent == nullptr)
-            return;
-
-        OutputBusNamingOverlay::Config cfg;
-        cfg.busNames = getBusNames();
-        cfg.darkMode = isDark;
-        cfg.onLiveChanged = [this] (int busIndex, const juce::String& text)
-        {
-            if (auto* editor = busList.getEditor (busIndex))
-                editor->setText (text, juce::dontSendNotification);
-
-            if (onBusNameLiveChanged != nullptr)
-                onBusNameLiveChanged (busIndex, text);
-        };
-        cfg.onApplied = [this] (const juce::StringArray& names)
-        {
-            busList.setBusNames (names);
-
-            if (onApplied)
-            {
-                ApplyResult r;
-                r.busNames = names;
-                onApplied (r);
-            }
-        };
-
-        OutputBusNamingOverlay::present (parent, std::move (cfg));
-    }
 
     void applyTheme()
     {
         if (auto* showLaf = dynamic_cast<ShowControlLookAndFeel*> (&getLookAndFeel()))
             isDark = showLaf->isDarkMode();
-
-        panelLaf.setDarkMode (isDark);
 
         const auto pal = ShowTheme::get (isDark);
         const auto& laf = getLookAndFeel();
@@ -855,14 +851,18 @@ private:
         audioGroup.setColour (juce::GroupComponent::textColourId, groupText);
         audioGroup.setColour (juce::GroupComponent::outlineColourId, groupOutline);
 
+        busSectionLabel.setColour (juce::Label::textColourId,
+                                   laf.findColour (ShowControlLookAndFeel::textSecondaryColourId));
+
         okBtn.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
         okBtn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
-        busNamingBtn.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
-        busNamingBtn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
 
         busList.setDarkMode (isDark);
         busList.setPreferencesChrome (embeddedInPreferences);
         busList.applyRowTheme();
+
+        if (deviceSelector != nullptr)
+            deviceSelector->lookAndFeelChanged();
     }
 
     void closeAndApply()

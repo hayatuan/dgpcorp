@@ -7,6 +7,13 @@
 /build-win/
 /build-debug/
 /build-release/
+ShowCue/build/
+**/ShowCue_artefacts/
+**/juce_binarydata_*/
+libShowCueAssets.a
+cmake_install.cmake
+Makefile
+/JUCE/
 bin/
 obj/
 x64/
@@ -68,3 +75,5 @@ $RECYCLE.BIN/
 # JUCE CMake helpers — không được coi là thư mục build output
 !ShowCue/JUCE/extras/Build/
 !ShowCue/JUCE/extras/Build/**
+# JUCE binary bundle lẫn vào tree — không cần cho build ShowCue
+ShowCue/JUCE/DemoRunner.app/

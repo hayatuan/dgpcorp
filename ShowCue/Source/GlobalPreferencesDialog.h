@@ -350,6 +350,7 @@ class ThemePreferencesPanel : public juce::Component
 public:
     std::function<void (int themeId)> onThemeChanged;
     std::function<void (int languageIndex)> onLanguageChanged;
+    std::function<void()> onCheckForUpdatesRequested;
 
     explicit ThemePreferencesPanel (int themeId, int languageIndex)
     {
@@ -385,9 +386,9 @@ public:
         addAndMakeVisible (lightCard);
         addAndMakeVisible (darkCard);
 
-        systemCard.setButtonText ("Match System");
-        lightCard.setButtonText ("Light");
-        darkCard.setButtonText ("Dark");
+        systemCard.setButtonText (showcontrol::localization::tr (u8"Theo hệ thống"));
+        lightCard.setButtonText (showcontrol::localization::tr (u8"Sáng"));
+        darkCard.setButtonText (showcontrol::localization::tr (u8"Tối"));
 
         auto pickTheme = [this] (int id, ThemeAppearanceCard& card)
         {
@@ -400,6 +401,15 @@ public:
         systemCard.onClick = [this, pickTheme] { pickTheme (3, systemCard); };
         lightCard.onClick  = [this, pickTheme] { pickTheme (2, lightCard); };
         darkCard.onClick   = [this, pickTheme] { pickTheme (1, darkCard); };
+
+        addAndMakeVisible (updateSectionLabel);
+        addAndMakeVisible (updateHintLabel);
+        addAndMakeVisible (checkUpdateButton);
+        checkUpdateButton.onClick = [this]
+        {
+            if (onCheckForUpdatesRequested != nullptr)
+                onCheckForUpdatesRequested();
+        };
 
         syncLabelColours();
         refreshLocalizedText();
@@ -419,6 +429,19 @@ public:
             u8"Chọn giao diện cho toàn bộ ứng dụng. Thay đổi có hiệu lực ngay lập tức."),
             juce::dontSendNotification);
         languageLabel.setText (showcontrol::localization::tr (u8"Ngôn ngữ"), juce::dontSendNotification);
+        systemCard.setButtonText (showcontrol::localization::tr (u8"Theo hệ thống"));
+        lightCard.setButtonText (showcontrol::localization::tr (u8"Sáng"));
+        darkCard.setButtonText (showcontrol::localization::tr (u8"Tối"));
+        systemCard.repaint();
+        lightCard.repaint();
+        darkCard.repaint();
+
+        updateSectionLabel.setText (showcontrol::localization::tr (u8"Cập nhật ứng dụng"),
+                                    juce::dontSendNotification);
+        updateHintLabel.setText (showcontrol::localization::tr (
+            u8"Kiểm tra phiên bản mới từ GitHub và mở trang tải về."),
+            juce::dontSendNotification);
+        checkUpdateButton.setButtonText (showcontrol::localization::tr (u8"Kiểm tra cập nhật..."));
     }
 
     void lookAndFeelChanged() override
@@ -495,18 +518,29 @@ public:
         vietnameseLangCard.setBounds (langRow.removeFromLeft (cardW));
         langRow.removeFromLeft (gap);
         englishLangCard.setBounds (langRow.removeFromLeft (cardW));
+
+        bounds.removeFromTop (24);
+        updateSectionLabel.setBounds (bounds.removeFromTop (22));
+        bounds.removeFromTop (4);
+        updateHintLabel.setBounds (bounds.removeFromTop (34));
+        bounds.removeFromTop (8);
+        auto btnRow = bounds.removeFromTop (32);
+        const int btnW = 180;
+        checkUpdateButton.setBounds (btnRow.withSizeKeepingCentre (btnW, 28));
     }
 
 private:
     int currentThemeId = 1;
     int currentLanguageIndex = 0;
     juce::Label sectionLabel, hintLabel, languageLabel;
+    juce::Label updateSectionLabel, updateHintLabel;
     ThemeAppearanceCard systemCard { ThemeAppearanceCard::Kind::matchSystem, {} };
     ThemeAppearanceCard lightCard  { ThemeAppearanceCard::Kind::light, {} };
     ThemeAppearanceCard darkCard   { ThemeAppearanceCard::Kind::dark, {} };
     LanguageAppearanceCard systemLangCard    { LanguageAppearanceCard::Kind::matchSystem, u8"Mặc định hệ thống" };
     LanguageAppearanceCard vietnameseLangCard { LanguageAppearanceCard::Kind::vietnamese, u8"Tiếng Việt" };
     LanguageAppearanceCard englishLangCard   { LanguageAppearanceCard::Kind::english, u8"English" };
+    juce::TextButton checkUpdateButton;
 
     void syncLabelColours()
     {
@@ -517,6 +551,10 @@ private:
                              showcontrol::preferences::dynamicMutedText (laf));
         languageLabel.setColour (juce::Label::textColourId,
                                  showcontrol::preferences::dynamicPrimaryText (laf));
+        updateSectionLabel.setColour (juce::Label::textColourId,
+                                      showcontrol::preferences::dynamicPrimaryText (laf));
+        updateHintLabel.setColour (juce::Label::textColourId,
+                                   showcontrol::preferences::dynamicMutedText (laf));
     }
 
     void applyLanguageChoice (int languageIndex)
@@ -553,6 +591,7 @@ public:
         std::function<void (const AudioDeviceSettingsPanel::ApplyResult&)> onAudioSettingsApplied;
         std::function<void (int themeId)> onThemeChanged;
         std::function<void (int languageIndex)> onLanguageChanged;
+        std::function<void()> onCheckForUpdatesRequested;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
@@ -591,6 +630,12 @@ public:
                 cb.onLanguageChanged (newLanguageIndex);
 
             refreshLocalizedText();
+        };
+
+        themePanel->onCheckForUpdatesRequested = [this]
+        {
+            if (cb.onCheckForUpdatesRequested != nullptr)
+                cb.onCheckForUpdatesRequested();
         };
 
         addAndMakeVisible (audioPanel.get());

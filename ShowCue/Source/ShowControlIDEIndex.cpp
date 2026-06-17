@@ -27,6 +27,13 @@
 #include "SidebarPanel.h"
 #include "SoundPad.h"
 #include "StageMonitorComponent.h"
+#include "ShowAudioEditor.h"
+#include "ShowLoudnessNormalize.h"
+#include "LoudnessManagerDialog.h"
+#include "GlobalPreferencesDialog.h"
+#include "ShowUpdateChecker.h"
+#include "SystemPermissionsPanel.h"
+#include "ConfirmDeleteDialog.h"
 
 #if defined(__clang__)
  #pragma clang diagnostic ignored "-Wunused-function"

@@ -38,6 +38,7 @@ public:
     std::function<void (const juce::MouseEvent&)> onBackgroundMouseUp;
     std::function<void (SoundPad*, int row, int col)> onPadDroppedAtCell;
     std::function<void (SoundPad* pad)> onGridFocusPadChanged;
+    std::function<bool (const juce::KeyPress&)> onChainedKeyPressed;
 
     void setPadList (juce::OwnedArray<SoundPad>* padsIn) noexcept;
 

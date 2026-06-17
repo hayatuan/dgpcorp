@@ -61,7 +61,8 @@ namespace showcontrol::routing
                 return trimmed == juce::String::fromUTF8 (u8"AUX 3 (Ch 7-8)");
 
             default:
-                return trimmed == ("AUX " + juce::String (busIndex));
+                return trimmed == ("Bus " + juce::String (busIndex + 1))
+                    || trimmed == ("AUX " + juce::String (busIndex));
         }
     }
 

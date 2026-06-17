@@ -245,9 +245,26 @@ public:
         switch (band)
         {
             case (int) BandIndex::highPass:
+                if (std::abs (gainDb) < 0.001f)
+                    return bypassCoefficients (sampleRate, band);
+                if (gainDb < 0.0f)
+                {
+                    const float cutoff = freq * std::pow (10.0f, -gainDb / 24.0f);
+                    return juce::dsp::IIR::Coefficients<float>::makeHighPass (
+                        sampleRate, juce::jlimit (20.0f, 500.0f, cutoff), q);
+                }
+                return juce::dsp::IIR::Coefficients<float>::makePeakFilter (
+                    sampleRate, freq, q, juce::Decibels::decibelsToGain (gainDb));
+
             case (int) BandIndex::lowPass:
                 if (std::abs (gainDb) < 0.001f)
                     return bypassCoefficients (sampleRate, band);
+                if (gainDb < 0.0f)
+                {
+                    const float cutoff = freq * std::pow (10.0f, gainDb / 24.0f);
+                    return juce::dsp::IIR::Coefficients<float>::makeLowPass (
+                        sampleRate, juce::jlimit (freq * 0.25f, 20000.0f, cutoff), q);
+                }
                 return juce::dsp::IIR::Coefficients<float>::makePeakFilter (
                     sampleRate, freq, q, juce::Decibels::decibelsToGain (gainDb));
 

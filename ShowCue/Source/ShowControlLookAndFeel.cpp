@@ -76,9 +76,40 @@ juce::Font ShowControlLookAndFeel::getPopupMenuFont()
     return showcontrol::ui::popupMenuFont();
 }
 
-juce::Font ShowControlLookAndFeel::getLabelFont (juce::Label&)
+juce::Font ShowControlLookAndFeel::getLabelFont (juce::Label& label)
 {
+    const auto font = label.getFont();
+
+    // Tôn trọng setFont() trên đồng hồ / readout lớn — trước đây luôn 14pt nên timer không to lên được.
+    if (font.getHeight() > 15.5f || ShowTheme::isTimerFontRequest (font))
+        return font;
+
     return ShowTheme::font (14.0f);
+}
+
+void ShowControlLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
+{
+    const auto bg = label.findColour (juce::Label::backgroundColourId);
+
+    if (bg.isOpaque())
+        g.fillAll (bg);
+
+    if (! label.isBeingEdited())
+    {
+        const float alpha = label.isEnabled() ? 1.0f : 0.5f;
+        const juce::Font font (getLabelFont (label));
+
+        g.setColour (label.findColour (juce::Label::textColourId).withMultipliedAlpha (alpha));
+        g.setFont (font);
+
+        const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
+        const int maxLines = font.getHeight() >= 18.0f
+                                 ? 1
+                                 : juce::jmax (1, (int) ((float) textArea.getHeight() / font.getHeight()));
+
+        g.drawFittedText (label.getText(), textArea, label.getJustificationType(),
+                          maxLines, label.getMinimumHorizontalScale());
+    }
 }
 
 juce::Font ShowControlLookAndFeel::getComboBoxFont (juce::ComboBox&)

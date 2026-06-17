@@ -7,10 +7,12 @@
 #include "ShowGraphicsSafe.h"
 #include "ShowFlatIcons.h"
 #include "PadEqualizerDialog.h"
+#include "LoudnessManagerDialog.h"
 #include "ShowControlMacWindow.h"
 #include "ShowOutputRouting.h"
 #include "ShowLocalization.h"
 #include "ShowTagColors.h"
+#include "ConfirmDeleteDialog.h"
 
 //==============================================================================
 class InspectorWaveform : public juce::Component,
@@ -85,6 +87,80 @@ public:
         repaint();
     }
 
+    void setCutSelectionEnabled (bool enabled) noexcept
+    {
+        if (cutSelectionEnabled == enabled)
+            return;
+
+        cutSelectionEnabled = enabled;
+
+        if (! enabled)
+            clearCutSelection();
+
+        repaint();
+    }
+
+    bool hasCutSelection() const noexcept
+    {
+        return cutSelEnd >= 0.0 && (cutSelEnd - cutSelStart) > 0.005;
+    }
+
+    void getCutSelection (double& outStart, double& outEnd) const noexcept
+    {
+        outStart = cutSelStart;
+        outEnd   = cutSelEnd;
+    }
+
+    void clearCutSelection()
+    {
+        cutSelStart = -1.0;
+        cutSelEnd   = -1.0;
+        cutSelDragging = false;
+        repaint();
+    }
+
+    void setCutSelection (double start, double end)
+    {
+        const double lo = juce::jlimit (0.0, totalLen, juce::jmin (start, end));
+        const double hi = juce::jlimit (0.0, totalLen, juce::jmax (start, end));
+        cutSelStart = lo;
+        cutSelEnd   = hi;
+        repaint();
+
+        if (onCutSelectionChanged)
+            onCutSelectionChanged();
+    }
+
+    void setCutStartAtCurrentPosition()
+    {
+        if (totalLen <= 0.0)
+            return;
+
+        if (cutSelEnd < 0.0)
+            cutSelEnd = totalLen;
+
+        cutSelStart = juce::jlimit (0.0, cutSelEnd - 0.005, currentPos);
+        repaint();
+
+        if (onCutSelectionChanged)
+            onCutSelectionChanged();
+    }
+
+    void setCutEndAtCurrentPosition()
+    {
+        if (totalLen <= 0.0)
+            return;
+
+        if (cutSelStart < 0.0)
+            cutSelStart = 0.0;
+
+        cutSelEnd = juce::jlimit (cutSelStart + 0.005, totalLen, currentPos);
+        repaint();
+
+        if (onCutSelectionChanged)
+            onCutSelectionChanged();
+    }
+
     void setProgress (double pos, double len) 
     { 
         currentPos = pos; 
@@ -99,8 +175,10 @@ public:
 
     std::function<void(double)> onTrimStartChanged;
     std::function<void(double)> onTrimEndChanged;
+    std::function<void()> onTrimGestureFinished;
     std::function<void(double)> onPlayheadScrubbed; 
-    std::function<void()> onWaveformDoubleClicked; 
+    std::function<void()> onWaveformDoubleClicked;
+    std::function<void()> onCutSelectionChanged;
 
     void paint (juce::Graphics& g) override
     {
@@ -205,6 +283,23 @@ public:
             g.fillEllipse (showcontrol::gfx::sanitise (juce::Rectangle<float> ((float) px - 3.5f, (float) waveArea.getY() - 4.0f, 7.0f, 7.0f)));
         }
 
+        if (hasCutSelection())
+        {
+            const int selX0 = showcontrol::gfx::timeToPixelX (waveArea, cutSelStart, viewStart, viewEnd);
+            const int selX1 = showcontrol::gfx::timeToPixelX (waveArea, cutSelEnd, viewStart, viewEnd);
+            const int left  = juce::jmin (selX0, selX1);
+            const int right = juce::jmax (selX0, selX1);
+
+            if (right > left)
+            {
+                g.setColour (pal.danger.withAlpha (0.28f));
+                showcontrol::gfx::safeFillRect (g, left, waveArea.getY(), right - left, waveArea.getHeight());
+                g.setColour (pal.danger.withAlpha (0.85f));
+                showcontrol::gfx::safeDrawVerticalLine (g, left,  (float) waveArea.getY(), (float) waveArea.getBottom());
+                showcontrol::gfx::safeDrawVerticalLine (g, right, (float) waveArea.getY(), (float) waveArea.getBottom());
+            }
+        }
+
         if (fadeInSec > 0.0 && fadeInSec > viewStart)
         {
             const double fiEnd = std::min (fadeInSec, viewEnd);
@@ -266,6 +361,19 @@ public:
     {
         if (thumbnail == nullptr || totalLen <= 0.0) return;
         dragMode = getDragMode (e.getPosition());
+        trimEditedDuringDrag = false;
+        cutSelDragging = false;
+
+        if (dragMode == 3)
+        {
+            const auto waveArea = getWaveformBounds();
+            const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
+            cutSelAnchor = viewStart + (double) ratio * (viewEnd - viewStart);
+            cutSelStart = cutSelEnd = cutSelAnchor;
+            repaint();
+            return;
+        }
+
         if (dragMode == 0) {
             const auto waveArea = getWaveformBounds();
             const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
@@ -283,20 +391,74 @@ public:
         double t = viewStart + (double) ratio * (viewEnd - viewStart);
         double effectiveEnd = (trimEnd > 0.0) ? trimEnd : totalLen;
 
+        constexpr double kTrimMinGapSec = 0.01;
         if (dragMode == 1) {
-            trimStart = juce::jlimit (0.0, effectiveEnd - 0.1, t);
-            if (onTrimStartChanged) onTrimStartChanged (trimStart); repaint();
+            const double next = juce::jlimit (0.0, effectiveEnd - kTrimMinGapSec, t);
+            if (std::abs (next - trimStart) >= 0.0005)
+            {
+                trimStart = next;
+                trimEditedDuringDrag = true;
+                if (onTrimStartChanged) onTrimStartChanged (trimStart);
+                repaint();
+            }
         } else if (dragMode == 2) {
-            trimEnd = juce::jlimit (trimStart + 0.1, totalLen, t);
-            if (onTrimEndChanged) onTrimEndChanged (trimEnd); repaint();
+            const double next = juce::jlimit (trimStart + kTrimMinGapSec, totalLen, t);
+            if (std::abs (next - trimEnd) >= 0.0005)
+            {
+                trimEnd = next;
+                trimEditedDuringDrag = true;
+                if (onTrimEndChanged) onTrimEndChanged (trimEnd);
+                repaint();
+            }
         } else if (dragMode == 0) {
             currentPos = juce::jlimit (0.0, totalLen, t);
             if (onPlayheadScrubbed) onPlayheadScrubbed (currentPos); repaint();
+        } else if (dragMode == 3) {
+            cutSelDragging = true;
+            cutSelStart = juce::jlimit (0.0, totalLen, juce::jmin (cutSelAnchor, t));
+            cutSelEnd   = juce::jlimit (0.0, totalLen, juce::jmax (cutSelAnchor, t));
+            repaint();
+
+            if (onCutSelectionChanged)
+                onCutSelectionChanged();
         }
     }
 
-    void mouseUp (const juce::MouseEvent&) override { dragMode = 0; }
-    void mouseMove (const juce::MouseEvent& e) override { setMouseCursor (getDragMode (e.getPosition()) != 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor); }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        const bool wasTrimDrag = (dragMode == 1 || dragMode == 2);
+        const bool wasCutSelect = (dragMode == 3);
+
+        if (wasCutSelect && ! cutSelDragging && thumbnail != nullptr && totalLen > 0.0)
+        {
+            const auto waveArea = getWaveformBounds();
+            const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
+            currentPos = juce::jlimit (0.0, totalLen, viewStart + (double) ratio * (viewEnd - viewStart));
+
+            if (onPlayheadScrubbed)
+                onPlayheadScrubbed (currentPos);
+
+            clearCutSelection();
+            repaint();
+        }
+
+        dragMode = 0;
+        cutSelDragging = false;
+
+        if (wasTrimDrag && trimEditedDuringDrag && onTrimGestureFinished)
+            onTrimGestureFinished();
+    }
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        const int mode = getDragMode (e.getPosition());
+
+        if (mode == 1 || mode == 2)
+            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else if (mode == 3)
+            setMouseCursor (juce::MouseCursor::CrosshairCursor);
+        else
+            setMouseCursor (juce::MouseCursor::NormalCursor);
+    }
 
 private:
     juce::Rectangle<int> getRulerBounds() const
@@ -357,12 +519,17 @@ private:
 
         if (std::abs (mousePos.x - startX) <= 12) return 1;
         if (std::abs (mousePos.x - endX) <= 12) return 2;
+        if (cutSelectionEnabled) return 3;
         return 0;
     }
     juce::AudioThumbnail* thumbnail = nullptr; double currentPos = 0.0, totalLen = 0.0, trimStart = 0.0, trimEnd = 0.0; bool isDark = true; int dragMode = 0;
     double viewStart = 0.0, viewEnd = 0.0;
     double fadeInSec = 0.0, fadeOutSec = 0.0, effectiveLen = 0.0;
     bool showTimeRuler = false;
+    bool trimEditedDuringDrag = false;
+    bool cutSelectionEnabled = false;
+    bool cutSelDragging = false;
+    double cutSelStart = -1.0, cutSelEnd = -1.0, cutSelAnchor = 0.0;
     juce::Colour itemInk { showcontrol::colours::tagColourAt (7) };
 };
 
@@ -520,9 +687,9 @@ public:
             return;
         }
 
-        if (id == "sc_inspector_sliders")
+        if (id == "sc_inspector_fade_out")
         {
-            showcontrol::icons::paintSlidersIcon (g, iconBounds, col);
+            showcontrol::icons::paintFadeSlopeIcon (g, iconBounds, col);
             return;
         }
 
@@ -572,23 +739,32 @@ public:
 
         if (id == "sc_inspector_equalizer")
         {
+            auto fullBounds = bounds;
+
             if (toggled)
             {
                 g.setColour (accent.withAlpha (isDarkMode ? 0.28f : 0.18f));
-                g.fillRoundedRectangle (bounds, 5.0f);
+                g.fillRoundedRectangle (fullBounds, 5.0f);
             }
             else
             {
                 const auto cols = showcontrol::ui::toggleButtonColours (isDarkMode, false, isHighlighted);
                 g.setColour (cols.background);
-                g.fillRoundedRectangle (bounds, ShowTheme::kPanelCornerRadius);
+                g.fillRoundedRectangle (fullBounds, ShowTheme::kPanelCornerRadius);
                 g.setColour (pal.inputOutline.withAlpha (0.85f));
-                g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
+                g.drawRoundedRectangle (fullBounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.0f);
             }
+
+            constexpr float kIcon = showcontrol::icons::kButtonIconSize;
+            constexpr float kIconSlot = kIcon + 8.0f;
+            auto iconArea = fullBounds.removeFromLeft (kIconSlot).withSizeKeepingCentre (kIcon, kIcon);
+            const auto iconCol = toggled ? accent : pal.textPrimary;
+            showcontrol::icons::paintSlidersIcon (g, iconArea, iconCol);
 
             g.setColour (toggled ? accent : pal.textPrimary);
             g.setFont (showcontrol::inspector::buttonFont());
-            g.drawText (btn.getButtonText(), bounds, juce::Justification::centred);
+            g.drawText (btn.getButtonText(), fullBounds.reduced (2.0f, 0.0f),
+                        juce::Justification::centred);
             return;
         }
 
@@ -697,8 +873,12 @@ public:
             g.setFont (font);
 
             const auto textArea = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
-            g.drawFittedText (label.getText(), textArea, label.getJustificationType(),
-                              1, label.getMinimumHorizontalScale());
+
+            if (font.getHeight() >= 18.0f)
+                g.drawText (label.getText(), textArea, label.getJustificationType(), true);
+            else
+                g.drawFittedText (label.getText(), textArea, label.getJustificationType(),
+                                  1, label.getMinimumHorizontalScale());
         }
     }
 
@@ -728,47 +908,128 @@ private:
 };
 
 //==============================================================================
+//==============================================================================
+struct AdvancedTrimEditorCallbacks
+{
+    std::function<void()> onInspectorSync;
+    std::function<void()> onGestureFinished;
+    std::function<void (SoundPad*, double, double, std::function<void (bool)>)> onCutRequested;
+    std::function<bool()> performUndo;
+    std::function<bool()> performRedo;
+    std::function<bool()> canUndo;
+    std::function<bool()> canRedo;
+};
+
 class AdvancedTrimComponent : public juce::Component, public juce::Timer
 {
 public:
-    AdvancedTrimComponent (SoundPad* pad, bool isDark, std::function<void()> onUpdateCallback)
-        : currentPad (pad), isDarkTheme (isDark), onUpdate (onUpdateCallback)
+    AdvancedTrimComponent (SoundPad* pad, bool isDark, AdvancedTrimEditorCallbacks callbacksIn)
+        : currentPad (pad), isDarkTheme (isDark), callbacks (std::move (callbacksIn))
     {
-        setSize (780, 360);
+        onUpdate = callbacks.onInspectorSync;
+        onGestureFinished = callbacks.onGestureFinished;
+
+        setSize (780, 420);
         addAndMakeVisible (largeWaveform);
         largeWaveform.setThumbnail (&currentPad->getThumbnail());
         largeWaveform.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
-        
+        largeWaveform.setCutSelectionEnabled (true);
+
         double initialLen = currentPad->getPlaybackLength();
         double initialPos = currentPad->getPlaybackPosition();
         largeWaveform.setProgress (initialPos, initialLen);
         largeWaveform.setDarkMode (isDark);
-        
-        // Trimming realtime: kéo marker in/out trên waveform lớn.
-        largeWaveform.onTrimStartChanged = [this] (double t) { if (currentPad) { currentPad->setTrimStart (t); currentPad->triggerTrimUpdateLive(); if (onUpdate) onUpdate(); } };
-        largeWaveform.onTrimEndChanged = [this] (double t) { if (currentPad) { currentPad->setTrimEnd (t); currentPad->triggerTrimUpdateLive(); if (onUpdate) onUpdate(); } };
+
+        largeWaveform.onTrimStartChanged = [this] (double t) {
+            if (currentPad != nullptr)
+                currentPad->setTrimStart (t);
+        };
+        largeWaveform.onTrimEndChanged = [this] (double t) {
+            if (currentPad != nullptr)
+                currentPad->setTrimEnd (t);
+        };
+        largeWaveform.onTrimGestureFinished = [this] { finalizeTrimGesture(); };
         largeWaveform.onPlayheadScrubbed = [this] (double t) { if (currentPad) currentPad->seekTo (t); };
+        largeWaveform.onCutSelectionChanged = [this] { updateCutControls(); };
         largeWaveform.setShowTimeRuler (true);
 
         addAndMakeVisible (infoLabel);
         infoLabel.setText (showcontrol::localization::tr (
-                               u8"Kéo 2 marker vàng/đỏ để chọn điểm IN/OUT. Lăn chuột để zoom."),
+                               u8"IN/OUT: kéo marker vàng/đỏ. Cắt nhạc: quét chọn vùng đỏ hoặc đặt điểm cắt tại playhead. Lăn chuột để zoom."),
                            juce::dontSendNotification);
         infoLabel.setFont (showcontrol::trimEditor::infoFont());
         const auto pal = ShowTheme::get (isDark);
         infoLabel.setColour (juce::Label::textColourId, pal.textSecondary);
 
+        auto styleSecondaryBtn = [&] (juce::TextButton& btn)
+        {
+            btn.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
+            btn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
+        };
+
+        addAndMakeVisible (cutStartBtn);
+        cutStartBtn.setButtonText (showcontrol::localization::tr (u8"Đầu cắt"));
+        styleSecondaryBtn (cutStartBtn);
+        cutStartBtn.onClick = [this]
+        {
+            largeWaveform.setCutStartAtCurrentPosition();
+            updateCutControls();
+        };
+
+        addAndMakeVisible (cutEndBtn);
+        cutEndBtn.setButtonText (showcontrol::localization::tr (u8"Cuối cắt"));
+        styleSecondaryBtn (cutEndBtn);
+        cutEndBtn.onClick = [this]
+        {
+            largeWaveform.setCutEndAtCurrentPosition();
+            updateCutControls();
+        };
+
+        addAndMakeVisible (clearSelBtn);
+        clearSelBtn.setButtonText (showcontrol::localization::tr (u8"Xóa chọn"));
+        styleSecondaryBtn (clearSelBtn);
+        clearSelBtn.onClick = [this]
+        {
+            largeWaveform.clearCutSelection();
+            updateCutControls();
+        };
+
+        addAndMakeVisible (cutBtn);
+        cutBtn.setButtonText (showcontrol::localization::tr (u8"CẮT & XÓA"));
+        cutBtn.setColour (juce::TextButton::buttonColourId, showcontrol::ui::destructiveActionColour (getLookAndFeel()));
+        cutBtn.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+        cutBtn.onClick = [this] { requestAudioCut(); };
+
+        addAndMakeVisible (undoBtn);
+        undoBtn.setButtonText (showcontrol::localization::tr (u8"Hoàn tác"));
+        styleSecondaryBtn (undoBtn);
+        undoBtn.onClick = [this]
+        {
+            if (callbacks.performUndo && callbacks.performUndo())
+                reloadFromPad();
+        };
+
+        addAndMakeVisible (redoBtn);
+        redoBtn.setButtonText (showcontrol::localization::tr (u8"Làm lại"));
+        styleSecondaryBtn (redoBtn);
+        redoBtn.onClick = [this]
+        {
+            if (callbacks.performRedo && callbacks.performRedo())
+                reloadFromPad();
+        };
+
         addAndMakeVisible (resetButton);
         resetButton.setButtonText (showcontrol::localization::tr (u8"ĐẶT LẠI"));
-        resetButton.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
-        resetButton.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
+        styleSecondaryBtn (resetButton);
         resetButton.onClick = [this] { performTrimReset(); };
 
         addAndMakeVisible (closeBtn);
         closeBtn.setButtonText (showcontrol::localization::tr (u8"XÁC NHẬN & ĐÓNG BẢNG"));
-        closeBtn.setColour (juce::TextButton::buttonColourId, pal.accentSoft); closeBtn.setColour (juce::TextButton::textColourOffId, isDark ? juce::Colours::white : pal.panelElevated);
+        closeBtn.setColour (juce::TextButton::buttonColourId, pal.accentSoft);
+        closeBtn.setColour (juce::TextButton::textColourOffId, isDark ? juce::Colours::white : pal.panelElevated);
         closeBtn.onClick = [this] { if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) dw->exitModalState (0); };
 
+        updateCutControls();
         startTimer (40);
     }
     ~AdvancedTrimComponent() override
@@ -777,8 +1038,12 @@ public:
         largeWaveform.setThumbnail (nullptr);
     }
 
-    void timerCallback() override {
-        if (currentPad) largeWaveform.setProgress (currentPad->getPlaybackPosition(), currentPad->getPlaybackLength());
+    void timerCallback() override
+    {
+        if (currentPad != nullptr)
+            largeWaveform.setProgress (currentPad->getPlaybackPosition(), currentPad->getPlaybackLength());
+
+        updateUndoRedoButtons();
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -811,18 +1076,31 @@ public:
             bounds.removeFromTop (kMacTopDragInset);
 
         auto b = bounds.reduced (20);
-        const int footerH = 50;
+        const int footerH = 88;
         auto footer = b.removeFromBottom (footerH);
 
         largeWaveform.setBounds (b);
-        infoLabel.setBounds (footer.removeFromTop (30));
-        closeBtn.setBounds (footer.removeFromRight (200).withHeight (32));
+        infoLabel.setBounds (footer.removeFromTop (26));
 
-        const auto confirmBounds = closeBtn.getBounds();
-        resetButton.setBounds (confirmBounds.getX() - 130,
-                               confirmBounds.getY(),
-                               120,
-                               confirmBounds.getHeight());
+        auto buttonRow = footer;
+        const int btnH = 32;
+        buttonRow = buttonRow.withHeight (btnH);
+
+        closeBtn.setBounds (buttonRow.removeFromRight (188));
+        buttonRow.removeFromRight (8);
+        resetButton.setBounds (buttonRow.removeFromRight (108));
+        buttonRow.removeFromRight (8);
+        redoBtn.setBounds (buttonRow.removeFromRight (88));
+        buttonRow.removeFromRight (6);
+        undoBtn.setBounds (buttonRow.removeFromRight (88));
+        buttonRow.removeFromRight (10);
+        cutBtn.setBounds (buttonRow.removeFromRight (108));
+        buttonRow.removeFromRight (6);
+        clearSelBtn.setBounds (buttonRow.removeFromRight (88));
+        buttonRow.removeFromRight (6);
+        cutEndBtn.setBounds (buttonRow.removeFromRight (88));
+        buttonRow.removeFromRight (6);
+        cutStartBtn.setBounds (buttonRow.removeFromRight (88));
     }
 
 private:
@@ -831,6 +1109,100 @@ private:
    #else
     static constexpr int kMacTopDragInset = 0;
    #endif
+
+    void reloadFromPad()
+    {
+        if (currentPad == nullptr)
+            return;
+
+        currentPad->reloadThumbnailImmediately();
+        largeWaveform.clearCutSelection();
+        largeWaveform.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
+        largeWaveform.setProgress (currentPad->getPlaybackPosition(), currentPad->getPlaybackLength());
+        updateCutControls();
+
+        if (onUpdate)
+            onUpdate();
+    }
+
+    void updateCutControls()
+    {
+        const bool hasSel = largeWaveform.hasCutSelection();
+        cutBtn.setEnabled (hasSel && ! cutInProgress);
+        clearSelBtn.setEnabled (hasSel && ! cutInProgress);
+        cutStartBtn.setEnabled (! cutInProgress);
+        cutEndBtn.setEnabled (! cutInProgress);
+        updateUndoRedoButtons();
+    }
+
+    void updateUndoRedoButtons()
+    {
+        const bool busy = cutInProgress;
+        undoBtn.setEnabled (! busy && callbacks.canUndo && callbacks.canUndo());
+        redoBtn.setEnabled (! busy && callbacks.canRedo && callbacks.canRedo());
+    }
+
+    void requestAudioCut()
+    {
+        if (currentPad == nullptr || cutInProgress || ! largeWaveform.hasCutSelection())
+            return;
+
+        double cutStart = 0.0, cutEnd = 0.0;
+        largeWaveform.getCutSelection (cutStart, cutEnd);
+
+        const auto durationText = currentPad->formatTimeString (cutEnd - cutStart);
+        const auto title = showcontrol::localization::tr (u8"Cắt & xóa đoạn âm thanh");
+        const auto subtext = showcontrol::localization::tr (
+            u8"Xóa vĩnh viễn đoạn đã chọn (%TIME%). File gốc không bị xóa — bản chỉnh được lưu riêng. Có thể Hoàn tác sau khi cắt.")
+                                 .replace ("%TIME%", durationText);
+
+        showcontrol::ui::showConfirmDeleteDialog (
+            this,
+            title,
+            subtext,
+            showcontrol::localization::tr (u8"Cắt"),
+            [this, cutStart, cutEnd] (bool confirmed)
+            {
+                if (! confirmed || callbacks.onCutRequested == nullptr || currentPad == nullptr)
+                    return;
+
+                cutInProgress = true;
+                updateCutControls();
+
+                juce::Component::SafePointer<AdvancedTrimComponent> safe (this);
+                callbacks.onCutRequested (currentPad, cutStart, cutEnd,
+                                          [safe] (bool success)
+                                          {
+                                              juce::MessageManager::callAsync ([safe, success]
+                                              {
+                                                  if (safe == nullptr)
+                                                      return;
+
+                                                  safe->cutInProgress = false;
+
+                                                  if (success)
+                                                      safe->reloadFromPad();
+                                                  else
+                                                      safe->updateCutControls();
+                                              });
+                                          });
+            });
+    }
+
+    void finalizeTrimGesture()
+    {
+        if (currentPad == nullptr)
+            return;
+
+        currentPad->syncPlaybackPositionToTrimRange();
+        currentPad->triggerTrimUpdateLive();
+
+        if (onUpdate)
+            onUpdate();
+
+        if (onGestureFinished)
+            onGestureFinished();
+    }
 
     void performTrimReset()
     {
@@ -852,8 +1224,15 @@ private:
         repaint();
     }
 
-    SoundPad* currentPad; bool isDarkTheme; std::function<void()> onUpdate;
-    InspectorWaveform largeWaveform; juce::Label infoLabel;
+    SoundPad* currentPad = nullptr;
+    bool isDarkTheme = true;
+    bool cutInProgress = false;
+    AdvancedTrimEditorCallbacks callbacks;
+    std::function<void()> onUpdate;
+    std::function<void()> onGestureFinished;
+    InspectorWaveform largeWaveform;
+    juce::Label infoLabel;
+    juce::TextButton cutStartBtn, cutEndBtn, clearSelBtn, cutBtn, undoBtn, redoBtn;
     juce::TextButton resetButton, closeBtn;
     juce::ComponentDragger windowDragger;
     bool windowDragActive = false;
@@ -901,9 +1280,10 @@ public:
         nameLabel.setJustificationType (juce::Justification::centredLeft);
 
         inspectorContent.addAndMakeVisible (nameValueLabel);
-        nameValueLabel.setMinimumHorizontalScale (0.68f);
-        nameValueLabel.setFont (showcontrol::inspector::trackNameFont());
+        nameValueLabel.setMinimumHorizontalScale (1.0f);
+        nameValueLabel.setFont (showcontrol::inspector::trackNameValueFont());
         nameValueLabel.setJustificationType (juce::Justification::centredLeft);
+        nameValueLabel.setBorderSize ({ 0, 2, 0, 0 });
         nameValueLabel.setEditable (true, true, false);
         nameValueLabel.setText (juce::String::fromUTF8 (u8"Chưa chọn pad"), juce::dontSendNotification);
         nameValueLabel.addListener (this);
@@ -916,19 +1296,26 @@ public:
             if (currentPad)
             {
                 currentPad->setTrimStart (t);
-                currentPad->triggerTrimUpdateLive();
                 trimStartLabel.setText (currentPad->formatTimeString (t), juce::dontSendNotification);
-                if (onProjectEdited) onProjectEdited();
             }
         };
         waveformDisplay.onTrimEndChanged = [this] (double t) {
             if (currentPad)
             {
                 currentPad->setTrimEnd (t);
-                currentPad->triggerTrimUpdateLive();
                 trimEndLabel.setText (currentPad->formatTimeString (t), juce::dontSendNotification);
-                if (onProjectEdited) onProjectEdited();
             }
+        };
+        waveformDisplay.onTrimGestureFinished = [this]
+        {
+            if (currentPad == nullptr)
+                return;
+
+            currentPad->syncPlaybackPositionToTrimRange();
+            currentPad->triggerTrimUpdateLive();
+
+            if (onProjectEdited)
+                onProjectEdited();
         };
         
         waveformDisplay.onWaveformDoubleClicked = [this] { openAdvancedTrimWindow(); };
@@ -978,7 +1365,7 @@ public:
                 refreshTransportUi();
             }
         };
-        fadeOutBtn.setComponentID ("sc_inspector_sliders");
+        fadeOutBtn.setComponentID ("sc_inspector_fade_out");
         fadeOutBtn.setLookAndFeel (&inspectorStyle);
         inspectorContent.addAndMakeVisible (fadeOutBtn);
         fadeOutBtn.setButtonText ({});
@@ -1047,7 +1434,9 @@ public:
         equalizerBtn.onClick = [this] { openEqualizerDialog(); };
 
         inspectorContent.addAndMakeVisible (timeLabel); timeLabel.setText ("00:00.0", juce::dontSendNotification);
-        timeLabel.setFont (ShowTheme::timerFont (32.0f, true)); timeLabel.setJustificationType (juce::Justification::centred);
+        timeLabel.setFont (showcontrol::inspector::timeRemainingFont());
+        timeLabel.setMinimumHorizontalScale (1.0f);
+        timeLabel.setJustificationType (juce::Justification::centred);
 
         inspectorContent.addAndMakeVisible (metaFormatLabel);
         metaFormatLabel.setFont (showcontrol::inspector::paramLabelFont());
@@ -1068,7 +1457,7 @@ public:
         };
 
         inspectorContent.addAndMakeVisible (volumeLabel);
-        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng (Volume):"), juce::dontSendNotification);
+        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng:"), juce::dontSendNotification);
         volumeLabel.setFont (showcontrol::inspector::paramLabelFont());
         volumeLabel.setJustificationType (juce::Justification::centredLeft);
 
@@ -1092,10 +1481,14 @@ public:
         normalizeToggle.onClick = [this] {
             if (currentPad) {
                 const bool state = normalizeToggle.getToggleState();
-                currentPad->setAutoNormalize (state);
+                auto settings = currentPad->getLoudnessSettings();
+                settings.enabled = state;
+                currentPad->setLoudnessSettings (settings);
+
                 if (state)
                 {
-                    applyNormalizeModeToCurrentPad();
+                    if (! currentPad->applyVolumeSyncGainIfReady())
+                        currentPad->requestNormalization();
                     if (currentPad->applyVolumeSyncGainIfReady())
                         volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
                 }
@@ -1110,46 +1503,10 @@ public:
             }
         };
 
-        // Chọn chế độ chuẩn hoá: RMS (cổ điển) hoặc LUFS (broadcast AI)
-        normalizeRmsBtn.setLookAndFeel (&inspectorStyle);
-        normalizeLufsBtn.setLookAndFeel (&inspectorStyle);
-        normalizeRmsBtn.setComponentID ("theme_seg_left");
-        normalizeLufsBtn.setComponentID ("theme_seg_right");
-        inspectorContent.addAndMakeVisible (normalizeRmsBtn);
-        normalizeRmsBtn.setButtonText ("RMS");
-        normalizeRmsBtn.setToggleState (true, juce::dontSendNotification);
-        normalizeRmsBtn.onClick = [this] {
-            normalizeRmsBtn.setToggleState (true, juce::dontSendNotification);
-            normalizeLufsBtn.setToggleState (false, juce::dontSendNotification);
-            normalizeModeIsLufs = false;
-            applyNormalizeModeToCurrentPad();
-            if (currentPad != nullptr && currentPad->applyVolumeSyncGainIfReady())
-                volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
-            if (onDefaultNormalizeModeChanged) onDefaultNormalizeModeChanged (false);
-            if (onProjectEdited) onProjectEdited();
-        };
-        inspectorContent.addAndMakeVisible (normalizeLufsBtn);
-        normalizeLufsBtn.setButtonText ("LUFS");
-        normalizeLufsBtn.setToggleState (false, juce::dontSendNotification);
-        normalizeLufsBtn.onClick = [this] {
-            normalizeLufsBtn.setToggleState (true, juce::dontSendNotification);
-            normalizeRmsBtn.setToggleState (false, juce::dontSendNotification);
-            normalizeModeIsLufs = true;
-            applyNormalizeModeToCurrentPad();
-            if (currentPad != nullptr && currentPad->applyVolumeSyncGainIfReady())
-                volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
-            if (onDefaultNormalizeModeChanged) onDefaultNormalizeModeChanged (true);
-            if (onProjectEdited) onProjectEdited();
-        };
-
-        inspectorContent.addAndMakeVisible (normalizeListBtn);
-        normalizeListBtn.setLookAndFeel (&inspectorStyle);
-        normalizeListBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cả list"));
-        normalizeListBtn.onClick = [this]
-        {
-            if (onNormalizeActiveListRequested)
-                onNormalizeActiveListRequested (normalizeModeIsLufs);
-        };
+        inspectorContent.addAndMakeVisible (normalizeAdvancedBtn);
+        normalizeAdvancedBtn.setLookAndFeel (&inspectorStyle);
+        normalizeAdvancedBtn.setButtonText (showcontrol::localization::tr (u8"Cài đặt nâng cao..."));
+        normalizeAdvancedBtn.onClick = [this] { openLoudnessManagerDialog(); };
 
         inspectorContent.addAndMakeVisible (rmsLabel);
         rmsLabel.setText (juce::String::fromUTF8 (u8"—"), juce::dontSendNotification);
@@ -1215,11 +1572,9 @@ public:
         stopTimer();
         detachFromPadResources();
         trimResetBtn.setLookAndFeel (nullptr);
-        normalizeListBtn.setLookAndFeel (nullptr);
+        normalizeAdvancedBtn.setLookAndFeel (nullptr);
         loopToggle.setLookAndFeel (nullptr);
         normalizeToggle.setLookAndFeel (nullptr);
-        normalizeRmsBtn.setLookAndFeel (nullptr);
-        normalizeLufsBtn.setLookAndFeel (nullptr);
         hotkeyScopeActiveBtn.setLookAndFeel (nullptr);
         hotkeyScopeGlobalBtn.setLookAndFeel (nullptr);
         outputBusCombo.setLookAndFeel (nullptr);
@@ -1242,16 +1597,29 @@ public:
     std::function<void()> onProjectEdited;
     /** Live update — tên pad đổi trong nameEditor, MainComponent refresh CUE/BGM list. */
     std::function<void()> onTrackNameChanged;
+    std::function<void()> onInspectorGestureBegan;
+    std::function<void()> onInspectorGestureEnded;
     std::function<void (SoundPad*)> onPadLoopChanged;
     /** Gọi khi user đổi output bus của pad — MainComponent lưu project. */
     std::function<void(int busIndex)> onOutputBusChanged;
+
+    /** Cắt & xóa đoạn âm thanh trong Trim Editor — MainComponent xử lý undo. */
+    std::function<void (SoundPad*, double, double, std::function<void (bool)>)> onPadAudioCutRequested;
+    std::function<bool()> onApplicationUndoRequested;
+    std::function<bool()> onApplicationRedoRequested;
+    std::function<bool()> onApplicationCanUndo;
+    std::function<bool()> onApplicationCanRedo;
 
     /** Đồng bộ màu tag PAD ↔ Cuelist + lưu JSON. */
     std::function<void(SoundPad*, juce::Colour)> onTagColourChanged;
     std::function<void()> onActivePadChanged;
 
-    /** Chuẩn hoá âm lượng toàn bộ pad có file trong list đang active (RMS hoặc LUFS). */
-    std::function<void(bool useLufs)> onNormalizeActiveListRequested;
+    /** Chuẩn hoá âm lượng toàn bộ pad có file trong list đang active. */
+    std::function<void (const showcontrol::loudness::LoudnessSettings&)> onNormalizeActiveListRequested;
+
+    /** Preview trước/sau cho toàn list — dùng trong Loudness Manager dialog. */
+    std::function<juce::Array<showcontrol::loudness::ListPreviewRow> (
+        const showcontrol::loudness::LoudnessSettings&)> onFetchLoudnessListPreview;
 
     /** Lưu RMS/LUFS mặc định cho project + pad mới. */
     std::function<void(bool useLufs)> onDefaultNormalizeModeChanged;
@@ -1261,8 +1629,6 @@ public:
     void setDefaultNormalizeMode (bool useLufs)
     {
         normalizeModeIsLufs = useLufs;
-        normalizeRmsBtn.setToggleState (! useLufs, juce::dontSendNotification);
-        normalizeLufsBtn.setToggleState (useLufs, juce::dontSendNotification);
     }
     SoundPad* getCurrentPad() const noexcept { return currentPad; }
 
@@ -1292,8 +1658,8 @@ public:
     {
         equalizerBtn.setButtonText (showcontrol::localization::tr (u8"Equalizer"));
         normalizeToggle.setButtonText (showcontrol::localization::tr (u8"Đồng bộ âm lượng"));
-        normalizeListBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cả list"));
-        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng (Volume):"), juce::dontSendNotification);
+        normalizeAdvancedBtn.setButtonText (showcontrol::localization::tr (u8"Cài đặt nâng cao..."));
+        volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng:"), juce::dontSendNotification);
         outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
         loopToggle.setButtonText (getLoopToggleLabel());
         assignInspectorTooltips();
@@ -1340,7 +1706,7 @@ public:
 
         nameLabel.setColour (juce::Label::textColourId, mutedCol.withAlpha (0.6f));
         nameValueLabel.setColour (juce::Label::textColourId, textCol);
-        nameValueLabel.setFont (showcontrol::inspector::trackNameFont());
+        nameValueLabel.setFont (showcontrol::inspector::trackNameValueFont());
         nameValueLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         nameValueLabel.setColour (juce::Label::backgroundWhenEditingColourId, editorBg);
         nameValueLabel.setColour (juce::Label::outlineWhenEditingColourId, editorOutline);
@@ -1354,8 +1720,8 @@ public:
         backBtn.setColour (juce::TextButton::textColourOffId, textCol);
         fadeOutBtn.setColour (juce::TextButton::buttonColourId, btnSec);
         fadeOutBtn.setColour (juce::TextButton::textColourOffId, textCol);
-        normalizeListBtn.setColour (juce::TextButton::buttonColourId, btnSec);
-        normalizeListBtn.setColour (juce::TextButton::textColourOffId, textCol);
+        normalizeAdvancedBtn.setColour (juce::TextButton::buttonColourId, btnSec);
+        normalizeAdvancedBtn.setColour (juce::TextButton::textColourOffId, textCol);
         metaFormatLabel.setColour (juce::Label::textColourId, mutedCol);
         loopToggle.setColour (juce::ToggleButton::textColourId, textCol);
         volumeLabel.setColour (juce::Label::textColourId, mutedCol);
@@ -1416,8 +1782,25 @@ public:
         if (onTrackNameChanged != nullptr)
             onTrackNameChanged();
 
+        if (onInspectorGestureEnded != nullptr)
+            onInspectorGestureEnded();
+
         if (onProjectEdited != nullptr)
             onProjectEdited();
+    }
+
+    void editorShown (juce::Label* label, juce::TextEditor& editor) override
+    {
+        if (label != &nameValueLabel)
+            return;
+
+        if (onInspectorGestureBegan)
+            onInspectorGestureBegan();
+
+        editor.setFont (showcontrol::inspector::trackNameValueFont());
+        editor.setJustification (juce::Justification::centredLeft);
+        editor.setIndents (2, 0);
+        editor.setBorder (juce::BorderSize<int> (4, 2, 4, 2));
     }
 
     void selectPad (SoundPad* newPad)
@@ -1425,10 +1808,7 @@ public:
         if (newPad == currentPad)
         {
             if (currentPad != nullptr)
-            {
-                refreshPadDisplayName();
-                refreshTransportUi();
-            }
+                refreshWaveformFromPad();
 
             syncInspectorColourFromPad();
             applyItemAccentColours();
@@ -1451,8 +1831,6 @@ public:
             loopToggle.setToggleState (currentPad->isLooping(), juce::dontSendNotification);
             normalizeToggle.setToggleState (currentPad->getAutoNormalize(), juce::dontSendNotification);
             normalizeModeIsLufs = currentPad->getNormalizeUseLufs();
-            normalizeRmsBtn.setToggleState (! normalizeModeIsLufs, juce::dontSendNotification);
-            normalizeLufsBtn.setToggleState (normalizeModeIsLufs, juce::dontSendNotification);
             syncNormalizeRowsLayout();
             refreshLoudnessLabel();
             waveformDisplay.setThumbnail (&currentPad->getThumbnail());
@@ -1499,6 +1877,34 @@ public:
             updateFileInfoLabels (currentPad->getMetadata());
     }
 
+    /** Đồng bộ waveform + trim + transport Inspector khi pad đổi file hoặc undo/redo trên cùng pad. */
+    void refreshWaveformFromPad()
+    {
+        if (currentPad == nullptr)
+            return;
+
+        refreshPadDisplayName();
+        volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
+        fadeInSlider.setValue (currentPad->getFadeInMs(), juce::dontSendNotification);
+        fadeOutSlider.setValue (currentPad->getFadeOutMs(), juce::dontSendNotification);
+        loopToggle.setToggleState (currentPad->isLooping(), juce::dontSendNotification);
+
+        waveformDisplay.setThumbnail (&currentPad->getThumbnail());
+        waveformDisplay.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
+        trimStartLabel.setText (currentPad->formatTimeString (currentPad->getTrimStart()), juce::dontSendNotification);
+
+        const double len = currentPad->getPlaybackLength();
+        const double te  = currentPad->getTrimEnd();
+        trimEndLabel.setText (currentPad->formatTimeString (te > 0.0 ? te : len), juce::dontSendNotification);
+        waveformDisplay.setProgress (currentPad->getPlaybackPosition(), len);
+        waveformDisplay.setFadeRegions (currentPad->getFadeInMs(), currentPad->getFadeOutMs(),
+                                       currentPad->getEffectiveLength());
+        updateFileInfoLabels (currentPad->getMetadata());
+        refreshTransportUi();
+        refreshLoudnessLabel();
+        waveformDisplay.repaint();
+    }
+
     AudioMetadata getCurrentMetadata() const
     {
         return currentPad != nullptr ? currentPad->getMetadata() : AudioMetadata {};
@@ -1515,7 +1921,7 @@ public:
 
         if (currentPad->isNormalizationInProgress())
         {
-            rmsLabel.setText (juce::String::fromUTF8 (u8"Đang đo…"), juce::dontSendNotification);
+            rmsLabel.setText (showcontrol::localization::tr (u8"Đang đo…"), juce::dontSendNotification);
             updateRmsLabelAppearance();
             return;
         }
@@ -1524,7 +1930,7 @@ public:
         if (currentPad->getAutoNormalize() && currentPad->getDspLufsSyncGain() > 0.001f)
         {
             const float db = juce::Decibels::gainToDecibels (currentPad->getDspLufsSyncGain());
-            text += juce::String::fromUTF8 (u8" · LUFS sync ") + juce::String (db, 1) + " dB";
+            text += showcontrol::localization::tr (u8" · LUFS sync ") + juce::String (db, 1) + " dB";
         }
         rmsLabel.setText (text.isNotEmpty() ? text : juce::String::fromUTF8 (u8"—"),
                           juce::dontSendNotification);
@@ -1609,8 +2015,6 @@ public:
 
         loopToggle.repaint();
         normalizeToggle.repaint();
-        normalizeRmsBtn.repaint();
-        normalizeLufsBtn.repaint();
         updateEqualizerButtonStyle();
         playBtn.repaint();
         waveformDisplay.repaint();
@@ -1634,16 +2038,91 @@ public:
         });
     }
 
+    void openLoudnessManagerDialog (juce::Component* positionAnchor = nullptr)
+    {
+        if (currentPad == nullptr)
+            return;
+
+        showcontrol::ui::showLoudnessManagerDialog (positionAnchor != nullptr ? positionAnchor : this,
+                                                    currentPad->getLoudnessSettings(),
+                                                    isDarkTheme,
+                                                    [this] (const showcontrol::loudness::LoudnessSettings& settings)
+        {
+            if (currentPad == nullptr)
+                return;
+
+            currentPad->setLoudnessSettings (settings);
+            normalizeToggle.setToggleState (settings.enabled, juce::dontSendNotification);
+            normalizeModeIsLufs = (settings.mode == showcontrol::loudness::MeasureMode::lufs);
+
+            if (settings.enabled)
+            {
+                if (! currentPad->applyVolumeSyncGainIfReady())
+                    currentPad->requestNormalization();
+            }
+            else
+            {
+                currentPad->setOutputGain (1.0f);
+            }
+
+            volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
+            refreshLoudnessLabel();
+            updateNormalizeModeVisibility();
+
+            if (onDefaultNormalizeModeChanged)
+                onDefaultNormalizeModeChanged (normalizeModeIsLufs);
+            if (onProjectEdited)
+                onProjectEdited();
+        },
+                                                    [this] (const showcontrol::loudness::LoudnessSettings& settings)
+        {
+            if (onDefaultNormalizeModeChanged)
+                onDefaultNormalizeModeChanged (settings.mode == showcontrol::loudness::MeasureMode::lufs);
+            if (onNormalizeActiveListRequested)
+                onNormalizeActiveListRequested (settings);
+            if (onProjectEdited)
+                onProjectEdited();
+        },
+                                                    [this] (const showcontrol::loudness::LoudnessSettings& settings)
+        {
+            if (onFetchLoudnessListPreview)
+                return onFetchLoudnessListPreview (settings);
+
+            return juce::Array<showcontrol::loudness::ListPreviewRow> {};
+        });
+    }
+
     void openAdvancedTrimWindow (juce::Component* positionAnchor = nullptr)
     {
         if (currentPad == nullptr || !currentPad->hasAudioFile()) return;
 
-        auto* trimComp = new AdvancedTrimComponent (currentPad, isDarkTheme, [this] {
+        AdvancedTrimEditorCallbacks trimCallbacks;
+        trimCallbacks.onInspectorSync = [this]
+        {
             waveformDisplay.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
             trimStartLabel.setText (currentPad->formatTimeString (currentPad->getTrimStart()), juce::dontSendNotification);
-            double len = currentPad->getPlaybackLength(); double te = currentPad->getTrimEnd();
+            const double len = currentPad->getPlaybackLength();
+            const double te = currentPad->getTrimEnd();
             trimEndLabel.setText (currentPad->formatTimeString (te > 0.0 ? te : len), juce::dontSendNotification);
-        });
+        };
+        trimCallbacks.onGestureFinished = [this]
+        {
+            if (onProjectEdited)
+                onProjectEdited();
+        };
+        trimCallbacks.onCutRequested = [this] (SoundPad* pad, double cutStart, double cutEnd, auto onDone)
+        {
+            if (onPadAudioCutRequested)
+                onPadAudioCutRequested (pad, cutStart, cutEnd, std::move (onDone));
+            else if (onDone)
+                onDone (false);
+        };
+        trimCallbacks.performUndo = [this] { return onApplicationUndoRequested && onApplicationUndoRequested(); };
+        trimCallbacks.performRedo = [this] { return onApplicationRedoRequested && onApplicationRedoRequested(); };
+        trimCallbacks.canUndo = [this] { return onApplicationCanUndo && onApplicationCanUndo(); };
+        trimCallbacks.canRedo = [this] { return onApplicationCanRedo && onApplicationCanRedo(); };
+
+        auto* trimComp = new AdvancedTrimComponent (currentPad, isDarkTheme, std::move (trimCallbacks));
 
         juce::DialogWindow::LaunchOptions options;
         options.content.setOwned (trimComp);
@@ -1651,11 +2130,14 @@ public:
         options.dialogBackgroundColour = ShowTheme::get (isDarkTheme).panelElevated;
         options.escapeKeyTriggersCloseButton = true;
         options.useNativeTitleBar = true;
-        options.resizable = false;
+        options.resizable = true;
 
         if (auto* dw = options.launchAsync())
         {
             dw->setUsingNativeTitleBar (true);
+            dw->setResizable (true, false);
+            dw->setSize (780, 420);
+            dw->setResizeLimits (520, 420, 1600, 420);
             showcontrol::ui::centreFloatingWindowInMainApp (*dw, positionAnchor != nullptr ? positionAnchor : this);
            #if JUCE_MAC
             showcontrol::mac::deferFarragoFullSizeContentView (*dw);
@@ -1743,8 +2225,8 @@ public:
         static constexpr int rowHWave = 72;
         static constexpr int rowHTrim = 16;
         static constexpr int rowHTransport = 28;
-        static constexpr int rowHTime = 30;
-        static constexpr int rowHMeta = 12;
+        static constexpr int rowHTime = 36;
+        static constexpr int rowHMeta = 14;
         static constexpr int rowHLoopEq = 32;
         static constexpr int rowHBus = 28;
         static constexpr int rowHBusLabel = 110;
@@ -1816,7 +2298,6 @@ public:
 
         skipGap();
         timeLabel.setBounds (area.removeFromTop (rowHTime));
-        skipGap();
         metaFormatLabel.setBounds (area.removeFromTop (rowHMeta));
         skipGap();
 
@@ -1849,44 +2330,25 @@ public:
 
         // --- Đồng bộ âm lượng ---
         const bool normOn = normalizeToggle.getToggleState();
-        placeFullWidth (normalizeToggle, rowHBtn);
+        {
+            auto normalizeRow = area.removeFromTop (rowHBtn);
+            const int leftWidth = juce::jmax (120, (normalizeRow.getWidth() * 58) / 100);
+            normalizeToggle.setBounds (normalizeRow.removeFromLeft (leftWidth));
+            normalizeRow.removeFromLeft (pairGap);
+            normalizeAdvancedBtn.setBounds (normalizeRow);
+        }
+        normalizeAdvancedBtn.setVisible (true);
 
-        if (normOn)
+        if (normOn && rmsLabel.isVisible())
         {
             skipGap();
-
-            auto modeRow = area.removeFromTop (rowHBtn);
-            const int halfWidth = juce::jmax (0, (modeRow.getWidth() - pairGap) / 2);
-            normalizeRmsBtn.setBounds (modeRow.removeFromLeft (halfWidth));
-            modeRow.removeFromLeft (pairGap);
-            normalizeLufsBtn.setBounds (modeRow);
-            normalizeRmsBtn.setVisible (true);
-            normalizeLufsBtn.setVisible (true);
-
-            skipGap();
-            placeFullWidth (normalizeListBtn, rowHBtn);
-            normalizeListBtn.setVisible (true);
-
-            if (rmsLabel.isVisible())
-            {
-                skipGap();
-                placeFullWidth (rmsLabel, rowHLoudness);
-            }
-            else
-            {
-                rmsLabel.setBounds ({});
-            }
+            placeFullWidth (rmsLabel, rowHLoudness);
         }
         else
         {
-            normalizeRmsBtn.setBounds ({});
-            normalizeLufsBtn.setBounds ({});
-            normalizeListBtn.setBounds ({});
             rmsLabel.setBounds ({});
-            normalizeRmsBtn.setVisible (false);
-            normalizeLufsBtn.setVisible (false);
-            normalizeListBtn.setVisible (false);
-            rmsLabel.setVisible (false);
+            if (! normOn)
+                rmsLabel.setVisible (false);
         }
 
         skipGap();
@@ -1955,7 +2417,10 @@ public:
         if (currentPad == nullptr || ! currentPad->hasAudioFile())
             return;
 
-        currentPad->setNormalizeUseLufs (normalizeModeIsLufs);
+        auto settings = currentPad->getLoudnessSettings();
+        settings.mode = normalizeModeIsLufs ? showcontrol::loudness::MeasureMode::lufs
+                                            : showcontrol::loudness::MeasureMode::rms;
+        currentPad->setLoudnessSettings (settings);
 
         if (normalizeToggle.getToggleState())
         {
@@ -1989,12 +2454,8 @@ public:
     {
         normalizeToggle.setTooltip (showcontrol::localization::tr (
             u8"Đồng bộ mức Gain chuẩn hóa dựa trên cấu hình phân tích RMS hoặc LUFS."));
-        normalizeListBtn.setTooltip (showcontrol::localization::tr (
-            u8"Đồng bộ mức âm lượng chuẩn LUFS toàn danh sách"));
-        normalizeRmsBtn.setTooltip (showcontrol::localization::tr (
-            u8"Chuyển chế độ đo âm lượng theo công suất trung bình tín hiệu điện toán RMS."));
-        normalizeLufsBtn.setTooltip (showcontrol::localization::tr (
-            u8"Chuyển chế độ đo âm lượng theo thuật toán cảm nhận tai người chuẩn phát thanh LUFS."));
+        normalizeAdvancedBtn.setTooltip (showcontrol::localization::tr (
+            u8"Mở hộp thoại quản lý đồng bộ âm lượng nâng cao và áp dụng tức thì."));
         loopToggle.setTooltip (showcontrol::localization::tr (
             u8"Bật/Tắt chế độ phát lặp lại tuần hoàn cho riêng track nhạc hoặc ô PAD này."));
         equalizerBtn.setTooltip (showcontrol::localization::tr (
@@ -2025,12 +2486,11 @@ private:
     juce::StringArray cachedInspectorBusNames;
     InspectorStyle inspectorStyle;
     juce::Label nameLabel, trimStartLabel, trimEndLabel, timeLabel, volumeLabel, rmsLabel, hotkeyScopeLabel;
-    juce::TextButton normalizeListBtn;
+    juce::TextButton normalizeAdvancedBtn;
     TrackNameEditLabel nameValueLabel;
     InspectorWaveform waveformDisplay;
     juce::TextButton trimResetBtn, backBtn, playBtn, fadeOutBtn;
     juce::ToggleButton loopToggle, normalizeToggle;
-    juce::ToggleButton normalizeRmsBtn, normalizeLufsBtn;
     juce::ToggleButton hotkeyScopeActiveBtn, hotkeyScopeGlobalBtn;
     juce::Slider volumeSlider;
     juce::Label outputBusLabel;
