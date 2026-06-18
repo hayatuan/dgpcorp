@@ -314,6 +314,16 @@ public:
     int getListCount() const { return sets.size(); }
     int getListTrackCount (int index) const { return (index >= 0 && index < sets.size()) ? sets[index].tracks : 0; }
     juce::String getListName (int index) const { return (index >= 0 && index < sets.size()) ? sets[index].name : ""; }
+
+    void setListName (int index, const juce::String& name)
+    {
+        if (index >= 0 && index < sets.size())
+        {
+            sets.getReference (index).name = name;
+            repaint();
+        }
+    }
+
     int getSelectedIndex() const { return selectedIndex; }
     void setSelectedIndex (int i) { selectedIndex = i; repaint(); }
 

@@ -20,6 +20,8 @@ struct ShowOscCallbacks
     std::function<void (const showcontrol::backup::padpatch::PatchMessage&)> onPadPatch;
     std::function<void (int listIndex, int fromIndex, int toIndex)> onPadReorder;
     std::function<void (int listIndex, const juce::StringArray& padKeysInOrder)> onPadOrder;
+    std::function<void (const showcontrol::backup::listpatch::PatchMessage&)> onListPatch;
+    std::function<void (int fromIndex, int toIndex)> onListReorder;
 };
 
 /** OSC Inbound — điều khiển show / đồng bộ Primary→Backup trên LAN. */
@@ -334,6 +336,52 @@ private:
             juce::MessageManager::callAsync ([cb = callbacks.onPadOrder, listIndex, keys]
             {
                 cb (listIndex, keys);
+            });
+
+            return;
+        }
+
+        if (address == showcontrol::backup::addresses::listPatch)
+        {
+            if (! callbacks.onListPatch)
+                return;
+
+            showcontrol::backup::listpatch::PatchMessage patch;
+            patch.listIndex = readIntArg (message, 0, -1);
+            patch.flags     = (juce::uint32) readIntArg (message, 1, 0);
+
+            int arg = 2;
+
+            if ((patch.flags & showcontrol::backup::listpatch::kName) != 0 && arg < message.size())
+            {
+                if (message[arg].isString())
+                    patch.name = message[arg++].getString();
+                else
+                    ++arg;
+            }
+
+            if ((patch.flags & showcontrol::backup::listpatch::kThemeColour) != 0 && arg < message.size())
+                patch.colourArgb = (juce::uint32) readIntArg (message, arg++, 0);
+
+            juce::MessageManager::callAsync ([cb = callbacks.onListPatch, patch]
+            {
+                cb (patch);
+            });
+
+            return;
+        }
+
+        if (address == showcontrol::backup::addresses::listReorder)
+        {
+            if (! callbacks.onListReorder)
+                return;
+
+            const int fromIndex = readIntArg (message, 0, -1);
+            const int toIndex   = readIntArg (message, 1, -1);
+
+            juce::MessageManager::callAsync ([cb = callbacks.onListReorder, fromIndex, toIndex]
+            {
+                cb (fromIndex, toIndex);
             });
         }
     }

@@ -818,30 +818,24 @@ bool PadPanel::keyPressed (const juce::KeyPress& key)
 
     if (currentlyFocusedPad == nullptr)
     {
-        // Nếu chưa có focus/selection (vừa chuyển view hoặc vừa load list),
-        // chọn PAD hợp lệ đầu tiên để mũi tên bắt đầu hoạt động ngay.
-        SoundPad* first = nullptr;
-
         for (auto* pad : *pads)
         {
             if (pad != nullptr && pad->occupiesCueGridSlot())
             {
-                first = pad;
+                currentlyFocusedPad = pad;
                 break;
             }
         }
 
-        if (first != nullptr)
-        {
-            first->grabKeyboardFocus();
+        if (currentlyFocusedPad == nullptr)
+            return false;
 
-            if (onGridFocusPadChanged != nullptr)
-                onGridFocusPadChanged (first);
+        currentlyFocusedPad->grabKeyboardFocus();
 
-            first->repaint();
-        }
+        if (onGridFocusPadChanged != nullptr)
+            onGridFocusPadChanged (currentlyFocusedPad);
 
-        return (first != nullptr);
+        currentlyFocusedPad->repaint();
     }
 
     if (currentlyFocusedPad != nullptr)
@@ -849,8 +843,7 @@ bool PadPanel::keyPressed (const juce::KeyPress& key)
         const int curRow = currentlyFocusedPad->getGridRow();
         const int curCol = currentlyFocusedPad->getGridCol();
 
-        // For arrow navigation: walk the grid cell-by-cell in the pressed direction.
-        // This skips empty cells and avoids diagonal "jumping".
+        // Walk the grid cell-by-cell in the pressed direction (skip empty cells).
         if (arrowCode == juce::KeyPress::rightKey
             || arrowCode == juce::KeyPress::leftKey
             || arrowCode == juce::KeyPress::upKey
@@ -926,68 +919,13 @@ bool PadPanel::keyPressed (const juce::KeyPress& key)
                     onGridFocusPadChanged (target);
 
                 target->repaint();
-                return true;
-            }
-        }
-
-        SoundPad* bestTargetPad = nullptr;
-        float minScore = std::numeric_limits<float>::max();
-
-        for (auto* pad : *pads)
-        {
-            if (pad == nullptr || pad == currentlyFocusedPad || ! pad->occupiesCueGridSlot())
-                continue;
-
-            const int pRow = pad->getGridRow();
-            const int pCol = pad->getGridCol();
-            float score = 0.0f;
-            bool isValidDirection = false;
-
-            if (arrowCode == juce::KeyPress::upKey && pRow < curRow)
-            {
-                isValidDirection = true;
-                score = std::abs ((float) (pRow - curRow)) * 2.0f
-                      + std::abs ((float) (pCol - curCol)) * 1.0f;
-            }
-            else if (arrowCode == juce::KeyPress::downKey && pRow > curRow)
-            {
-                isValidDirection = true;
-                score = std::abs ((float) (pRow - curRow)) * 2.0f
-                      + std::abs ((float) (pCol - curCol)) * 1.0f;
-            }
-            else if (arrowCode == juce::KeyPress::leftKey && pCol < curCol)
-            {
-                isValidDirection = true;
-                score = std::abs ((float) (pCol - curCol)) * 2.0f
-                      + std::abs ((float) (pRow - curRow)) * 1.0f;
-            }
-            else if (arrowCode == juce::KeyPress::rightKey && pCol > curCol)
-            {
-                isValidDirection = true;
-                score = std::abs ((float) (pCol - curCol)) * 2.0f
-                      + std::abs ((float) (pRow - curRow)) * 1.0f;
             }
 
-            if (isValidDirection && score < minScore)
-            {
-                minScore = score;
-                bestTargetPad = pad;
-            }
-        }
-
-        if (bestTargetPad != nullptr && bestTargetPad != currentlyFocusedPad)
-        {
-            currentlyFocusedPad->repaint();
-            bestTargetPad->grabKeyboardFocus();
-
-            if (onGridFocusPadChanged != nullptr)
-                onGridFocusPadChanged (bestTargetPad);
-
-            bestTargetPad->repaint();
+            return true;
         }
     }
 
-    return true;
+    return false;
 }
 
 void PadPanel::setPadChildrenMousePassthrough (bool passthrough) noexcept

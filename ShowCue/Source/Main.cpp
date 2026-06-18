@@ -358,33 +358,23 @@ public:
 
 
         bool keyPressed (const juce::KeyPress& key) override
-
         {
-
             const auto mods = key.getModifiers();
 
-
-
             if (mods.isCommandDown() && key.getTextCharacter() == ',')
-
             {
-
                 if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
-
                 {
-
                     main->showPreferencesDialog();
-
                     return true;
-
                 }
-
             }
 
-
+            if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
+                if (main->keyPressed (key))
+                    return true;
 
             return DocumentWindow::keyPressed (key);
-
         }
 
 

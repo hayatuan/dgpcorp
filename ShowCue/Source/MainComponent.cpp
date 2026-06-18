@@ -2804,6 +2804,7 @@ void MainComponent::moveListInProject (int fromIdx, int toIdx)
     sidebarPanel.setSelectedIndex (activeListIndex);
     loadList (activeListIndex, sidebarPanel.getListTrackCount (activeListIndex), allLists[activeListIndex]->isGrid);
     saveProject();
+    broadcastListReorderIfPrimary (fromIdx, toIdx);
 }
 
 void MainComponent::movePadInList (int listIdx, int fromPadIdx, int toPadIdx)
@@ -3693,6 +3694,10 @@ void MainComponent::applyTrackRenameAtIndex (int listIdx,
 
     if (saveNow)
         saveApplicationState();
+
+    if (auto* renamedPad = list->pads[cueIndex])
+        broadcastPadPatchIfPrimary (showcontrol::backup::padpatch::patchFromPad (
+            listIdx, cueIndex, showcontrol::backup::padpatch::kName, renamedPad));
 }
 
 void MainComponent::applyTrackRenameWithUndo (int listIdx,
@@ -8340,7 +8345,16 @@ MainComponent::MainComponent()
 
     sidebarPanel.onMoveList = [this] (int fromIdx, int toIdx) { moveListInProject (fromIdx, toIdx); };
 
-    sidebarPanel.onRenameList = [this] (int idx, juce::String) { juce::ignoreUnused (idx); saveProject(); };
+    sidebarPanel.onRenameList = [this] (int idx, juce::String newName)
+    {
+        saveProject();
+
+        showcontrol::backup::listpatch::PatchMessage patch;
+        patch.listIndex = idx;
+        patch.flags     = showcontrol::backup::listpatch::kName;
+        patch.name      = newName;
+        broadcastListPatchIfPrimary (patch);
+    };
 
     sidebarPanel.onDuplicateSet   = [this] (int idx) { duplicateListAtIndex (idx); };
     sidebarPanel.onAddSounds      = [this] (int idx) { addSoundsToSet (idx); };
@@ -9678,8 +9692,19 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
     if (currentList == nullptr || currentList->pads.size() == 0)
         return false;
 
+    const int arrowCode = HotkeyManager::normalizeArrowKeyCode (
+        showcontrol::keyboard::physicalKeyCode (key));
+
     if (currentList->isGrid)
     {
+        if (currentList->useCueListPanel && cueListPanel != nullptr && cueListPanel->isVisible())
+        {
+            if (cueListPanel->keyPressed (key))
+                return true;
+
+            return false;
+        }
+
         if (auto* panel = getPadPanel())
         {
             if (panel->keyPressed (key))
@@ -9692,8 +9717,6 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
     // Nếu selection đang rỗng/ngoài range (vừa chuyển list), kéo về index hợp lệ
     if (! juce::isPositiveAndBelow (selectedBgmIndex, currentList->pads.size()))
         selectedBgmIndex = 0;
-
-    const int arrowCode = HotkeyManager::normalizeArrowKeyCode (key.getKeyCode());
 
     if (arrowCode == juce::KeyPress::upKey || arrowCode == juce::KeyPress::leftKey)
         selectedBgmIndex = juce::jlimit (0, currentList->pads.size() - 1, selectedBgmIndex - 1);
@@ -10395,7 +10418,15 @@ bool MainComponent::handleApplicationHotkey (const juce::KeyPress& key)
     }
 
     if (! canTriggerPlayback)
+    {
+        if (HotkeyManager::isArrowNavigationKeyCode (keyCode))
+        {
+            routePhysicalHotkeyFromKeyCode (keyCode);
+            return true;
+        }
+
         return swallowMatrixKey;
+    }
 
     if (isSpacebarKey (key)
         || keyCode == juce::KeyPress::escapeKey
@@ -10566,8 +10597,6 @@ void MainComponent::loadList (int listIndex, int trackCount, bool isGridHint)
     {
         if (activeList == 1 && cueListPanel != nullptr && cueListPanel->isShowing())
             cueListPanel->grabKeyboardFocus();
-        else if (viewScroller.isVisible())
-            viewScroller.grabKeyboardFocus();
         else
             grabKeyboardFocus();
     }
@@ -10642,6 +10671,12 @@ void MainComponent::updateListThemeColour (int listIndex, juce::Colour colour)
     sidebarPanel.setListThemeColour (listIndex, list->themeColour);
     sidebarPanel.repaint();
     triggerSave();
+
+    showcontrol::backup::listpatch::PatchMessage patch;
+    patch.listIndex   = listIndex;
+    patch.flags       = showcontrol::backup::listpatch::kThemeColour;
+    patch.colourArgb  = (juce::uint32) list->themeColour.getARGB();
+    broadcastListPatchIfPrimary (patch);
 }
 
 void MainComponent::refreshGlobalTrackAccent()
@@ -10846,19 +10881,13 @@ void MainComponent::applyPlayoutViewFocus (bool isPadMode)
         return;
     }
 
-    if (auto* panel = getPadPanel())
+    if (auto* panel = getPadPanel(); isPadMode && panel != nullptr && panel->isShowing())
     {
-        if (isPadMode && viewScroller.isVisible())
-        {
-            panel->grabKeyboardFocus();
-            return;
-        }
+        panel->grabKeyboardFocus();
+        return;
     }
 
-    if (viewScroller.isVisible())
-        viewScroller.grabKeyboardFocus();
-    else if (isShowing())
-        grabKeyboardFocus();
+    grabKeyboardFocus();
 }
 
 void MainComponent::flushPlayoutViewGraphics (bool isPadMode)
@@ -13069,6 +13098,9 @@ void MainComponent::triggerGlobalPauseAll()
 
 bool MainComponent::shouldBlockLocalPlaybackCommand() const noexcept
 {
+    if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::standalone)
+        return false;
+
     if (syncApplying.load (std::memory_order_acquire))
         return false;
 
@@ -13112,6 +13144,22 @@ void MainComponent::broadcastPadPatchIfPrimary (const showcontrol::backup::padpa
     broadcastSyncIfPrimary ([&patch] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
     {
         b.sendPadPatch (patch);
+    });
+}
+
+void MainComponent::broadcastListPatchIfPrimary (const showcontrol::backup::listpatch::PatchMessage& patch)
+{
+    broadcastSyncIfPrimary ([&patch] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendListPatch (patch);
+    });
+}
+
+void MainComponent::broadcastListReorderIfPrimary (int fromIndex, int toIndex)
+{
+    broadcastSyncIfPrimary ([fromIndex, toIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendListReorder (fromIndex, toIndex);
     });
 }
 
@@ -13247,7 +13295,20 @@ void MainComponent::applySyncedPadPatch (const showcontrol::backup::padpatch::Pa
     } scope { syncApplying, ! wasSyncing };
 
     if ((patch.flags & showcontrol::backup::padpatch::kName) != 0)
+    {
         pad->setCustomName (patch.name);
+
+        if (juce::isPositiveAndBelow (patch.padIndex, list->cueMeta.size()))
+            list->cueMeta.getReference (patch.padIndex).name = patch.name;
+
+        if (activeListIndex == patch.listIndex)
+        {
+            if (list->isGrid && list->useCueListPanel && cueListPanel != nullptr)
+                cueListPanel->repaintCueRow (patch.padIndex);
+
+            refreshCueListPanel (false);
+        }
+    }
 
     if ((patch.flags & showcontrol::backup::padpatch::kColour) != 0)
         applyTagColourToPadAndCue (*list, patch.padIndex, juce::Colour (patch.colourArgb));
@@ -13420,6 +13481,73 @@ void MainComponent::handleSyncPadOrder (int listIndex, const juce::StringArray& 
     applySyncedPadListOrder (listIndex, padKeysInOrder);
 }
 
+void MainComponent::applySyncedListPatch (const showcontrol::backup::listpatch::PatchMessage& patch)
+{
+    if (patch.listIndex < 0 || patch.listIndex >= allLists.size())
+        return;
+
+    auto* list = allLists[patch.listIndex];
+
+    if (list == nullptr)
+        return;
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    if ((patch.flags & showcontrol::backup::listpatch::kName) != 0)
+        sidebarPanel.setListName (patch.listIndex, patch.name);
+
+    if ((patch.flags & showcontrol::backup::listpatch::kThemeColour) != 0)
+    {
+        list->themeColour = showcontrol::colours::snapToPalette (juce::Colour (patch.colourArgb));
+        sidebarPanel.setListThemeColour (patch.listIndex, list->themeColour);
+        sidebarPanel.repaint();
+    }
+
+    triggerSave();
+}
+
+void MainComponent::handleSyncListPatch (const showcontrol::backup::listpatch::PatchMessage& patch)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    showcontrol::backup::logSyncEvent ("RX listPatch list=" + juce::String (patch.listIndex)
+                                       + " flags=" + juce::String ((int) patch.flags));
+
+    applySyncedListPatch (patch);
+}
+
+void MainComponent::handleSyncListReorder (int fromIndex, int toIndex)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    showcontrol::backup::logSyncEvent ("RX listReorder from=" + juce::String (fromIndex)
+                                       + " to=" + juce::String (toIndex));
+
+    const bool wasSyncing = syncApplying.exchange (true);
+    struct SyncScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncScope() { if (restore) flag.store (false); }
+    } scope { syncApplying, ! wasSyncing };
+
+    moveListInProject (fromIndex, toIndex);
+}
+
 bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
 {
     if (activeListIndex < 0 || activeListIndex >= allLists.size())
@@ -13458,6 +13586,9 @@ bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
 
 void MainComponent::setBackupTakeoverActive (bool active)
 {
+    if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::standalone)
+        active = false;
+
     backupTakeoverActive = active;
     updateBackupConnectionUi();
 
@@ -14140,6 +14271,22 @@ void MainComponent::restartBackupSync()
     const auto peers   = showcontrol::prefs::loadBackupPeerHosts();
     bool listenEnabled = showcontrol::prefs::loadOscEnabled();
 
+    if (role == (int) showcontrol::backup::Role::standalone)
+    {
+        backupTakeoverActive = false;
+        lastPrimaryHeartbeatRxMs = 0;
+        lastHeartbeatTickMs = 0;
+        lastPeerHealthTickMs = 0;
+        backupPeerStatuses.clear();
+        syncApplying.store (false, std::memory_order_release);
+        pendingPadPatchListIdx = -1;
+        pendingPadPatchPadIdx  = -1;
+        pendingPadPatchFlags   = 0;
+
+        if (padPatchBroadcastTimer != nullptr)
+            padPatchBroadcastTimer->stopTimer();
+    }
+
     if (const char* env = std::getenv ("SHOWCUE_OSC_ENABLE"))
         listenEnabled = (env[0] != '0' && env[0] != '\0');
 
@@ -14226,30 +14373,49 @@ void MainComponent::restartBackupSync()
         else if (listIndex == activeListIndex)
             triggerCueListPause (padIndex);
     };
-    callbacks.onHeartbeat = [this] (juce::uint32 sequence)
+
+    if (isBackupRole)
     {
-        handleSyncHeartbeat (sequence);
-    };
-    callbacks.onTakeover = [this] (bool active)
+        callbacks.onHeartbeat = [this] (juce::uint32 sequence)
+        {
+            handleSyncHeartbeat (sequence);
+        };
+        callbacks.onTakeover = [this] (bool active)
+        {
+            handleSyncTakeover (active);
+        };
+        callbacks.onSelection = [this] (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices)
+        {
+            handleSyncSelection (listIndex, padIndex, viewMode, multiIndices);
+        };
+        callbacks.onPadPatch = [this] (const showcontrol::backup::padpatch::PatchMessage& patch)
+        {
+            handleSyncPadPatch (patch);
+        };
+        callbacks.onPadReorder = [this] (int listIndex, int fromIndex, int toIndex)
+        {
+            handleSyncPadReorder (listIndex, fromIndex, toIndex);
+        };
+        callbacks.onPadOrder = [this] (int listIndex, const juce::StringArray& padKeysInOrder)
+        {
+            handleSyncPadOrder (listIndex, padKeysInOrder);
+        };
+        callbacks.onListPatch = [this] (const showcontrol::backup::listpatch::PatchMessage& patch)
+        {
+            handleSyncListPatch (patch);
+        };
+        callbacks.onListReorder = [this] (int fromIndex, int toIndex)
+        {
+            handleSyncListReorder (fromIndex, toIndex);
+        };
+    }
+    else if (role == (int) showcontrol::backup::Role::primary)
     {
-        handleSyncTakeover (active);
-    };
-    callbacks.onSelection = [this] (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices)
-    {
-        handleSyncSelection (listIndex, padIndex, viewMode, multiIndices);
-    };
-    callbacks.onPadPatch = [this] (const showcontrol::backup::padpatch::PatchMessage& patch)
-    {
-        handleSyncPadPatch (patch);
-    };
-    callbacks.onPadReorder = [this] (int listIndex, int fromIndex, int toIndex)
-    {
-        handleSyncPadReorder (listIndex, fromIndex, toIndex);
-    };
-    callbacks.onPadOrder = [this] (int listIndex, const juce::StringArray& padKeysInOrder)
-    {
-        handleSyncPadOrder (listIndex, padKeysInOrder);
-    };
+        callbacks.onTakeover = [this] (bool active)
+        {
+            handleSyncTakeover (active);
+        };
+    }
 
     auto listener = std::make_unique<showcontrol::osc::ShowOscListener> (callbacks);
 

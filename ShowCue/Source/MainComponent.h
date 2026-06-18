@@ -212,11 +212,16 @@ private:
     void handleSyncPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch);
     void handleSyncPadReorder (int listIndex, int fromIndex, int toIndex);
     void handleSyncPadOrder (int listIndex, const juce::StringArray& padKeysInOrder);
+    void handleSyncListPatch (const showcontrol::backup::listpatch::PatchMessage& patch);
+    void handleSyncListReorder (int fromIndex, int toIndex);
+    void applySyncedListPatch (const showcontrol::backup::listpatch::PatchMessage& patch);
     void applySyncedPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch);
     void applySyncedPadListOrder (int listIndex, const juce::StringArray& padKeysInOrder);
     void refreshListUiAfterSyncedReorder (int listIndex);
     void broadcastPadPatchIfPrimary (const showcontrol::backup::padpatch::PatchMessage& patch);
     void broadcastPadListOrderIfPrimary (int listIndex);
+    void broadcastListPatchIfPrimary (const showcontrol::backup::listpatch::PatchMessage& patch);
+    void broadcastListReorderIfPrimary (int fromIndex, int toIndex);
     void schedulePadPatchBroadcast (int listIndex, int padIndex, juce::uint32 flags);
     void flushPendingPadPatchBroadcast();
     void applySyncedSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);

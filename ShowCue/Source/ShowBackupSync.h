@@ -59,6 +59,8 @@ inline constexpr const char* selection  = "/showcue/sync/selection";
 inline constexpr const char* padPatch   = "/showcue/sync/padPatch";
 inline constexpr const char* padReorder = "/showcue/sync/padReorder";
 inline constexpr const char* padOrder   = "/showcue/sync/padOrder";
+inline constexpr const char* listPatch   = "/showcue/sync/listPatch";
+inline constexpr const char* listReorder = "/showcue/sync/listReorder";
 inline constexpr const char* legacyPanic = "/showcue/panic";
 inline constexpr const char* legacyGo    = "/showcue/go";
 } // namespace addresses
@@ -285,6 +287,29 @@ public:
         for (const auto& key : padKeysInOrder)
             msg.addString (key);
 
+        return sendMessage (msg);
+    }
+
+    bool sendListPatch (const showcontrol::backup::listpatch::PatchMessage& patch)
+    {
+        juce::OSCMessage msg (addresses::listPatch);
+        msg.addInt32 (patch.listIndex);
+        msg.addInt32 ((int) patch.flags);
+
+        if ((patch.flags & listpatch::kName) != 0)
+            msg.addString (patch.name);
+
+        if ((patch.flags & listpatch::kThemeColour) != 0)
+            msg.addInt32 ((int) patch.colourArgb);
+
+        return sendMessage (msg);
+    }
+
+    bool sendListReorder (int fromIndex, int toIndex)
+    {
+        juce::OSCMessage msg (addresses::listReorder);
+        msg.addInt32 (fromIndex);
+        msg.addInt32 (toIndex);
         return sendMessage (msg);
     }
 

@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../Source/ShowKeyboardInput.h"
+#include "../Source/HotkeyManager.h"
 
 class ShowKeyboardInputTests final : public juce::UnitTest
 {
@@ -36,6 +37,17 @@ public:
                           juce::KeyPress ('1')), 0);
         expectEquals (showcontrol::keyboard::hotkeyIndexForKeyPress (
                           juce::KeyPress ('Q')), 10);
+
+        beginTest ("arrow navigation key codes");
+        expect (HotkeyManager::isArrowNavigationKeyCode (juce::KeyPress::upKey));
+        expect (HotkeyManager::isArrowNavigationKeyCode (juce::KeyPress::downKey));
+        expect (HotkeyManager::isArrowNavigationKeyCode (juce::KeyPress::leftKey));
+        expect (HotkeyManager::isArrowNavigationKeyCode (juce::KeyPress::rightKey));
+        expect (HotkeyManager::isArrowNavigationKeyCode (38)); // VK_UP
+        expect (HotkeyManager::isArrowNavigationKeyCode (40)); // VK_DOWN
+        expect (! HotkeyManager::isArrowNavigationKeyCode ((int) 'W'));
+        expectEquals (HotkeyManager::normalizeArrowKeyCode (38), juce::KeyPress::upKey);
+        expectEquals (HotkeyManager::normalizeArrowKeyCode (37), juce::KeyPress::leftKey);
     }
 };
 

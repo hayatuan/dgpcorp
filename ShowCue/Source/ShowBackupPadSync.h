@@ -102,3 +102,18 @@ inline PatchMessage patchFromPad (int listIndex, int padIndex, juce::uint32 flag
 }
 
 } // namespace showcontrol::backup::padpatch
+
+namespace showcontrol::backup::listpatch
+{
+constexpr juce::uint32 kName         = 1u << 0;
+constexpr juce::uint32 kThemeColour  = 1u << 1;
+
+struct PatchMessage
+{
+    int listIndex = -1;
+    juce::uint32 flags = 0;
+    juce::String name;
+    juce::uint32 colourArgb = 0;
+};
+
+} // namespace showcontrol::backup::listpatch

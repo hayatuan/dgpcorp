@@ -345,19 +345,7 @@ public:
         return false;
     }
 
-    /** Mũi tên (kể cả mã macOS 0xF700…) — chỉ nuốt khi có binding; không thì bubble xuống con. */
-    static bool isArrowNavigationKeyCode (int keyCode) noexcept
-    {
-        if (keyCode >= juce::KeyPress::upKey && keyCode <= juce::KeyPress::rightKey)
-            return true;
-
-        if (keyCode >= 0xf700 && keyCode <= 0xf707)
-            return true;
-
-        return false;
-    }
-
-    /** Chuẩn hóa mã mũi tên macOS (63232 = 0xF700…) về KeyPress::upKey… để so sánh nhất quán. */
+    /** Mũi tên (macOS 0xF700…, Windows VK_* + extendedKeyModifier, hoặc VK thô). */
     static int normalizeArrowKeyCode (int keyCode) noexcept
     {
         switch (keyCode)
@@ -366,10 +354,24 @@ public:
             case 0xf701: return juce::KeyPress::downKey;
             case 0xf702: return juce::KeyPress::leftKey;
             case 0xf703: return juce::KeyPress::rightKey;
+            case 37:     return juce::KeyPress::leftKey;   // VK_LEFT
+            case 38:     return juce::KeyPress::upKey;     // VK_UP
+            case 39:     return juce::KeyPress::rightKey;  // VK_RIGHT
+            case 40:     return juce::KeyPress::downKey;  // VK_DOWN
             default: break;
         }
 
         return keyCode;
+    }
+
+    static bool isArrowNavigationKeyCode (int keyCode) noexcept
+    {
+        const int normalized = normalizeArrowKeyCode (keyCode);
+
+        return normalized == juce::KeyPress::upKey
+            || normalized == juce::KeyPress::downKey
+            || normalized == juce::KeyPress::leftKey
+            || normalized == juce::KeyPress::rightKey;
     }
 
     struct KeyPressGateResult

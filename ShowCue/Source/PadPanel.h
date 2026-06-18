@@ -29,7 +29,7 @@ public:
         int cellH = 1;
     };
 
-    PadPanel() { setOpaque (true); }
+    PadPanel() { setOpaque (true); setWantsKeyboardFocus (true); }
     ~PadPanel() override { stopTimer(); }
 
     std::function<void (const juce::MouseEvent&)> onBackgroundRightClick;
