@@ -28,6 +28,91 @@ struct LanScanTarget
     juce::String broadcastAddress;
 };
 
+/** Thông tin mạng LAN của interface đang dùng (hiển thị tab Mạng). */
+struct LocalLanNetworkInfo
+{
+    juce::String ip;
+    juce::String broadcast;
+    juce::String subnetBase;
+    juce::String subnetCidr;
+    int prefix = 0;
+};
+
+inline uint32_t ipv4ToUint32 (const juce::String& text) noexcept
+{
+    juce::StringArray parts;
+    parts.addTokens (text, ".", {});
+
+    if (parts.size() != 4)
+        return 0;
+
+    uint32_t value = 0;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        const int octet = parts[i].getIntValue();
+
+        if (octet < 0 || octet > 255)
+            return 0;
+
+        value = (value << 8) | (uint32_t) octet;
+    }
+
+    return value;
+}
+
+inline juce::String uint32ToIpv4 (uint32_t value)
+{
+    return juce::String ((int) ((value >> 24) & 0xff)) + "."
+         + juce::String ((int) ((value >> 16) & 0xff)) + "."
+         + juce::String ((int) ((value >> 8) & 0xff)) + "."
+         + juce::String ((int) (value & 0xff));
+}
+
+inline int inferIpv4Prefix (uint32_t iface, uint32_t broadcast) noexcept
+{
+    if (iface == 0 || broadcast == 0)
+        return 0;
+
+    for (int prefix = 32; prefix >= 8; --prefix)
+    {
+        const uint32_t mask     = (prefix == 0) ? 0u : (~0u << (32 - prefix));
+        const uint32_t network  = iface & mask;
+        const uint32_t expected = network | ~mask;
+
+        if (expected == broadcast)
+            return prefix;
+    }
+
+    return 24;
+}
+
+inline LocalLanNetworkInfo makeLocalLanNetworkInfo (const LanScanTarget& target)
+{
+    LocalLanNetworkInfo info;
+    info.ip         = target.interfaceAddress;
+    info.broadcast  = target.broadcastAddress;
+
+    const uint32_t iface = ipv4ToUint32 (info.ip);
+    const uint32_t bcast = ipv4ToUint32 (info.broadcast);
+    info.prefix          = inferIpv4Prefix (iface, bcast);
+
+    if (info.prefix > 0)
+    {
+        const uint32_t mask    = (~0u << (32 - info.prefix));
+        const uint32_t network = iface & mask;
+        info.subnetBase        = uint32ToIpv4 (network);
+        info.subnetCidr        = info.subnetBase + "/" + juce::String (info.prefix);
+    }
+    else
+    {
+        info.subnetBase = info.ip;
+        info.subnetCidr = info.ip;
+    }
+
+    return info;
+}
+
 inline bool isUsableLanIpv4 (const juce::IPAddress& addr) noexcept
 {
     if (addr.isNull() || addr.isIPv6)
@@ -82,6 +167,32 @@ inline juce::Array<LanScanTarget> collectLanScanTargets()
     return targets;
 }
 
+inline LocalLanNetworkInfo getPrimaryLocalLanNetworkInfo()
+{
+    const auto targets = collectLanScanTargets();
+
+    if (targets.isEmpty())
+        return {};
+
+    return makeLocalLanNetworkInfo (targets.getReference (0));
+}
+
+inline juce::String describeLocalLanNetwork (const LocalLanNetworkInfo& info)
+{
+    if (info.ip.isEmpty())
+        return {};
+
+    juce::String text = info.ip;
+
+    if (info.subnetCidr.isNotEmpty())
+        text += " · " + info.subnetCidr;
+
+    if (info.broadcast.isNotEmpty())
+        text += " · BC " + info.broadcast;
+
+    return text;
+}
+
 inline juce::String makeDiscoverProbe (int wantRole, int replyPort)
 {
     return "SHOWCUE_DISCOVER|" + juce::String (wantRole) + "|" + juce::String (replyPort);
@@ -120,9 +231,23 @@ inline bool parseDiscoverAnnounce (const juce::String& text, LanPeerInfo& out)
         return false;
 
     out.role     = parts[1].getIntValue();
-    out.hostName = parts[2];
-    out.syncPort = parts[3].getIntValue();
-    return true;
+    out.syncPort = parts[parts.size() - 1].getIntValue();
+
+    if (parts.size() == 4)
+    {
+        out.hostName = parts[2];
+    }
+    else
+    {
+        juce::StringArray hostParts;
+
+        for (int i = 2; i < parts.size() - 1; ++i)
+            hostParts.add (parts[i]);
+
+        out.hostName = hostParts.joinIntoString ("|");
+    }
+
+    return out.syncPort > 0;
 }
 
 inline bool roleMatchesDiscoverRequest (int ourRole, int wantRole) noexcept
@@ -131,6 +256,30 @@ inline bool roleMatchesDiscoverRequest (int ourRole, int wantRole) noexcept
         return ourRole == (int) Role::primary || ourRole == (int) Role::backup;
 
     return ourRole == wantRole;
+}
+
+inline void sendUnicastDiscoverSweep (juce::DatagramSocket& socket,
+                                      const LanScanTarget& target,
+                                      int discoveryPort,
+                                      const char* data,
+                                      int bytes)
+{
+    const uint32_t iface = ipv4ToUint32 (target.interfaceAddress);
+
+    if (iface == 0)
+        return;
+
+    const uint32_t network24 = iface & 0xffffff00u;
+
+    for (uint32_t host = 1; host <= 254; ++host)
+    {
+        const uint32_t addr = network24 | host;
+
+        if (addr == iface)
+            continue;
+
+        socket.write (uint32ToIpv4 (addr), discoveryPort, data, bytes);
+    }
 }
 
 inline void sendDiscoverProbes (juce::DatagramSocket& socket,
@@ -142,16 +291,41 @@ inline void sendDiscoverProbes (juce::DatagramSocket& socket,
     const char* data = probe.toRawUTF8();
 
     for (const auto& target : targets)
+    {
         socket.write (target.broadcastAddress, discoveryPort, data, bytes);
+        socket.write ("255.255.255.255", discoveryPort, data, bytes);
+        sendUnicastDiscoverSweep (socket, target, discoveryPort, data, bytes);
+    }
 
-    // Wi‑Fi đôi khi rớt gói broadcast đầu — gửi thêm một vòng.
+    // Wi‑Fi đôi khi rớt gói broadcast đầu — gửi thêm một vòng broadcast.
     for (const auto& target : targets)
+    {
         socket.write (target.broadcastAddress, discoveryPort, data, bytes);
+        socket.write ("255.255.255.255", discoveryPort, data, bytes);
+    }
+}
+
+inline void broadcastLanAnnounce (juce::DatagramSocket& socket,
+                                  int role,
+                                  const juce::String& hostName,
+                                  int syncPort)
+{
+    const auto announce     = makeDiscoverAnnounce (role, hostName, syncPort);
+    const int discoveryPort = discoveryPortForSyncPort (syncPort);
+    const int bytes         = (int) announce.getNumBytesAsUTF8();
+    const char* data        = announce.toRawUTF8();
+    const auto targets      = collectLanScanTargets();
+
+    for (const auto& target : targets)
+    {
+        socket.write (target.broadcastAddress, discoveryPort, data, bytes);
+        socket.write ("255.255.255.255", discoveryPort, data, bytes);
+    }
 }
 
 inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
                                               int syncPort,
-                                              int timeoutMs = 3200)
+                                              int timeoutMs = 4800)
 {
     juce::Array<LanPeerInfo> results;
     const int discoveryPort = discoveryPortForSyncPort (syncPort);
@@ -176,10 +350,18 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
 
     sendDiscoverProbes (socket, targets, discoveryPort, probe);
 
-    const int deadline = (int) juce::Time::getMillisecondCounter() + timeoutMs;
+    const int deadline      = (int) juce::Time::getMillisecondCounter() + timeoutMs;
+    const int reprobeAt     = (int) juce::Time::getMillisecondCounter() + timeoutMs / 2;
+    bool reprobeSent        = false;
 
     while ((int) juce::Time::getMillisecondCounter() < deadline)
     {
+        if (! reprobeSent && (int) juce::Time::getMillisecondCounter() >= reprobeAt)
+        {
+            reprobeSent = true;
+            sendDiscoverProbes (socket, targets, discoveryPort, probe);
+        }
+
         if (socket.waitUntilReady (true, 80) <= 0)
             continue;
 
@@ -201,6 +383,11 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
             continue;
 
         if (wantRole != 0 && peer.role != wantRole)
+            continue;
+
+        const auto localInfo = getPrimaryLocalLanNetworkInfo();
+
+        if (localInfo.ip.isNotEmpty() && peer.address == localInfo.ip)
             continue;
 
         bool duplicate = false;

@@ -795,6 +795,7 @@ private:
     juce::Array<int> lastBroadcastSelectionMulti;
     juce::uint32 heartbeatSendSeq = 0;
     juce::uint32 lastHeartbeatTickMs = 0;
+    juce::uint32 lastLanAnnounceBroadcastMs = 0;
     std::unique_ptr<juce::DatagramSocket> backupDiscoverySocket;
     juce::uint32 lastAutosaveAtMs = 0;
     void maybeRunAutosave();

@@ -71,6 +71,136 @@ public:
         const auto targets = showcontrol::backup::collectLanScanTargets();
         expect (targets.size() >= 0);
 
+        beginTest ("LAN subnet info");
+        expectEquals (showcontrol::backup::inferIpv4Prefix (
+            showcontrol::backup::ipv4ToUint32 ("192.168.1.10"),
+            showcontrol::backup::ipv4ToUint32 ("192.168.1.255")), 24);
+        showcontrol::backup::LanScanTarget target;
+        target.interfaceAddress  = "192.168.1.10";
+        target.broadcastAddress  = "192.168.1.255";
+        const auto info = showcontrol::backup::makeLocalLanNetworkInfo (target);
+        expectEquals (info.subnetCidr, juce::String ("192.168.1.0/24"));
+        expectEquals (showcontrol::backup::uint32ToIpv4 (
+            showcontrol::backup::ipv4ToUint32 ("10.0.0.5")), juce::String ("10.0.0.5"));
+
+        beginTest ("LAN announce hostname with pipe");
+        showcontrol::backup::LanPeerInfo pipedHost;
+        expect (showcontrol::backup::parseDiscoverAnnounce (
+            showcontrol::backup::makeDiscoverAnnounce (2, "Mac|Stage", 9000), pipedHost));
+        expectEquals (pipedHost.hostName, juce::String ("Mac|Stage"));
+        expectEquals (pipedHost.role, 2);
+
+        beginTest ("LAN discovery round-trip");
+        {
+            const auto targets = showcontrol::backup::collectLanScanTargets();
+
+            if (targets.isEmpty())
+            {
+                logMessage ("skip LAN discovery round-trip — no active LAN interface");
+            }
+            else
+            {
+                const int syncPort      = 19123;
+                const int discoveryPort = showcontrol::backup::discoveryPortForSyncPort (syncPort);
+                std::atomic<bool> running { true };
+
+                std::thread responder ([&]
+                {
+                    juce::DatagramSocket socket (true);
+                    socket.setEnablePortReuse (true);
+
+                    if (! socket.bindToPort (discoveryPort))
+                        return;
+
+                    while (running.load())
+                    {
+                        if (socket.waitUntilReady (true, 100) <= 0)
+                            continue;
+
+                        char buffer[512] = {};
+                        juce::String senderHost;
+                        int senderPort = 0;
+                        const int bytes = socket.read (buffer, (int) sizeof (buffer) - 1, false,
+                                                       senderHost, senderPort);
+
+                        if (bytes <= 0 || senderHost.isEmpty())
+                            continue;
+
+                        buffer[bytes] = '\0';
+
+                        int wantRole  = 0;
+                        int replyPort = 0;
+
+                        if (! showcontrol::backup::parseDiscoverProbe (juce::String::fromUTF8 (buffer),
+                                                                       wantRole, replyPort))
+                            continue;
+
+                        if (! showcontrol::backup::roleMatchesDiscoverRequest ((int) showcontrol::backup::Role::backup,
+                                                                               wantRole))
+                            continue;
+
+                        const auto announce = showcontrol::backup::makeDiscoverAnnounce (
+                            (int) showcontrol::backup::Role::backup,
+                            "ShowCueTestPeer",
+                            syncPort);
+
+                        socket.write (senderHost, replyPort, announce.toRawUTF8(),
+                                      (int) announce.getNumBytesAsUTF8());
+                    }
+                });
+
+                juce::Thread::sleep (80);
+
+                juce::DatagramSocket client (true);
+                const auto& iface = targets.getReference (0);
+                expect (client.bindToPort (0, iface.interfaceAddress) || client.bindToPort (0));
+
+                const int replyPort = client.getBoundPort();
+                const auto probe    = showcontrol::backup::makeDiscoverProbe (
+                    (int) showcontrol::backup::Role::backup, replyPort);
+
+                showcontrol::backup::sendDiscoverProbes (client, targets, discoveryPort, probe);
+
+                bool gotReply = false;
+
+                for (int attempt = 0; attempt < 40 && ! gotReply; ++attempt)
+                {
+                    if (client.waitUntilReady (true, 100) <= 0)
+                        continue;
+
+                    char buffer[512] = {};
+                    juce::String senderHost;
+                    int senderPort = 0;
+                    const int bytes = client.read (buffer, (int) sizeof (buffer) - 1, false,
+                                                   senderHost, senderPort);
+
+                    if (bytes <= 0)
+                        continue;
+
+                    buffer[bytes] = '\0';
+
+                    showcontrol::backup::LanPeerInfo peer;
+                    peer.address = senderHost;
+
+                    if (! showcontrol::backup::parseDiscoverAnnounce (juce::String::fromUTF8 (buffer), peer))
+                        continue;
+
+                    if (peer.hostName == "ShowCueTestPeer" && peer.role == (int) showcontrol::backup::Role::backup)
+                    {
+                        gotReply = true;
+                        expectEquals (peer.syncPort, syncPort);
+                    }
+                }
+
+                running.store (false);
+
+                if (responder.joinable())
+                    responder.join();
+
+                expect (gotReply);
+            }
+        }
+
         beginTest ("selection sync message format");
         juce::Array<int> selectionMulti { 2, 5, 7 };
         showcontrol::backup::ShowBackupSyncBroadcaster broadcaster2;

@@ -931,6 +931,9 @@ private:
             permissionsPanel->resized();
 
         if (index == 3 && backupPanel != nullptr)
+        {
             backupPanel->refreshLocalizedText();
+            backupPanel->refreshNetworkInfo();
+        }
     }
 };

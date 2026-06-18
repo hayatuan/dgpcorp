@@ -33,6 +33,20 @@ public:
         peerLabel.setFont (showcontrol::preferences::sectionLabelFont());
         addAndMakeVisible (peerLabel);
 
+        localNetworkLabel.setFont (juce::FontOptions (12.0f));
+        localNetworkLabel.setJustificationType (juce::Justification::centredLeft);
+        addAndMakeVisible (localNetworkLabel);
+
+        localIpLabel.setFont (showcontrol::preferences::sectionLabelFont());
+        addAndMakeVisible (localIpLabel);
+
+        localIpEditor.setReadOnly (true);
+        localIpEditor.setCaretVisible (false);
+        localIpEditor.setScrollbarsShown (false);
+        localIpEditor.setColour (juce::TextEditor::backgroundColourId,
+                                 juce::Colours::transparentBlack);
+        addAndMakeVisible (localIpEditor);
+
         addAndMakeVisible (peerEditor);
 
         addPeerBtn.onClick = [this] { addManualPeer(); };
@@ -95,6 +109,7 @@ public:
 
         loadFromPreferences();
         refreshLocalizedText();
+        refreshLocalNetworkDisplay();
         refreshRoleUi();
         refreshTakeoverButton();
     }
@@ -174,7 +189,13 @@ public:
         peerLabel.setBounds (area.removeFromTop (22));
         area.removeFromTop (4);
 
+        localNetworkLabel.setBounds (area.removeFromTop (20));
+        area.removeFromTop (6);
+
         auto peerRow = area.removeFromTop (rowH);
+        localIpLabel.setBounds (peerRow.removeFromLeft (88));
+        localIpEditor.setBounds (peerRow.removeFromLeft (132));
+        peerRow.removeFromLeft (6);
         scanPeerBtn.setBounds (peerRow.removeFromRight (104));
         peerRow.removeFromRight (6);
 
@@ -226,6 +247,11 @@ public:
         refreshLocalizedText();
     }
 
+    void refreshNetworkInfo()
+    {
+        refreshLocalNetworkDisplay();
+    }
+
     void refreshLocalizedText()
     {
         roleLabel.setText (showcontrol::localization::tr (u8"Vai trò máy"), juce::dontSendNotification);
@@ -241,7 +267,11 @@ public:
             roleCombo.setSelectedId (roleId, juce::dontSendNotification);
 
         refreshPeerLabelText();
-        peerEditor.setTextToShowWhenEmpty (showcontrol::localization::tr (u8"ví dụ: 192.168.1.50"), juce::Colours::grey);
+        peerEditor.setTextToShowWhenEmpty (showcontrol::localization::tr (u8"IP máy đối tác trên LAN"),
+                                           juce::Colours::grey);
+
+        localIpLabel.setText (showcontrol::localization::tr (u8"IP máy này"), juce::dontSendNotification);
+        refreshLocalNetworkDisplay();
 
         addPeerBtn.setButtonText (showcontrol::localization::tr (u8"Thêm"));
         removePeerBtn.setButtonText (showcontrol::localization::tr (u8"Xóa"));
@@ -270,7 +300,37 @@ public:
         peerLabel.setColour (juce::Label::textColourId, col);
         portLabel.setColour (juce::Label::textColourId, col);
         scanResultsLabel.setColour (juce::Label::textColourId, col);
+        localNetworkLabel.setColour (juce::Label::textColourId, col.withAlpha (0.82f));
+        localIpLabel.setColour (juce::Label::textColourId, col);
+        localIpEditor.setColour (juce::TextEditor::textColourId, col);
+        localIpEditor.setColour (juce::TextEditor::outlineColourId, col.withAlpha (0.25f));
         helpLabel.setColour (juce::Label::textColourId, col.withAlpha (0.75f));
+    }
+
+    void refreshLocalNetworkDisplay()
+    {
+        const auto info = showcontrol::backup::getPrimaryLocalLanNetworkInfo();
+        const auto col  = getLookAndFeel().findColour (juce::Label::textColourId);
+
+        if (info.ip.isEmpty())
+        {
+            localNetworkLabel.setText (
+                showcontrol::localization::tr (
+                    u8"Không phát hiện interface LAN (Wi‑Fi/Ethernet). Kiểm tra kết nối mạng."),
+                juce::dontSendNotification);
+            localIpEditor.clear();
+            localIpEditor.setColour (juce::TextEditor::textColourId, col.withAlpha (0.45f));
+            return;
+        }
+
+        juce::String subnetLine = showcontrol::localization::tr (u8"Lớp mạng") + ": " + info.subnetCidr;
+
+        if (info.broadcast.isNotEmpty())
+            subnetLine += " · " + showcontrol::localization::tr (u8"Broadcast") + ": " + info.broadcast;
+
+        localNetworkLabel.setText (subnetLine, juce::dontSendNotification);
+        localIpEditor.setText (info.ip, juce::dontSendNotification);
+        localIpEditor.setColour (juce::TextEditor::textColourId, col);
     }
 
 private:
@@ -344,6 +404,9 @@ private:
         const bool showPeerUi = primary || backup;
 
         peerLabel.setVisible (showPeerUi);
+        localNetworkLabel.setVisible (showPeerUi);
+        localIpLabel.setVisible (showPeerUi);
+        localIpEditor.setVisible (showPeerUi);
         peerEditor.setVisible (showPeerUi);
         scanPeerBtn.setVisible (showPeerUi);
         addPeerBtn.setVisible (primary);
@@ -359,6 +422,7 @@ private:
         if (primary)
             peerEditor.clear();
 
+        refreshLocalNetworkDisplay();
         resized();
     }
 
@@ -534,6 +598,7 @@ private:
 
             safeThis->scanPeerBtn.setEnabled (true);
             safeThis->scanPeerBtn.setButtonText (showcontrol::localization::tr (u8"Quét LAN..."));
+            safeThis->refreshLocalNetworkDisplay();
 
             if (safeThis->isPrimaryRole())
             {
@@ -559,21 +624,32 @@ private:
 
     void showLanScanEmptyHint()
     {
+        juce::String body = showcontrol::localization::tr (
+            u8"Không tìm thấy máy ShowCue trên cùng subnet.\n\n"
+            u8"• Cả hai máy cùng Wi‑Fi / LAN\n"
+            u8"• Máy đối tác đang mở ShowCue (vai trò Primary/Backup)\n"
+            u8"• Bật 「Bật nhận OSC / đồng bộ LAN」\n"
+            u8"• macOS: Cài đặt hệ thống → Quyền riêng tư → Mạng cục bộ → bật ShowCue");
+
+        const auto info = showcontrol::backup::getPrimaryLocalLanNetworkInfo();
+
+        if (info.ip.isNotEmpty())
+        {
+            body = showcontrol::localization::tr (u8"IP máy này") + ": "
+                 + showcontrol::backup::describeLocalLanNetwork (info)
+                 + "\n\n" + body;
+        }
+
         juce::AlertWindow::showMessageBoxAsync (
             juce::AlertWindow::InfoIcon,
             showcontrol::localization::tr (u8"Quét LAN"),
-            showcontrol::localization::tr (
-                u8"Không tìm thấy máy ShowCue trên cùng subnet.\n\n"
-                u8"• Cả hai máy cùng Wi‑Fi / LAN\n"
-                u8"• Máy đối tác đang mở ShowCue (vai trò Primary/Backup)\n"
-                u8"• Bật 「Bật nhận OSC / đồng bộ LAN」\n"
-                u8"• macOS: Cài đặt hệ thống → Quyền riêng tư → Mạng cục bộ → bật ShowCue"),
+            body,
             showcontrol::localization::tr (u8"Đã hiểu"));
     }
 
-    juce::Label roleLabel, peerLabel, portLabel, helpLabel, scanResultsLabel;
+    juce::Label roleLabel, peerLabel, portLabel, helpLabel, scanResultsLabel, localNetworkLabel, localIpLabel;
     juce::ComboBox roleCombo;
-    juce::TextEditor peerEditor, portEditor;
+    juce::TextEditor peerEditor, portEditor, localIpEditor;
     juce::TextButton addPeerBtn, removePeerBtn, scanPeerBtn, addScanSelectedBtn, takeoverBtn;
     juce::ToggleButton followerLockToggle, oscEnableToggle;
     juce::ListBox configuredPeersList;

@@ -13332,12 +13332,16 @@ void MainComponent::scanLanPeersAsync (
     showcontrol::backup::mac::requestLocalNetworkPermissionPrompt();
    #endif
 
-    std::thread ([wantRole, syncPort, onDone = std::move (onDone)]() mutable
+    stopBackupDiscoveryResponder();
+
+    std::thread ([wantRole, syncPort, onDone = std::move (onDone), this]() mutable
     {
         const auto peers = showcontrol::backup::scanLanPeers (wantRole, syncPort);
 
-        juce::MessageManager::callAsync ([peers, onDone = std::move (onDone)]() mutable
+        juce::MessageManager::callAsync ([this, peers, onDone = std::move (onDone)]() mutable
         {
+            startBackupDiscoveryResponder();
+
             if (onDone)
                 onDone (peers);
         });
@@ -13378,6 +13382,7 @@ void MainComponent::stopBackupDiscoveryResponder()
    #endif
 
     backupDiscoverySocket.reset();
+    lastLanAnnounceBroadcastMs = 0;
 }
 
 void MainComponent::pollBackupDiscoverySocket()
@@ -13416,6 +13421,9 @@ void MainComponent::pollBackupDiscoverySocket()
         if (! showcontrol::backup::roleMatchesDiscoverRequest (ourRole, wantRole))
             continue;
 
+        if (senderHost.isEmpty())
+            continue;
+
         const auto announce = showcontrol::backup::makeDiscoverAnnounce (
             ourRole,
             juce::SystemStats::getComputerName(),
@@ -13423,6 +13431,22 @@ void MainComponent::pollBackupDiscoverySocket()
 
         backupDiscoverySocket->write (senderHost, replyPort, announce.toRawUTF8(),
                                        (int) announce.getNumBytesAsUTF8());
+        backupDiscoverySocket->write (senderHost, replyPort, announce.toRawUTF8(),
+                                       (int) announce.getNumBytesAsUTF8());
+    }
+
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (lastLanAnnounceBroadcastMs == 0
+        || now - lastLanAnnounceBroadcastMs >= 2500u)
+    {
+        lastLanAnnounceBroadcastMs = now;
+
+        showcontrol::backup::broadcastLanAnnounce (
+            *backupDiscoverySocket,
+            ourRole,
+            juce::SystemStats::getComputerName(),
+            showcontrol::prefs::loadBackupSyncPort());
     }
 }
 
