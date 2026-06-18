@@ -13363,7 +13363,7 @@ void MainComponent::startBackupDiscoveryResponder()
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
     backupDiscoverySocket->setEnablePortReuse (true);
 
-    if (backupDiscoverySocket->bindToPort (discoveryPort) <= 0)
+    if (! backupDiscoverySocket->bindToPort (discoveryPort))
     {
         backupDiscoverySocket.reset();
         std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort << std::endl;

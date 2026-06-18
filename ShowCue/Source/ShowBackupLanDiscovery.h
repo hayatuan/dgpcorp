@@ -26,6 +26,8 @@ struct LanScanTarget
 {
     juce::String interfaceAddress;
     juce::String broadcastAddress;
+    /** Prefix CIDR từ hệ điều hành; 0 = suy ra từ IP + broadcast. */
+    int prefix = 0;
 };
 
 /** Thông tin mạng LAN của interface đang dùng (hiển thị tab Mạng). */
@@ -95,7 +97,11 @@ inline LocalLanNetworkInfo makeLocalLanNetworkInfo (const LanScanTarget& target)
 
     const uint32_t iface = ipv4ToUint32 (info.ip);
     const uint32_t bcast = ipv4ToUint32 (info.broadcast);
-    info.prefix          = inferIpv4Prefix (iface, bcast);
+
+    if (target.prefix > 0 && target.prefix <= 32)
+        info.prefix = target.prefix;
+    else
+        info.prefix = inferIpv4Prefix (iface, bcast);
 
     if (info.prefix > 0)
     {
@@ -189,6 +195,7 @@ inline juce::Array<LanScanTarget> collectLanScanTargets()
         LanScanTarget target;
         target.interfaceAddress  = interfaceText;
         target.broadcastAddress  = broadcastText;
+        target.prefix            = prefix;
         targets.add (target);
     };
 
@@ -303,12 +310,13 @@ inline void sendUnicastDiscoverSweep (juce::DatagramSocket& socket,
     if (iface == 0)
         return;
 
-    const uint32_t network24 = iface & 0xffffff00u;
+    const int prefix = juce::jlimit (8, 30, target.prefix > 0 ? target.prefix : 24);
+    const uint32_t mask     = (~0u << (32 - prefix));
+    const uint32_t network  = iface & mask;
+    const uint32_t bcast    = network | ~mask;
 
-    for (uint32_t host = 1; host <= 254; ++host)
+    for (uint32_t addr = network + 1; addr < bcast; ++addr)
     {
-        const uint32_t addr = network24 | host;
-
         if (addr == iface)
             continue;
 

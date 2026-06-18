@@ -25,7 +25,7 @@ inline void requestLocalNetworkPermissionPrompt()
 
     juce::DatagramSocket socket (true);
 
-    if (socket.bindToPort (0, targets.getReference (0).interfaceAddress) <= 0)
+    if (! socket.bindToPort (0, targets.getReference (0).interfaceAddress))
         socket.bindToPort (0);
 
     const int replyPort = socket.getBoundPort();

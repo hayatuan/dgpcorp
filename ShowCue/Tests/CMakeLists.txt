@@ -13,6 +13,11 @@ target_sources(ShowCueTests PRIVATE
     ShowBackupSyncTests.cpp
     ../Source/ShowUpdateChecker.cpp)
 
+if(WIN32)
+    target_sources(ShowCueTests PRIVATE ../Source/ShowBackupLanDiscoveryWin.cpp)
+    target_link_libraries(ShowCueTests PRIVATE iphlpapi)
+endif()
+
 target_compile_definitions(ShowCueTests PRIVATE
     JUCE_UNIT_TESTS=1
     JUCE_USE_CURL=0

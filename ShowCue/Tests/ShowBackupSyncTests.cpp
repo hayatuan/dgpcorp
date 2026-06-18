@@ -78,8 +78,16 @@ public:
         showcontrol::backup::LanScanTarget target;
         target.interfaceAddress  = "192.168.1.10";
         target.broadcastAddress  = "192.168.1.255";
+        target.prefix            = 24;
         const auto info = showcontrol::backup::makeLocalLanNetworkInfo (target);
         expectEquals (info.subnetCidr, juce::String ("192.168.1.0/24"));
+
+        showcontrol::backup::LanScanTarget slash23;
+        slash23.interfaceAddress = "10.20.30.40";
+        slash23.broadcastAddress = "10.20.31.255";
+        slash23.prefix             = 23;
+        const auto slash23Info = showcontrol::backup::makeLocalLanNetworkInfo (slash23);
+        expectEquals (slash23Info.subnetCidr, juce::String ("10.20.30.0/23"));
         expectEquals (showcontrol::backup::broadcastForInterfaceIpv4 ("192.168.1.10", 24),
                       juce::String ("192.168.1.255"));
         expectEquals (showcontrol::backup::broadcastForInterfaceIpv4 ("10.20.30.40", 16),
