@@ -11,6 +11,14 @@ enum class Role : int
     backup     = 2
 };
 
+enum class SyncPlayMode : int
+{
+    legacy      = -1,
+    padGo       = 0,
+    cueListPlay = 1,
+    bgmPlay     = 2
+};
+
 inline constexpr int kDefaultSyncPort           = 9000;
 inline constexpr int kHeartbeatIntervalMs       = 800;
 inline constexpr int kHeartbeatStaleThresholdMs   = 6000;
@@ -140,12 +148,13 @@ public:
         return sendEmpty (addresses::panic);
     }
 
-    bool sendGo (int listIndex, int padIndex, float preWaitMs = 0.0f)
+    bool sendGo (int listIndex, int padIndex, float preWaitMs = 0.0f, int playMode = (int) SyncPlayMode::legacy)
     {
         juce::OSCMessage msg (addresses::go);
         msg.addInt32 (listIndex);
         msg.addInt32 (padIndex);
         msg.addFloat32 (preWaitMs);
+        msg.addInt32 (playMode);
         return sendMessage (msg);
     }
 

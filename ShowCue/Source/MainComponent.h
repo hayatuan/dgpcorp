@@ -145,7 +145,8 @@ public:
     void executePanicFadeAllLocked();
     void applyPanicFadeUiAftermath (int fadedCount);
     bool triggerExternalGo (int listIndex, int padIndex);
-    bool triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs = 0.0f);
+    bool triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs = 0.0f,
+                                int playMode = (int) showcontrol::backup::SyncPlayMode::legacy);
     void triggerGlobalStopAll();
     void triggerGlobalPauseAll();
     void exportProjectShowcuePackage();
@@ -200,7 +201,7 @@ private:
     bool shouldBlockLocalPlaybackCommand() const noexcept;
     void broadcastSyncIfPrimary (const std::function<void (showcontrol::backup::ShowBackupSyncBroadcaster&)>& action);
     void handleSyncPanic();
-    void handleSyncGo (int listIndex, int padIndex, float preWaitMs);
+    void handleSyncGo (int listIndex, int padIndex, float preWaitMs, int playMode = (int) showcontrol::backup::SyncPlayMode::legacy);
     void handleSyncStopAll();
     void handleSyncPauseAll();
     void handleSyncStopCue (int listIndex, int padIndex);
@@ -268,7 +269,7 @@ private:
     int getPlaylistViewportContentWidth() noexcept;
     void refreshCueListPanel (bool resetScrollToTop = true);
     bool triggerCueGo (int padIndex, bool fromSync = false);
-    bool triggerCueListPlay (int padIndex);
+    bool triggerCueListPlay (int padIndex, bool fromSync = false);
     bool triggerCueListPause (int padIndex);
     bool triggerCueListStop (int padIndex);
     bool isCueListViewActive() const noexcept;
@@ -308,6 +309,8 @@ private:
     void triggerBgmPlayPause();
     void triggerBgmNext();
     void triggerBgmPrev();
+    bool triggerBgmSyncPlayAtIndex (int padIndex);
+    void broadcastGoSync (int listIndex, int padIndex, float preWaitMs, showcontrol::backup::SyncPlayMode mode);
     /** Preload reader + waveform cho dòng BGM đang chọn (và hàng lân cận). */
     void prefetchBgmPadAtIndex (int index);
 

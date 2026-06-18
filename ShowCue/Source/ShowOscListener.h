@@ -9,7 +9,7 @@ namespace showcontrol::osc
 struct ShowOscCallbacks
 {
     std::function<void()> onPanic;
-    std::function<void (int listIndex, int padIndex, float preWaitMs)> onGo;
+    std::function<void (int listIndex, int padIndex, float preWaitMs, int playMode)> onGo;
     std::function<void()> onStopAll;
     std::function<void()> onPauseAll;
     std::function<void (int listIndex, int padIndex)> onStopCue;
@@ -90,14 +90,14 @@ private:
         return fallback;
     }
 
-    void dispatchGo (int listIndex, int padIndex, float preWaitMs)
+    void dispatchGo (int listIndex, int padIndex, float preWaitMs, int playMode)
     {
         if (! callbacks.onGo)
             return;
 
-        juce::MessageManager::callAsync ([cb = callbacks.onGo, listIndex, padIndex, preWaitMs]
+        juce::MessageManager::callAsync ([cb = callbacks.onGo, listIndex, padIndex, preWaitMs, playMode]
         {
-            cb (listIndex, padIndex, preWaitMs);
+            cb (listIndex, padIndex, preWaitMs, playMode);
         });
     }
 
@@ -130,7 +130,9 @@ private:
             }
 
             const float preWaitMs = readFloatArg (message, 2, 0.0f);
-            dispatchGo (listIndex, padIndex, preWaitMs);
+            const int playMode    = message.size() >= 4 ? readIntArg (message, 3, (int) showcontrol::backup::SyncPlayMode::legacy)
+                                                        : (int) showcontrol::backup::SyncPlayMode::legacy;
+            dispatchGo (listIndex, padIndex, preWaitMs, playMode);
             return;
         }
 

@@ -2181,6 +2181,7 @@ void MainComponent::triggerBgmPlayPause()
 
         targetPad->triggerPlay();
         syncUiToPlayingPad (targetPad, false);
+        broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
         return;
     }
 
@@ -2196,6 +2197,10 @@ void MainComponent::triggerBgmPlayPause()
             return;
 
         playing->startFadeOut();
+        broadcastSyncIfPrimary ([this, targetIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendStopCue (activeListIndex, targetIndex);
+        });
         return;
     }
 
@@ -2211,6 +2216,7 @@ void MainComponent::triggerBgmPlayPause()
 
     targetPad->triggerPlay();
     syncUiToPlayingPad (targetPad, true);
+    broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::triggerBgmNext()
@@ -2244,6 +2250,7 @@ void MainComponent::triggerBgmNext()
 
     nextPad->triggerPlay();
     syncUiToPlayingPad (nextPad, false);
+    broadcastGoSync (activeListIndex, nextIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::triggerBgmPrev()
@@ -2277,6 +2284,7 @@ void MainComponent::triggerBgmPrev()
 
     prevPad->triggerPlay();
     syncUiToPlayingPad (prevPad, false);
+    broadcastGoSync (activeListIndex, prevIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::forwardUiSelectionToPad (SoundPad* pad, bool scrollIntoView)
@@ -9786,8 +9794,15 @@ bool MainComponent::executeSpacebarTransportKey (const juce::KeyPress& key)
         {
             if (list->isGrid)
             {
-                if (selectedBgmIndex >= 0 && selectedBgmIndex < list->pads.size())
+                if (list->useCueListPanel)
+                {
+                    if (selectedBgmIndex >= 0 && selectedBgmIndex < list->pads.size())
+                        triggerCueListPlay (selectedBgmIndex);
+                }
+                else if (selectedBgmIndex >= 0 && selectedBgmIndex < list->pads.size())
+                {
                     triggerCueGo (selectedBgmIndex);
+                }
             }
             else
             {
@@ -11011,9 +11026,9 @@ bool MainComponent::isCueListViewActive() const noexcept
     return list != nullptr && list->isGrid && list->useCueListPanel;
 }
 
-bool MainComponent::triggerCueListPlay (int padIndex)
+bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
 {
-    if (shouldBlockLocalPlaybackCommand())
+    if (! fromSync && shouldBlockLocalPlaybackCommand())
         return false;
 
     if (isPlaybackCommandBlocked())
@@ -11030,7 +11045,7 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     if (pad == nullptr || ! pad->hasAudioFile())
         return false;
 
-    if (! pad->tryClaimPadHotkeyTrigger())
+    if (! fromSync && ! pad->tryClaimPadHotkeyTrigger())
         return false;
 
     double preWaitMs = 0.0;
@@ -11049,10 +11064,7 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     {
         pendingGoPadIndex = padIndex;
 
-        broadcastSyncIfPrimary ([this, padIndex, preWaitMs] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
-        {
-            b.sendGo (activeListIndex, padIndex, (float) preWaitMs);
-        });
+        broadcastGoSync (activeListIndex, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::cueListPlay);
 
         auto* timer = new PendingCueGoTimer();
         pendingGoTimer.reset (timer);
@@ -11082,13 +11094,8 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
 
-    if (ok)
-    {
-        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
-        {
-            b.sendGo (activeListIndex, padIndex, 0.0f);
-        });
-    }
+    if (ok && ! fromSync)
+        broadcastGoSync (activeListIndex, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::cueListPlay);
 
     return ok;
 }
@@ -11242,10 +11249,7 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
 
         if (! fromSync)
         {
-            broadcastSyncIfPrimary ([this, padIndex, preWaitMs] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
-            {
-                b.sendGo (activeListIndex, padIndex, (float) preWaitMs);
-            });
+            broadcastGoSync (activeListIndex, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::padGo);
         }
 
         auto* timer = new PendingCueGoTimer();
@@ -11272,10 +11276,7 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
 
     if (! fromSync)
     {
-        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
-        {
-            b.sendGo (activeListIndex, padIndex, 0.0f);
-        });
+        broadcastGoSync (activeListIndex, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::padGo);
     }
 
     return true;
@@ -12930,7 +12931,7 @@ bool MainComponent::triggerExternalGo (int listIndex, int padIndex)
     return triggerExternalSyncGo (listIndex, padIndex, 0.0f);
 }
 
-bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs)
+bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float preWaitMs, int playMode)
 {
     const bool wasSyncing = syncApplying.exchange (true);
 
@@ -12952,17 +12953,24 @@ bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float pr
         }
     }
 
-    if (preWaitMs > 1.0f
-        && listIndex >= 0 && listIndex < allLists.size()
-        && listIndex == activeListIndex)
-    {
-        return triggerCueGo (padIndex, true);
-    }
+    if (listIndex < 0 || listIndex >= allLists.size())
+        return false;
 
-    HotkeyBinding binding;
-    binding.padListIndex = listIndex;
-    binding.padIndex     = padIndex;
-    return triggerPadFromHotkey (binding, true);
+    auto* list = allLists[listIndex];
+
+    if (list == nullptr || padIndex < 0 || padIndex >= list->pads.size())
+        return false;
+
+    const auto mode = (showcontrol::backup::SyncPlayMode) playMode;
+
+    if (! list->isGrid || mode == showcontrol::backup::SyncPlayMode::bgmPlay)
+        return triggerBgmSyncPlayAtIndex (padIndex);
+
+    if (mode == showcontrol::backup::SyncPlayMode::cueListPlay
+        || (mode == showcontrol::backup::SyncPlayMode::legacy && list->useCueListPanel))
+        return triggerCueListPlay (padIndex, true);
+
+    return triggerCueGo (padIndex, true);
 }
 
 void MainComponent::triggerGlobalStopAll()
@@ -13040,6 +13048,53 @@ void MainComponent::broadcastSyncIfPrimary (
     action (*backupBroadcaster);
 }
 
+void MainComponent::broadcastGoSync (int listIndex,
+                                     int padIndex,
+                                     float preWaitMs,
+                                     showcontrol::backup::SyncPlayMode mode)
+{
+    broadcastSyncIfPrimary ([=] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendGo (listIndex, padIndex, preWaitMs, (int) mode);
+    });
+}
+
+bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return false;
+
+    auto* list = allLists[activeListIndex];
+
+    if (list == nullptr || list->isGrid)
+        return false;
+
+    if (! juce::isPositiveAndBelow (padIndex, list->pads.size()))
+        return false;
+
+    auto* targetPad = list->pads[padIndex];
+
+    if (targetPad == nullptr || ! targetPad->hasAudioFile())
+        return false;
+
+    targetPad->prepareForInstantPlay();
+    selectedBgmIndex = padIndex;
+    selectedPadIndices.clear();
+    selectedPadIndices.add (padIndex);
+    forwardUiSelectionToPad (targetPad, true);
+
+    for (auto* other : list->pads)
+    {
+        if (other != nullptr && other != targetPad)
+            other->triggerStop();
+    }
+
+    targetPad->triggerPlay();
+    syncUiToPlayingPad (targetPad, false);
+    refreshMasterDeckBgmTransportState();
+    return true;
+}
+
 void MainComponent::setBackupTakeoverActive (bool active)
 {
     backupTakeoverActive = active;
@@ -13071,16 +13126,17 @@ void MainComponent::handleSyncPanic()
     executePanicFadeAllLocked();
 }
 
-void MainComponent::handleSyncGo (int listIndex, int padIndex, float preWaitMs)
+void MainComponent::handleSyncGo (int listIndex, int padIndex, float preWaitMs, int playMode)
 {
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
     showcontrol::backup::logSyncEvent ("RX go list=" + juce::String (listIndex)
                                        + " pad=" + juce::String (padIndex)
-                                       + " preWaitMs=" + juce::String (preWaitMs, 1));
+                                       + " preWaitMs=" + juce::String (preWaitMs, 1)
+                                       + " mode=" + juce::String (playMode));
 
-    triggerExternalSyncGo (listIndex, padIndex, preWaitMs);
+    triggerExternalSyncGo (listIndex, padIndex, preWaitMs, playMode);
 }
 
 void MainComponent::handleSyncStopAll()
@@ -13772,12 +13828,12 @@ void MainComponent::restartBackupSync()
         else
             triggerGlobalPanicFadeAll();
     };
-    callbacks.onGo = [this, isBackupRole] (int listIndex, int padIndex, float preWaitMs)
+    callbacks.onGo = [this, isBackupRole] (int listIndex, int padIndex, float preWaitMs, int playMode)
     {
         if (isBackupRole)
-            handleSyncGo (listIndex, padIndex, preWaitMs);
+            handleSyncGo (listIndex, padIndex, preWaitMs, playMode);
         else
-            triggerExternalSyncGo (listIndex, padIndex, preWaitMs);
+            triggerExternalSyncGo (listIndex, padIndex, preWaitMs, playMode);
     };
     callbacks.onStopAll = [this, isBackupRole]
     {
