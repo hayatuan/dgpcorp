@@ -12,8 +12,8 @@ enum class Role : int
 };
 
 inline constexpr int kDefaultSyncPort           = 9000;
-inline constexpr int kHeartbeatIntervalMs       = 1000;
-inline constexpr int kHeartbeatStaleThresholdMs   = 3500;
+inline constexpr int kHeartbeatIntervalMs       = 800;
+inline constexpr int kHeartbeatStaleThresholdMs   = 6000;
 inline constexpr int kMaxBackupPeers            = 16;
 
 enum class LinkQuality : int
@@ -69,6 +69,7 @@ class ShowBackupSyncBroadcaster
 public:
     bool configure (const juce::StringArray& peerHosts, int port)
     {
+        peerSenders.clear();
         targetHosts.clear();
         targetPort = juce::jlimit (1024, 65535, port);
 
@@ -95,6 +96,19 @@ public:
         }
 
         connected = targetHosts.size() > 0;
+        peerSenders.clear();
+
+        for (const auto& host : targetHosts)
+        {
+            auto* peer = new PeerSender();
+            peer->host = host;
+
+            if (peer->sender.connect (host, targetPort))
+                peerSenders.add (peer);
+            else
+                delete peer;
+        }
+
         return connected;
     }
 
@@ -112,6 +126,7 @@ public:
     {
         connected   = false;
         targetHosts.clear();
+        peerSenders.clear();
     }
 
     bool isConnected() const noexcept { return connected && targetHosts.size() > 0; }
@@ -193,6 +208,12 @@ public:
     }
 
 private:
+    struct PeerSender
+    {
+        juce::String host;
+        juce::OSCSender sender;
+    };
+
     bool sendEmpty (const char* address)
     {
         return sendMessage (juce::OSCMessage (address));
@@ -205,25 +226,20 @@ private:
 
         bool anyOk = false;
 
-        for (const auto& host : targetHosts)
+        for (auto* peer : peerSenders)
         {
-            if (sender.connect (host, targetPort))
+            if (peer->sender.send (message))
             {
-                if (sender.send (message))
-                {
-                    anyOk = true;
-                    logSyncEvent ("TX " + message.getAddressPattern().toString()
-                                  + " -> " + host + ":" + juce::String (targetPort));
-                }
-
-                sender.disconnect();
+                anyOk = true;
+                logSyncEvent ("TX " + message.getAddressPattern().toString()
+                              + " -> " + peer->host + ":" + juce::String (targetPort));
             }
         }
 
         return anyOk;
     }
 
-    juce::OSCSender sender;
+    juce::OwnedArray<PeerSender> peerSenders;
     juce::StringArray targetHosts;
     int targetPort = kDefaultSyncPort;
     bool connected = false;

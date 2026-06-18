@@ -103,7 +103,7 @@ public:
         donateQrComponent.setInterceptsMouseClicks (false, false);
         addAndMakeVisible (donateQrComponent);
 
-        if (const auto iconFile = resolveBundledResourceFile ("AppIcon.png"); iconFile.existsAsFile())
+        if (const auto iconFile = resolveBundledResourceFile ("AppIconAbout.png"); iconFile.existsAsFile())
             appIcon = juce::ImageFileFormat::loadFrom (iconFile);
 
         if (const auto qrFile = resolveBundledResourceFile ("DonateQR.png"); qrFile.existsAsFile())

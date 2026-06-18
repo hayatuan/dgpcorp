@@ -11,8 +11,8 @@ endif()
 add_subdirectory(JUCE)
 
 # Khởi tạo cấu hình ứng dụng Âm thanh (Audio Application)
-# ICON_BIG / ICON_SMALL: JUCE tự tạo .icns (macOS) và .ico (Windows) qua juceaide.
-# PNG 1024×1024 cho macOS; ICO riêng cho Windows khi cross-build.
+# ICON_BIG / ICON_SMALL: JUCE tạo .icns/.ico qua juceaide; macOS ghi đè bằng iconutil .icns.
+# Sau khi đổi AppIconSource.png: scripts/prepare_macos_app_icon.py (opaque safe zone + iconutil).
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/InfoPlistExtra.plist" SHOWCUE_PLIST_EXTRA)
 
 juce_add_gui_app(ShowCue
@@ -49,16 +49,32 @@ juce_add_binary_data (ShowCueAssets SOURCES
     Resources/Fonts/Roboto-Bold.ttf)
 
 if (APPLE)
+    set(_showcue_icon_script "${CMAKE_CURRENT_SOURCE_DIR}/scripts/prepare_macos_app_icon.py")
+    set(_showcue_icon_icns "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.icns")
+
+    add_custom_command(TARGET ShowCue PRE_BUILD
+        COMMAND python3 "${_showcue_icon_script}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Prepare macOS AppIcon (opaque + iconutil .icns)")
+
+    add_custom_command(TARGET ShowCue POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_showcue_icon_icns}"
+            "$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.icns"
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            "$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.png"
+        COMMENT "Install native iconutil AppIcon.icns; drop stale AppIcon.png")
+
     target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm
                                  Source/ShowBackupMacNetworkBonjour.mm
                                  Source/ShowDisplaySleepPreventerMac.mm)
 
     target_link_libraries(ShowCue PRIVATE "-framework IOKit")
 
-    set(_showcontrol_app_icon_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png")
-    if(EXISTS "${_showcontrol_app_icon_png}")
-        target_sources(ShowCue PRIVATE "${_showcontrol_app_icon_png}")
-        set_source_files_properties("${_showcontrol_app_icon_png}"
+    set(_showcue_about_icon_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIconAbout.png")
+    if(EXISTS "${_showcue_about_icon_png}")
+        target_sources(ShowCue PRIVATE "${_showcue_about_icon_png}")
+        set_source_files_properties("${_showcue_about_icon_png}"
             PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     endif()
 

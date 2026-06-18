@@ -11540,6 +11540,11 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
         return backupPeerStatuses;
     };
 
+    callbacks.onReconnectBackupSync = [this]
+    {
+        reconnectBackupSync();
+    };
+
     auto* dialog = new GlobalPreferencesDialog (deviceManager,
                                                 isDarkMode,
                                                 multiOutputCallback.getAllBusNames(),
@@ -13190,10 +13195,7 @@ void MainComponent::handleSyncPauseCue (int listIndex, int padIndex)
 void MainComponent::handleSyncHeartbeat (juce::uint32 /*sequence*/)
 {
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup)
-    {
         lastPrimaryHeartbeatRxMs = juce::Time::getMillisecondCounter();
-        updateBackupConnectionUi();
-    }
 }
 
 void MainComponent::handleSyncTakeover (bool active)
@@ -13411,19 +13413,16 @@ void MainComponent::updateBackupConnectionUi()
     const auto now = juce::Time::getMillisecondCounter();
     auto quality   = showcontrol::backup::LinkQuality::unknown;
     juce::String detail;
-    bool showReconnect = false;
 
     if (lastPrimaryHeartbeatRxMs == 0)
     {
-        quality       = showcontrol::backup::LinkQuality::offline;
-        detail        = showcontrol::localization::tr (u8"Chưa kết nối Primary");
-        showReconnect = true;
+        quality = showcontrol::backup::LinkQuality::offline;
+        detail  = showcontrol::localization::tr (u8"Chưa kết nối Primary");
     }
     else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
     {
-        quality       = showcontrol::backup::LinkQuality::offline;
-        detail        = showcontrol::localization::tr (u8"Mất kết nối Primary");
-        showReconnect = true;
+        quality = showcontrol::backup::LinkQuality::offline;
+        detail  = showcontrol::localization::tr (u8"Mất kết nối Primary");
     }
     else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
     {
@@ -13445,7 +13444,7 @@ void MainComponent::updateBackupConnectionUi()
         }
     }
 
-    masterDeckPanel.setNetworkSyncStatus (quality, title, detail, showReconnect);
+    masterDeckPanel.setNetworkSyncStatus (quality, title, detail, false);
 }
 
 void MainComponent::tickBackupPeerHealth()

@@ -14,6 +14,7 @@ class BackupSyncPreferencesPanel : public juce::Component,
 {
 public:
     std::function<void()> onSettingsChanged;
+    std::function<void()> onReconnectRequested;
     std::function<void (int wantRole, std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
     std::function<juce::Array<showcontrol::backup::PeerRuntimeStatus>()> queryPeerRuntimeStatus;
 
@@ -65,6 +66,13 @@ public:
 
         removePeerBtn.onClick = [this] { removeSelectedActivePeer(); };
         addChildComponent (removePeerBtn);
+
+        reconnectBtn.onClick = [this]
+        {
+            if (onReconnectRequested != nullptr)
+                onReconnectRequested();
+        };
+        addChildComponent (reconnectBtn);
 
         peerEditor.setVisible (false);
         addChildComponent (peerEditor);
@@ -255,6 +263,12 @@ public:
             const int peerListH = juce::jmax (peerListMinH, configuredPeerEntries.size() * 28 + 4);
             activePeersList.setBounds (area.removeFromTop (juce::jmin (peerListH, juce::jmax (peerListMinH, area.getHeight() / 3))));
             area.removeFromTop (gap);
+
+            if (reconnectBtn.isVisible())
+            {
+                reconnectBtn.setBounds (area.removeFromTop (rowH));
+                area.removeFromTop (gap);
+            }
         }
         else
         {
@@ -319,6 +333,7 @@ public:
             activePeersLabel.setText ({}, juce::dontSendNotification);
 
         removePeerBtn.setButtonText (showcontrol::localization::tr (u8"Gỡ"));
+        reconnectBtn.setButtonText (showcontrol::localization::tr (u8"Kết nối lại"));
 
         followerLockToggle.setButtonText (showcontrol::localization::tr (
             u8"Khóa điều khiển local trên máy phụ (Follower)"));
@@ -326,7 +341,8 @@ public:
         helpLabel.setText (showcontrol::localization::tr (
             u8"Chọn vai trò → xem IP/Subnet/Port máy này → Quét LAN → chọn máy → Kết nối.\n"
             u8"Máy chính điều khiển nhiều máy phụ; máy phụ mirror vị trí chọn và GO/Stop/Panic.\n"
-            u8"Trạng thái kết nối hiển thị trên màn hình chính (xanh / vàng / đỏ)."),
+            u8"Trạng thái kết nối hiển thị trên màn hình chính (xanh / vàng / đỏ).\n"
+            u8"Máy phụ: dùng 「Kết nối lại」 trong tab này khi mất kết nối Primary."),
             juce::dontSendNotification);
         takeoverBtn.setButtonText (showcontrol::localization::tr (u8"Takeover — điều khiển local (máy phụ)"));
 
@@ -588,6 +604,7 @@ private:
 
         refreshLocalMachineDisplay();
         refreshActivePeerList();
+        refreshReconnectButton();
         updateActionButtonVisibility();
     }
 
@@ -597,6 +614,24 @@ private:
 
         if (onSettingsChanged != nullptr)
             onSettingsChanged();
+    }
+
+    void refreshReconnectButton()
+    {
+        const bool backup = isBackupRole();
+        reconnectBtn.setVisible (backup);
+
+        if (! backup)
+            return;
+
+        auto quality = showcontrol::backup::LinkQuality::unknown;
+
+        if (configuredPeerEntries.size() > 0)
+            quality = lookupRuntimeStatus (configuredPeerEntries.getReference (0).ip).quality;
+        else if (peerEditor.getText().trim().isNotEmpty())
+            quality = lookupRuntimeStatus (peerEditor.getText().trim()).quality;
+
+        reconnectBtn.setEnabled (quality != showcontrol::backup::LinkQuality::good);
     }
 
     void refreshTakeoverButton()
@@ -784,14 +819,17 @@ private:
     void timerCallback() override
     {
         if (isShowing() && (isPrimaryRole() || isBackupRole()))
+        {
             refreshActivePeerList();
+            refreshReconnectButton();
+        }
     }
 
     juce::Label roleLabel, portLabel, helpLabel, localMachineTitle, localMachineInfoLabel;
     juce::Label scanSectionLabel, activePeersLabel;
     juce::ComboBox roleCombo;
     juce::TextEditor peerEditor, portEditor;
-    juce::TextButton scanPeerBtn, connectBtn, removePeerBtn, takeoverBtn;
+    juce::TextButton scanPeerBtn, connectBtn, removePeerBtn, reconnectBtn, takeoverBtn;
     juce::ToggleButton followerLockToggle, oscEnableToggle;
     juce::ListBox scanResultsList, activePeersList;
     ScanResultsListModel scanResultsModel;

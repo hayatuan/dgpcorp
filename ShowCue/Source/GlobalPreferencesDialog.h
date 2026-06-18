@@ -602,6 +602,7 @@ public:
         std::function<void (int wantRole,
                             std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
         std::function<juce::Array<showcontrol::backup::PeerRuntimeStatus>()> queryBackupPeerRuntimeStatus;
+        std::function<void()> onReconnectBackupSync;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
@@ -644,6 +645,12 @@ public:
                 return cb.queryBackupPeerRuntimeStatus();
 
             return juce::Array<showcontrol::backup::PeerRuntimeStatus>();
+        };
+
+        backupPanel->onReconnectRequested = [this]
+        {
+            if (cb.onReconnectBackupSync != nullptr)
+                cb.onReconnectBackupSync();
         };
 
         if (cb.onBusNameLiveChanged != nullptr)
