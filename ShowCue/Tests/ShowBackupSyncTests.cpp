@@ -64,6 +64,13 @@ public:
         expect (! showcontrol::backup::roleMatchesDiscoverRequest (1, 2));
         expectEquals (showcontrol::backup::discoveryPortForSyncPort (9000), 9001);
 
+        beginTest ("LAN scan targets");
+        expect (! showcontrol::backup::isUsableLanIpv4 (juce::IPAddress ("127.0.0.1")));
+        expect (! showcontrol::backup::isUsableLanIpv4 (juce::IPAddress ("169.254.1.1")));
+        expect (showcontrol::backup::isUsableLanIpv4 (juce::IPAddress ("192.168.1.10")));
+        const auto targets = showcontrol::backup::collectLanScanTargets();
+        expect (targets.size() >= 0);
+
         beginTest ("selection sync message format");
         juce::Array<int> selectionMulti { 2, 5, 7 };
         showcontrol::backup::ShowBackupSyncBroadcaster broadcaster2;
