@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "ShowBackupPadSync.h"
 
 namespace showcontrol::backup
 {
@@ -20,8 +21,12 @@ enum class SyncPlayMode : int
 };
 
 inline constexpr int kDefaultSyncPort           = 9000;
-inline constexpr int kHeartbeatIntervalMs       = 800;
-inline constexpr int kHeartbeatStaleThresholdMs   = 6000;
+inline constexpr int kHeartbeatIntervalMs         = 400;
+inline constexpr int kHeartbeatStaleThresholdMs   = 5000;
+inline constexpr int kPeerHealthIntervalMs        = 1000;
+inline constexpr int kPeerPingTimeoutMs           = 400;
+inline constexpr int kLanAnnounceIntervalMs       = 1500;
+inline constexpr int kPadPatchDebounceMs          = 60;
 inline constexpr int kMaxBackupPeers            = 16;
 
 enum class LinkQuality : int
@@ -51,6 +56,9 @@ inline constexpr const char* pauseCue   = "/showcue/sync/pauseCue";
 inline constexpr const char* heartbeat  = "/showcue/sync/heartbeat";
 inline constexpr const char* takeover   = "/showcue/sync/takeover";
 inline constexpr const char* selection  = "/showcue/sync/selection";
+inline constexpr const char* padPatch   = "/showcue/sync/padPatch";
+inline constexpr const char* padReorder = "/showcue/sync/padReorder";
+inline constexpr const char* padOrder   = "/showcue/sync/padOrder";
 inline constexpr const char* legacyPanic = "/showcue/panic";
 inline constexpr const char* legacyGo    = "/showcue/go";
 } // namespace addresses
@@ -212,6 +220,70 @@ public:
 
         for (const auto idx : multiIndices)
             msg.addInt32 (idx);
+
+        return sendMessage (msg);
+    }
+
+    bool sendPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch)
+    {
+        juce::OSCMessage msg (addresses::padPatch);
+        msg.addInt32 (patch.listIndex);
+        msg.addInt32 (patch.padIndex);
+        msg.addInt32 ((int) patch.flags);
+
+        if ((patch.flags & padpatch::kName) != 0)
+            msg.addString (patch.name);
+
+        if ((patch.flags & padpatch::kColour) != 0)
+            msg.addInt32 ((int) patch.colourArgb);
+
+        if ((patch.flags & padpatch::kGridPos) != 0)
+        {
+            msg.addInt32 (patch.gridRow);
+            msg.addInt32 (patch.gridCol);
+        }
+
+        if ((patch.flags & padpatch::kVolume) != 0)
+            msg.addFloat32 (patch.volume);
+
+        if ((patch.flags & padpatch::kFadeIn) != 0)
+            msg.addFloat32 (patch.fadeInMs);
+
+        if ((patch.flags & padpatch::kFadeOut) != 0)
+            msg.addFloat32 (patch.fadeOutMs);
+
+        if ((patch.flags & padpatch::kLoop) != 0)
+            msg.addInt32 (patch.loop);
+
+        if ((patch.flags & padpatch::kOutputBus) != 0)
+            msg.addInt32 (patch.outputBus);
+
+        if ((patch.flags & padpatch::kTrim) != 0)
+        {
+            msg.addFloat32 ((float) patch.trimStart);
+            msg.addFloat32 ((float) patch.trimEnd);
+        }
+
+        return sendMessage (msg);
+    }
+
+    bool sendPadReorder (int listIndex, int fromIndex, int toIndex)
+    {
+        juce::OSCMessage msg (addresses::padReorder);
+        msg.addInt32 (listIndex);
+        msg.addInt32 (fromIndex);
+        msg.addInt32 (toIndex);
+        return sendMessage (msg);
+    }
+
+    bool sendPadOrder (int listIndex, const juce::StringArray& padKeysInOrder)
+    {
+        juce::OSCMessage msg (addresses::padOrder);
+        msg.addInt32 (listIndex);
+        msg.addInt32 (padKeysInOrder.size());
+
+        for (const auto& key : padKeysInOrder)
+            msg.addString (key);
 
         return sendMessage (msg);
     }

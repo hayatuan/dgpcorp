@@ -209,6 +209,16 @@ private:
     void handleSyncHeartbeat (juce::uint32 sequence);
     void handleSyncTakeover (bool active);
     void handleSyncSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
+    void handleSyncPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch);
+    void handleSyncPadReorder (int listIndex, int fromIndex, int toIndex);
+    void handleSyncPadOrder (int listIndex, const juce::StringArray& padKeysInOrder);
+    void applySyncedPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch);
+    void applySyncedPadListOrder (int listIndex, const juce::StringArray& padKeysInOrder);
+    void refreshListUiAfterSyncedReorder (int listIndex);
+    void broadcastPadPatchIfPrimary (const showcontrol::backup::padpatch::PatchMessage& patch);
+    void broadcastPadListOrderIfPrimary (int listIndex);
+    void schedulePadPatchBroadcast (int listIndex, int padIndex, juce::uint32 flags);
+    void flushPendingPadPatchBroadcast();
     void applySyncedSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
     void broadcastSelectionSyncIfPrimary();
     int currentSyncViewMode() const noexcept;
@@ -805,6 +815,22 @@ private:
     std::atomic<bool> backupPeerHealthPingInFlight { false };
     juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;
     std::unique_ptr<juce::DatagramSocket> backupDiscoverySocket;
+
+    class PadPatchBroadcastTimer final : public juce::Timer
+    {
+    public:
+        std::function<void()> onFire;
+        void timerCallback() override
+        {
+            if (onFire != nullptr)
+                onFire();
+        }
+    };
+
+    std::unique_ptr<PadPatchBroadcastTimer> padPatchBroadcastTimer;
+    int pendingPadPatchListIdx = -1;
+    int pendingPadPatchPadIdx  = -1;
+    juce::uint32 pendingPadPatchFlags = 0;
     juce::uint32 lastAutosaveAtMs = 0;
     void maybeRunAutosave();
 
