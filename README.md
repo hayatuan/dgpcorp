@@ -13,7 +13,7 @@ Trình điều khiển cue âm thanh cho sân khấu / sự kiện — **ShowCue
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target ShowCue -j
 
-# Windows (VS 2026 x64) — thư mục ví dụ: D:\app\dgpcorp
+# Windows (VS 2026 x64) — thư mục ví dụ: C:\app\dgpcorp
 cmake -S . -B build-win -G "Visual Studio 18 2026" -A x64
 cmake --build build-win --config Release --target ShowCue -j
 

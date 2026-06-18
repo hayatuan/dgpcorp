@@ -120,12 +120,12 @@ Universal Binary (Intel + Apple Silicon) được bật tự động qua root `C
 
 ## Build Windows (Visual Studio)
 
-Thư mục dự án ví dụ: `D:\app\dgpcorp` (root repo — cùng cấu trúc với macOS).
+Thư mục dự án ví dụ: `C:\app\dgpcorp` (root repo — cùng cấu trúc với macOS).
 
 Mở **x64 Native Tools Command Prompt** (VS 2026 hoặc VS 2022) hoặc PowerShell, `cd` vào root repo:
 
 ```bat
-cd /d D:\app\dgpcorp
+cd /d C:\app\dgpcorp
 ```
 
 ### Visual Studio 2026 (khuyến nghị nếu máy chỉ có VS 18)
@@ -154,7 +154,7 @@ cmake --build build-win --config Debug --target ShowCue -j
 
 ### Cursor trên Windows
 
-1. Mở folder `D:\app\dgpcorp` trong Cursor, đồng bộ git với máy Mac.
+1. Mở folder `C:\app\dgpcorp` trong Cursor, đồng bộ git với máy Mac.
 2. Cài workload **Desktop development with C++** trong VS 2026.
 3. Nếu CMake Tools không nhận VS 2026, thêm `.vscode/settings.json`:
 
