@@ -50,7 +50,10 @@ juce_add_binary_data (ShowCueAssets SOURCES
 
 if (APPLE)
     target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm
-                                 Source/ShowBackupMacNetworkBonjour.mm)
+                                 Source/ShowBackupMacNetworkBonjour.mm
+                                 Source/ShowDisplaySleepPreventerMac.mm)
+
+    target_link_libraries(ShowCue PRIVATE "-framework IOKit")
 
     set(_showcontrol_app_icon_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png")
     if(EXISTS "${_showcontrol_app_icon_png}")
@@ -68,7 +71,8 @@ if (APPLE)
 endif()
 
 if(WIN32)
-    target_sources(ShowCue PRIVATE Source/ShowBackupLanDiscoveryWin.cpp)
+    target_sources(ShowCue PRIVATE Source/ShowBackupLanDiscoveryWin.cpp
+                                 Source/ShowDisplaySleepPreventerWin.cpp)
 
     target_link_libraries(ShowCue PRIVATE iphlpapi)
 
@@ -84,6 +88,8 @@ if(WIN32)
                 COMMENT "Bundle Resources/${_runtime_asset} for Windows")
         endif()
     endforeach()
+elseif(NOT APPLE)
+    target_sources(ShowCue PRIVATE Source/ShowDisplaySleepPreventerStub.cpp)
 endif()
 
 # Nạp tất cả các module xử lý Mixer và driver phần cứng âm thanh

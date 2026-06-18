@@ -2,6 +2,7 @@
 #include <functional>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "ShowTheme.h"
+#include "ShowDisplaySleepPreventer.h"
 
 /** Snapshot UI — chỉ message thread ghi/đọc, không mutex audio. */
 struct StageMonitorSnapshot
@@ -108,6 +109,8 @@ public:
     void closeButtonPressed() override;
     void activeWindowStatusChanged() override;
     bool keyPressed (const juce::KeyPress& key) override;
+    void resized() override;
+    void maximiseButtonPressed() override;
     void positionToSecondaryDisplay();
 
     void setAlwaysOnTopEnabled (bool shouldBeOnTop);
@@ -120,10 +123,12 @@ public:
 private:
     void wireMonitorControls();
     void refreshMonitorLayout();
+    void syncDisplaySleepFromWindowState();
 
     StageMonitorComponent* monitorComponent = nullptr;
     std::function<void()> closedCallback;
     bool alwaysOnTopEnabled = false;
+    showcontrol::display::FullscreenSleepGuard displaySleepGuard;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StageMonitorWindow)
 };

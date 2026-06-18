@@ -415,12 +415,30 @@ void StageMonitorWindow::setAlwaysOnTopEnabled (bool shouldBeOnTop)
 void StageMonitorWindow::setFullScreenEnabled (bool shouldBeFullScreen)
 {
     setFullScreen (shouldBeFullScreen);
+    syncDisplaySleepFromWindowState();
     refreshMonitorLayout();
 }
 
 bool StageMonitorWindow::isFullScreenEnabled() const noexcept
 {
     return isFullScreen();
+}
+
+void StageMonitorWindow::resized()
+{
+    DocumentWindow::resized();
+    syncDisplaySleepFromWindowState();
+}
+
+void StageMonitorWindow::maximiseButtonPressed()
+{
+    DocumentWindow::maximiseButtonPressed();
+    syncDisplaySleepFromWindowState();
+}
+
+void StageMonitorWindow::syncDisplaySleepFromWindowState()
+{
+    displaySleepGuard.sync (isFullScreen());
 }
 
 void StageMonitorWindow::activeWindowStatusChanged()

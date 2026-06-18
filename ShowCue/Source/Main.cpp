@@ -4,6 +4,7 @@
 #include "ShowAboutDialog.h"
 #include "ShowTypography.h"
 #include "ShowLocalization.h"
+#include "ShowDisplaySleepPreventer.h"
 
 #if JUCE_MAC
 
@@ -172,6 +173,7 @@ public:
                 main->prepareForApplicationShutdown();
 
         mainWindow = nullptr;
+        showcontrol::display::releaseAllDisplaySleepBlocks();
 
     }
 
@@ -290,9 +292,20 @@ public:
 
            #endif
 
+            syncDisplaySleepFromWindowState();
         }
 
+        void resized() override
+        {
+            DocumentWindow::resized();
+            syncDisplaySleepFromWindowState();
+        }
 
+        void maximiseButtonPressed() override
+        {
+            DocumentWindow::maximiseButtonPressed();
+            syncDisplaySleepFromWindowState();
+        }
 
         void visibilityChanged() override
 
@@ -420,7 +433,12 @@ public:
         ShowControlDesktopMenuBar desktopMenuBar { commandManager };
        #endif
 
+        void syncDisplaySleepFromWindowState()
+        {
+            displaySleepGuard.sync (isFullScreen());
+        }
 
+        showcontrol::display::FullscreenSleepGuard displaySleepGuard;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
 
