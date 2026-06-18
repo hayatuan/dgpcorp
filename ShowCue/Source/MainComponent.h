@@ -212,7 +212,9 @@ private:
     void broadcastSelectionSyncIfPrimary();
     int currentSyncViewMode() const noexcept;
     void setPlayoutModeInternal (bool isPadMode, bool persistToDisk);
-    void updateBackupStatusLabel();
+    void updateBackupConnectionUi();
+    void tickBackupPeerHealth();
+    void reconnectBackupSync();
     void tickBackupHeartbeat();
     void pollBackupDiscoverySocket();
     void startBackupDiscoveryResponder();
@@ -796,6 +798,8 @@ private:
     juce::uint32 heartbeatSendSeq = 0;
     juce::uint32 lastHeartbeatTickMs = 0;
     juce::uint32 lastLanAnnounceBroadcastMs = 0;
+    juce::uint32 lastPeerHealthTickMs = 0;
+    juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;
     std::unique_ptr<juce::DatagramSocket> backupDiscoverySocket;
     juce::uint32 lastAutosaveAtMs = 0;
     void maybeRunAutosave();

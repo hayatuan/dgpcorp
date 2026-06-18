@@ -601,6 +601,7 @@ public:
         std::function<bool()> getBackupTakeoverActive;
         std::function<void (int wantRole,
                             std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
+        std::function<juce::Array<showcontrol::backup::PeerRuntimeStatus>()> queryBackupPeerRuntimeStatus;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
@@ -635,6 +636,14 @@ public:
         {
             if (cb.onScanLanPeers != nullptr)
                 cb.onScanLanPeers (wantRole, std::move (onDone));
+        };
+
+        backupPanel->queryPeerRuntimeStatus = [this]
+        {
+            if (cb.queryBackupPeerRuntimeStatus != nullptr)
+                return cb.queryBackupPeerRuntimeStatus();
+
+            return juce::Array<showcontrol::backup::PeerRuntimeStatus>();
         };
 
         if (cb.onBusNameLiveChanged != nullptr)
@@ -702,7 +711,7 @@ public:
 
         selectTab (0);
         setWantsKeyboardFocus (true);
-        setSize (680, 620);
+        setSize (680, 800);
     }
 
     ~GlobalPreferencesDialog() override

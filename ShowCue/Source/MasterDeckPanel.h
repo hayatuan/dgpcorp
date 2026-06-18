@@ -7,6 +7,7 @@
 #include "AudioMetadataReader.h"
 #include "ShowTheme.h"
 #include "ShowLocalization.h"
+#include "ShowBackupSync.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowGraphicsSafe.h"
 #include "MasterDeckComponent.h"
@@ -448,6 +449,15 @@ public:
         systemTimeLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         systemTimeLabel.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
 
+        addChildComponent (reconnectBtn);
+        reconnectBtn.setButtonText (showcontrol::localization::tr (u8"Kết nối lại"));
+        reconnectBtn.onClick = [this]
+        {
+            if (onReconnectRequested != nullptr)
+                onReconnectRequested();
+        };
+        reconnectBtn.setVisible (false);
+
         addAndMakeVisible (volLabel); 
         volLabel.setText (juce::String::fromUTF8 (u8"VOL"), juce::dontSendNotification);
         volLabel.setFont (ShowTheme::fontBold (9.0f));
@@ -742,14 +752,36 @@ public:
     /** Kept for backward-compat. */
     void setCueTransportControlsVisible (bool showCueControls) { setListMode (!showCueControls); }
 
-    void setBackupRoleStatusText (const juce::String& text)
+    void setNetworkSyncStatus (showcontrol::backup::LinkQuality quality,
+                               const juce::String& title,
+                               const juce::String& detail,
+                               bool showReconnectButton)
     {
-        if (backupRoleStatusText == text)
+        if (networkLinkQuality == quality
+            && networkStatusTitle == title
+            && networkStatusDetail == detail
+            && networkShowReconnect == showReconnectButton)
             return;
 
-        backupRoleStatusText = text;
+        networkLinkQuality  = quality;
+        networkStatusTitle  = title;
+        networkStatusDetail = detail;
+        networkShowReconnect = showReconnectButton;
+        reconnectBtn.setVisible (showReconnectButton);
+        layoutNetworkStatusControls();
         repaint();
     }
+
+    void setBackupRoleStatusText (const juce::String& text)
+    {
+        setNetworkSyncStatus (text.isEmpty() ? showcontrol::backup::LinkQuality::unknown
+                                            : showcontrol::backup::LinkQuality::good,
+                              text,
+                              {},
+                              false);
+    }
+
+    std::function<void()> onReconnectRequested;
 
     void timerCallback() override
     {
@@ -893,16 +925,57 @@ public:
 
     void paintBackupRoleStatus (juce::Graphics& g)
     {
-        if (backupRoleStatusText.isEmpty())
+        if (networkStatusTitle.isEmpty())
             return;
 
-        const auto leftCol = getLeftColumnBounds();
-        g.setColour (findColour (MasterDeckComponent::accentTextColourId).withAlpha (0.88f));
+        auto statusArea = getNetworkStatusRowBounds();
+
+        juce::String line = networkStatusTitle;
+
+        if (networkStatusDetail.isNotEmpty())
+            line += " · " + networkStatusDetail;
+
         g.setFont (ShowTheme::fontBold (10.5f));
-        g.drawText (backupRoleStatusText,
-                    leftCol.getX() + 8, leftCol.getBottom() - 20,
-                    leftCol.getWidth() - 16, 16,
-                    juce::Justification::centredRight);
+        const auto statusFont = g.getCurrentFont();
+        const int textW = juce::GlyphArrangement::getStringWidthInt (statusFont, line) + 2;
+        const int dotSize = 8;
+        const int dotGap  = 5;
+        const int blockW  = dotSize + dotGap + textW;
+        const int blockX  = statusArea.getRight() - blockW;
+
+        const float dotY = (float) statusArea.getCentreY() - (float) dotSize * 0.5f;
+        g.setColour (networkLinkColour (networkLinkQuality));
+        g.fillEllipse ((float) blockX, dotY, (float) dotSize, (float) dotSize);
+
+        g.setColour (findColour (MasterDeckComponent::accentTextColourId).withAlpha (0.88f));
+        g.drawText (line,
+                    blockX + dotSize + dotGap, statusArea.getY(),
+                    textW, statusArea.getHeight(),
+                    juce::Justification::centredLeft, true);
+    }
+
+    juce::Rectangle<int> getNetworkStatusRowBounds() const
+    {
+        const auto leftCol = getLeftColumnBounds();
+        constexpr int rowH = 18;
+        auto row = juce::Rectangle<int> (leftCol.getX() + 6, leftCol.getBottom() - rowH - 5,
+                                         leftCol.getWidth() - 12, rowH);
+
+        if (networkShowReconnect)
+            row.removeFromRight (88);
+
+        return row;
+    }
+
+    juce::Colour networkLinkColour (showcontrol::backup::LinkQuality quality) const
+    {
+        switch (quality)
+        {
+            case showcontrol::backup::LinkQuality::good:     return juce::Colour (0xff3ecf6a);
+            case showcontrol::backup::LinkQuality::degraded: return juce::Colour (0xfff0b429);
+            case showcontrol::backup::LinkQuality::offline:  return juce::Colour (0xffe05252);
+            default:                                         return juce::Colour (0xff8a8f98);
+        }
     }
 
     void paintWaveformLive (juce::Graphics& g, juce::Rectangle<int> waveBounds)
@@ -1024,6 +1097,21 @@ public:
         positionSlider.setBounds (waveBounds);
 
         layoutTransportAndVolume();
+        layoutNetworkStatusControls();
+    }
+
+    void layoutNetworkStatusControls()
+    {
+        if (! networkShowReconnect || networkStatusTitle.isEmpty())
+        {
+            reconnectBtn.setVisible (false);
+            return;
+        }
+
+        const auto leftCol = getLeftColumnBounds();
+        reconnectBtn.setBounds (leftCol.getRight() - 90, leftCol.getBottom() - 23, 84, 18);
+        reconnectBtn.setVisible (true);
+        reconnectBtn.toFront (false);
     }
 
     void layoutTransportAndVolume()
@@ -1307,7 +1395,10 @@ private:
 
     bool isDarkMode, isDraggingPlayhead, isPaused, isBgmMode = false;
     bool wasTransportAnimatingLastTick = false;
-    juce::String backupRoleStatusText;
+    showcontrol::backup::LinkQuality networkLinkQuality = showcontrol::backup::LinkQuality::unknown;
+    juce::String networkStatusTitle, networkStatusDetail;
+    bool networkShowReconnect = false;
+    juce::TextButton reconnectBtn;
     SoundPad* activePad = nullptr;
     SoundPad* thumbnailListenerPad = nullptr;
     juce::Colour trackAccent { showcontrol::colours::tagColourAt (7) };

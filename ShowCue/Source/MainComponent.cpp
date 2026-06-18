@@ -1692,6 +1692,7 @@ void MainComponent::timerCallback()
 
     maybeRunAutosave();
     tickBackupHeartbeat();
+    tickBackupPeerHealth();
     pollBackupDiscoverySocket();
 }
 
@@ -8491,6 +8492,7 @@ MainComponent::MainComponent()
 
     masterDeckPanel.onAudioSettingsRequested = [this] { showPreferencesDialog (0); };
     masterDeckPanel.onStageMonitorToggleRequested = [this] { toggleStageMonitorWindow(); };
+    masterDeckPanel.onReconnectRequested = [this] { reconnectBackupSync(); };
 
     inspectorPanel.setDefaultNormalizeMode (projectDefaultNormalizeLufs);
     inspectorPanel.setHotkeyScopeSelectionId (static_cast<int> (hotkeyScopeMode));
@@ -11477,7 +11479,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
     callbacks.onBackupSettingsChanged = [this]
     {
         restartBackupSync();
-        updateBackupStatusLabel();
+        updateBackupConnectionUi();
     };
 
     callbacks.getBackupTakeoverActive = [this] { return backupTakeoverActive; };
@@ -11491,6 +11493,11 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
                                        std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)
     {
         scanLanPeersAsync (wantRole, std::move (onDone));
+    };
+
+    callbacks.queryBackupPeerRuntimeStatus = [this]
+    {
+        return backupPeerStatuses;
     };
 
     auto* dialog = new GlobalPreferencesDialog (deviceManager,
@@ -11512,7 +11519,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
 
     if (auto* dw = opts.launchAsync())
     {
-        dw->centreWithSize (680, 560);
+        dw->centreWithSize (680, 800);
         dw->grabKeyboardFocus();
         dialog->grabKeyboardFocus();
 
@@ -12982,7 +12989,7 @@ void MainComponent::broadcastSyncIfPrimary (
 void MainComponent::setBackupTakeoverActive (bool active)
 {
     backupTakeoverActive = active;
-    updateBackupStatusLabel();
+    updateBackupConnectionUi();
 
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup
         && backupBroadcaster != nullptr
@@ -13129,7 +13136,7 @@ void MainComponent::handleSyncHeartbeat (juce::uint32 /*sequence*/)
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup)
     {
         lastPrimaryHeartbeatRxMs = juce::Time::getMillisecondCounter();
-        updateBackupStatusLabel();
+        updateBackupConnectionUi();
     }
 }
 
@@ -13138,7 +13145,7 @@ void MainComponent::handleSyncTakeover (bool active)
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::primary)
     {
         std::cout << "[BACKUP] Backup takeover " << (active ? "armed" : "released") << std::endl;
-        updateBackupStatusLabel();
+        updateBackupConnectionUi();
     }
 }
 
@@ -13281,45 +13288,181 @@ void MainComponent::handleSyncSelection (int listIndex,
     applySyncedSelection (listIndex, padIndex, viewMode, multiIndices);
 }
 
-void MainComponent::updateBackupStatusLabel()
+void MainComponent::updateBackupConnectionUi()
 {
     const int role = showcontrol::prefs::loadBackupRole();
 
     if (role == (int) showcontrol::backup::Role::standalone)
     {
-        masterDeckPanel.setBackupRoleStatusText ({});
+        masterDeckPanel.setNetworkSyncStatus (showcontrol::backup::LinkQuality::unknown,
+                                              {}, {}, false);
         return;
     }
 
-    juce::String text;
-
     if (role == (int) showcontrol::backup::Role::primary)
     {
-        text = showcontrol::localization::tr (u8"Máy chính");
         const auto peers = showcontrol::prefs::loadBackupPeerHosts();
+        int onlineCount  = 0;
 
-        if (peers.size() == 1)
-            text += " \u2192 " + peers[0];
-        else if (peers.size() > 1)
-            text += " \u2192 " + juce::String (peers.size()) + " "
-                   + showcontrol::localization::tr (u8"máy phụ");
+        for (const auto& status : backupPeerStatuses)
+        {
+            if (status.quality == showcontrol::backup::LinkQuality::good
+                || status.quality == showcontrol::backup::LinkQuality::degraded)
+                ++onlineCount;
+        }
+
+        juce::String detail;
+        auto quality = showcontrol::backup::LinkQuality::unknown;
+
+        if (peers.isEmpty())
+        {
+            quality = showcontrol::backup::LinkQuality::offline;
+            detail  = showcontrol::localization::tr (u8"Chưa có máy phụ");
+        }
+        else if (onlineCount <= 0)
+        {
+            quality = showcontrol::backup::LinkQuality::offline;
+            detail  = showcontrol::localization::tr (u8"Mất kết nối máy phụ");
+        }
+        else if (onlineCount < peers.size())
+        {
+            quality = showcontrol::backup::LinkQuality::degraded;
+            detail  = juce::String (onlineCount) + "/" + juce::String (peers.size()) + " "
+                    + showcontrol::localization::tr (u8"online");
+        }
+        else
+        {
+            quality = showcontrol::backup::LinkQuality::good;
+            detail  = juce::String (peers.size()) + " "
+                    + showcontrol::localization::tr (u8"máy phụ online");
+        }
+
+        masterDeckPanel.setNetworkSyncStatus (quality,
+                                              showcontrol::localization::tr (u8"Máy chính"),
+                                              detail,
+                                              false);
+        return;
+    }
+
+    juce::String title = backupTakeoverActive
+                       ? showcontrol::localization::tr (u8"Máy phụ — TAKEOVER")
+                       : showcontrol::localization::tr (u8"Máy phụ — Follower");
+
+    const auto now = juce::Time::getMillisecondCounter();
+    auto quality   = showcontrol::backup::LinkQuality::unknown;
+    juce::String detail;
+    bool showReconnect = false;
+
+    if (lastPrimaryHeartbeatRxMs == 0)
+    {
+        quality       = showcontrol::backup::LinkQuality::offline;
+        detail        = showcontrol::localization::tr (u8"Chưa kết nối Primary");
+        showReconnect = true;
+    }
+    else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
+    {
+        quality       = showcontrol::backup::LinkQuality::offline;
+        detail        = showcontrol::localization::tr (u8"Mất kết nối Primary");
+        showReconnect = true;
+    }
+    else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
+    {
+        quality = showcontrol::backup::LinkQuality::degraded;
+        detail  = showcontrol::localization::tr (u8"Kết nối chập chờn");
     }
     else
     {
-        text = backupTakeoverActive
-             ? showcontrol::localization::tr (u8"Máy phụ — TAKEOVER")
-             : showcontrol::localization::tr (u8"Máy phụ — Follower");
+        quality = showcontrol::backup::LinkQuality::good;
+        detail  = showcontrol::localization::tr (u8"Đồng bộ Primary");
 
-        const auto now = juce::Time::getMillisecondCounter();
-
-        if (lastPrimaryHeartbeatRxMs > 0
-            && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
+        for (const auto& status : backupPeerStatuses)
         {
-            text += " · " + showcontrol::localization::tr (u8"Mất kết nối Primary");
+            if (status.latencyMs > 0)
+            {
+                detail += " · " + juce::String (status.latencyMs) + " ms";
+                break;
+            }
         }
     }
 
-    masterDeckPanel.setBackupRoleStatusText (text);
+    masterDeckPanel.setNetworkSyncStatus (quality, title, detail, showReconnect);
+}
+
+void MainComponent::tickBackupPeerHealth()
+{
+    const int role = showcontrol::prefs::loadBackupRole();
+
+    if (role == (int) showcontrol::backup::Role::standalone)
+    {
+        backupPeerStatuses.clear();
+        return;
+    }
+
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (lastPeerHealthTickMs != 0 && now - lastPeerHealthTickMs < 2000u)
+        return;
+
+    lastPeerHealthTickMs = now;
+
+    const int syncPort = showcontrol::prefs::loadBackupSyncPort();
+    backupPeerStatuses.clear();
+
+    if (role == (int) showcontrol::backup::Role::primary)
+    {
+        for (const auto& ip : showcontrol::prefs::loadBackupPeerHosts())
+        {
+            showcontrol::backup::PeerRuntimeStatus status;
+            status.address = ip;
+            status.latencyMs = showcontrol::backup::pingShowCuePeer (
+                ip, syncPort, (int) showcontrol::backup::Role::backup, 650);
+
+            if (status.latencyMs > 0)
+                status.quality = status.latencyMs <= 120
+                               ? showcontrol::backup::LinkQuality::good
+                               : showcontrol::backup::LinkQuality::degraded;
+            else
+                status.quality = showcontrol::backup::LinkQuality::offline;
+
+            backupPeerStatuses.add (status);
+        }
+    }
+    else
+    {
+        const auto peers = showcontrol::prefs::loadBackupPeerHosts();
+
+        if (peers.size() > 0)
+        {
+            showcontrol::backup::PeerRuntimeStatus status;
+            status.address   = peers[0];
+            status.latencyMs = showcontrol::backup::pingShowCuePeer (
+                peers[0], syncPort, (int) showcontrol::backup::Role::primary, 650);
+
+            const auto heartbeatNow = juce::Time::getMillisecondCounter();
+
+            if (lastPrimaryHeartbeatRxMs == 0)
+                status.quality = showcontrol::backup::LinkQuality::offline;
+            else if (heartbeatNow - lastPrimaryHeartbeatRxMs
+                     > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
+                status.quality = showcontrol::backup::LinkQuality::offline;
+            else if (heartbeatNow - lastPrimaryHeartbeatRxMs
+                     > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
+                status.quality = showcontrol::backup::LinkQuality::degraded;
+            else
+                status.quality = showcontrol::backup::LinkQuality::good;
+
+            backupPeerStatuses.add (status);
+        }
+    }
+
+    updateBackupConnectionUi();
+}
+
+void MainComponent::reconnectBackupSync()
+{
+    lastPrimaryHeartbeatRxMs = 0;
+    restartBackupSync();
+    updateBackupConnectionUi();
 }
 
 void MainComponent::scanLanPeersAsync (
@@ -13460,7 +13603,7 @@ void MainComponent::tickBackupHeartbeat()
         if (lastPrimaryHeartbeatRxMs > 0
             && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
         {
-            updateBackupStatusLabel();
+            updateBackupConnectionUi();
         }
 
         return;
@@ -13527,7 +13670,7 @@ void MainComponent::restartBackupSync()
 
     if (! listenEnabled)
     {
-        updateBackupStatusLabel();
+        updateBackupConnectionUi();
         return;
     }
 
@@ -13594,13 +13737,13 @@ void MainComponent::restartBackupSync()
     if (! listener->start (port))
     {
         std::cout << "[BACKUP] [WARN] Cannot bind UDP port " << port << std::endl;
-        updateBackupStatusLabel();
+        updateBackupConnectionUi();
         return;
     }
 
     std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
     oscListener = std::move (listener);
-    updateBackupStatusLabel();
+    updateBackupConnectionUi();
 }
 
 

@@ -19,6 +19,8 @@ struct LanPeerInfo
     juce::String hostName;
     int role = 0;
     int syncPort = kDefaultSyncPort;
+    /** Thời gian phản hồi discovery (ms); -1 = chưa đo. */
+    int discoveryMs = -1;
 };
 
 /** Một interface LAN dùng để gửi UDP broadcast discovery (ưu tiên Wi‑Fi / interface đang active). */
@@ -389,6 +391,7 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
 
     const int replyPort = socket.getBoundPort();
     const auto probe    = makeDiscoverProbe (wantRole, replyPort);
+    const int probeStartMs = (int) juce::Time::getMillisecondCounter();
 
     sendDiscoverProbes (socket, targets, discoveryPort, probe);
 
@@ -444,10 +447,83 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
         }
 
         if (! duplicate)
+        {
+            peer.discoveryMs = juce::jmax (1,
+                (int) juce::Time::getMillisecondCounter() - probeStartMs);
             results.add (peer);
+        }
     }
 
     return results;
+}
+
+/** Gửi probe unicast tới một máy — trả về độ trễ ms hoặc -1 nếu không phản hồi. */
+inline int pingShowCuePeer (const juce::String& address,
+                            int syncPort,
+                            int wantRole,
+                            int timeoutMs = 700)
+{
+    if (address.trim().isEmpty())
+        return -1;
+
+    const int discoveryPort = discoveryPortForSyncPort (syncPort);
+    const auto targets      = collectLanScanTargets();
+
+    if (targets.isEmpty())
+        return -1;
+
+    juce::DatagramSocket socket (true);
+
+    const auto& primaryTarget = targets.getReference (0);
+    bool bound = socket.bindToPort (0, primaryTarget.interfaceAddress);
+
+    if (! bound)
+        bound = socket.bindToPort (0);
+
+    if (! bound)
+        return -1;
+
+    const int replyPort = socket.getBoundPort();
+    const auto probe    = makeDiscoverProbe (wantRole, replyPort);
+    const int bytes     = (int) probe.getNumBytesAsUTF8();
+    const char* data    = probe.toRawUTF8();
+    const int startMs   = (int) juce::Time::getMillisecondCounter();
+
+    socket.write (address.trim(), discoveryPort, data, bytes);
+
+    const int deadline = startMs + timeoutMs;
+
+    while ((int) juce::Time::getMillisecondCounter() < deadline)
+    {
+        if (socket.waitUntilReady (true, 50) <= 0)
+            continue;
+
+        char buffer[512] = {};
+        juce::String senderHost;
+        int senderPort = 0;
+        const int readBytes = socket.read (buffer, (int) sizeof (buffer) - 1, false,
+                                           senderHost, senderPort);
+
+        if (readBytes <= 0)
+            continue;
+
+        buffer[readBytes] = '\0';
+
+        LanPeerInfo peer;
+
+        if (! parseDiscoverAnnounce (juce::String::fromUTF8 (buffer), peer))
+            continue;
+
+        if (wantRole != 0 && peer.role != wantRole)
+            continue;
+
+        if (senderHost != address.trim())
+            continue;
+
+        return juce::jmax (1, (int) juce::Time::getMillisecondCounter() - startMs);
+    }
+
+    return -1;
 }
 
 } // namespace showcontrol::backup

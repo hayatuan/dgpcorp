@@ -16,6 +16,22 @@ inline constexpr int kHeartbeatIntervalMs       = 1000;
 inline constexpr int kHeartbeatStaleThresholdMs   = 3500;
 inline constexpr int kMaxBackupPeers            = 16;
 
+enum class LinkQuality : int
+{
+    unknown  = 0,
+    good     = 1,
+    degraded = 2,
+    offline  = 3
+};
+
+struct PeerRuntimeStatus
+{
+    juce::String address;
+    juce::String hostName;
+    int latencyMs = -1;
+    LinkQuality quality = LinkQuality::unknown;
+};
+
 namespace addresses
 {
 inline constexpr const char* panic      = "/showcue/sync/panic";
