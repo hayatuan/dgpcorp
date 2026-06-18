@@ -80,6 +80,10 @@ public:
         target.broadcastAddress  = "192.168.1.255";
         const auto info = showcontrol::backup::makeLocalLanNetworkInfo (target);
         expectEquals (info.subnetCidr, juce::String ("192.168.1.0/24"));
+        expectEquals (showcontrol::backup::broadcastForInterfaceIpv4 ("192.168.1.10", 24),
+                      juce::String ("192.168.1.255"));
+        expectEquals (showcontrol::backup::broadcastForInterfaceIpv4 ("10.20.30.40", 16),
+                      juce::String ("10.20.255.255"));
         expectEquals (showcontrol::backup::uint32ToIpv4 (
             showcontrol::backup::ipv4ToUint32 ("10.0.0.5")), juce::String ("10.0.0.5"));
 

@@ -129,32 +129,66 @@ inline bool isUsableLanIpv4 (const juce::IPAddress& addr) noexcept
     return true;
 }
 
+inline juce::String broadcastForInterfaceIpv4 (const juce::String& interfaceIp, int prefix = 24)
+{
+    if (interfaceIp.isEmpty())
+        return {};
+
+    const juce::IPAddress iface (interfaceIp);
+    const auto juceBroadcast = juce::IPAddress::getInterfaceBroadcastAddress (iface);
+
+    if (! juceBroadcast.isNull())
+        return juceBroadcast.toString();
+
+    const uint32_t address = ipv4ToUint32 (interfaceIp);
+
+    if (address == 0)
+        return {};
+
+    const int usePrefix = juce::jlimit (8, 32, prefix);
+    const uint32_t mask   = (usePrefix == 32) ? 0xffffffffu : (~0u << (32 - usePrefix));
+    return uint32ToIpv4 (address | ~mask);
+}
+
+#if JUCE_WINDOWS
+juce::Array<LanScanTarget> collectWindowsLanScanTargets();
+#endif
+
 /** Thu thập subnet broadcast từ interface LAN — ưu tiên interface mặc định của máy (Wi‑Fi/Ethernet đang dùng). */
 inline juce::Array<LanScanTarget> collectLanScanTargets()
 {
-    juce::Array<LanScanTarget> targets;
-    juce::StringArray seenBroadcasts;
+   #if JUCE_WINDOWS
+    {
+        const auto windowsTargets = collectWindowsLanScanTargets();
 
-    auto addInterface = [&] (const juce::IPAddress& iface)
+        if (windowsTargets.size() > 0)
+            return windowsTargets;
+    }
+   #endif
+
+    juce::Array<LanScanTarget> targets;
+    juce::StringArray seenInterfaceIps;
+
+    auto addInterface = [&] (const juce::IPAddress& iface, int prefix = 24)
     {
         if (! isUsableLanIpv4 (iface))
             return;
 
-        const auto broadcast = juce::IPAddress::getInterfaceBroadcastAddress (iface);
+        const auto interfaceText = iface.toString();
 
-        if (broadcast.isNull())
+        if (seenInterfaceIps.contains (interfaceText, true))
             return;
 
-        const auto broadcastText = broadcast.toString();
+        const auto broadcastText = broadcastForInterfaceIpv4 (interfaceText, prefix);
 
-        if (seenBroadcasts.contains (broadcastText, true))
+        if (broadcastText.isEmpty())
             return;
 
-        seenBroadcasts.add (broadcastText);
+        seenInterfaceIps.add (interfaceText);
 
         LanScanTarget target;
-        target.interfaceAddress = iface.toString();
-        target.broadcastAddress = broadcastText;
+        target.interfaceAddress  = interfaceText;
+        target.broadcastAddress  = broadcastText;
         targets.add (target);
     };
 

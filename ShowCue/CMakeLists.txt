@@ -68,6 +68,10 @@ if (APPLE)
 endif()
 
 if(WIN32)
+    target_sources(ShowCue PRIVATE Source/ShowBackupLanDiscoveryWin.cpp)
+
+    target_link_libraries(ShowCue PRIVATE iphlpapi)
+
     set(_showcue_resources_dir "${CMAKE_CURRENT_SOURCE_DIR}/Resources")
     foreach(_runtime_asset IN ITEMS AppIcon.png DonateQR.png)
         set(_runtime_src "${_showcue_resources_dir}/${_runtime_asset}")
