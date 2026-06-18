@@ -2,6 +2,8 @@
 
 Ứng dụng cue-based show control (JUCE 8, C++17). Hỗ trợ **macOS 11+** và **Windows 10/11**.
 
+**Thành viên Windows mới:** xem [ONBOARDING_WINDOWS.md](ONBOARDING_WINDOWS.md).
+
 ## Yêu cầu chung
 
 | Thành phần | macOS | Windows |
@@ -28,7 +30,9 @@ Repo có `CMakePresets.json` ở root — dùng chung trên macOS và Windows (C
 |--------|----------|
 | `macos-debug` | Dev Debug (Universal Binary) |
 | `macos-release` | Dev Release |
-| `windows-release` | Windows Release (VS 2022 x64) |
+| `windows-debug` | Windows Debug (VS 2026 x64) |
+| `windows-release` | Windows Release (VS 2026 x64) |
+| `windows-release-vs2022` | Windows Release (VS 2022 x64) |
 | `macos-ci` / `windows-ci` | CI: tắt IDE index, build app + tests |
 
 ```bash

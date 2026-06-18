@@ -34,7 +34,8 @@ CMakeUserPresets.json
 /ShowCue/compile_flags.txt
 
 # --- Phân khu 3: IDE Cursor & Visual Studio Code ---
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .cursor/
 .history/
 *.code-workspace

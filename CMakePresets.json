@@ -62,10 +62,9 @@
       }
     },
     {
-      "name": "windows-vs2022",
+      "name": "windows-vs-base",
       "hidden": true,
       "inherits": "base",
-      "generator": "Visual Studio 17 2022",
       "architecture": {
         "value": "x64",
         "strategy": "set"
@@ -77,7 +76,29 @@
       }
     },
     {
+      "name": "windows-vs2026",
+      "hidden": true,
+      "inherits": "windows-vs-base",
+      "generator": "Visual Studio 18 2026"
+    },
+    {
+      "name": "windows-vs2022",
+      "hidden": true,
+      "inherits": "windows-vs-base",
+      "generator": "Visual Studio 17 2022"
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug (VS 2026)",
+      "inherits": "windows-vs2026"
+    },
+    {
       "name": "windows-release",
+      "displayName": "Windows Release (VS 2026)",
+      "inherits": "windows-vs2026"
+    },
+    {
+      "name": "windows-release-vs2022",
       "displayName": "Windows Release (VS 2022)",
       "inherits": "windows-vs2022"
     },
@@ -117,9 +138,23 @@
       "targets": ["ShowCue", "ShowCueTests"]
     },
     {
+      "name": "windows-debug",
+      "displayName": "Build Windows Debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug",
+      "targets": ["ShowCue"]
+    },
+    {
       "name": "windows-release",
       "displayName": "Build Windows Release",
       "configurePreset": "windows-release",
+      "configuration": "Release",
+      "targets": ["ShowCue"]
+    },
+    {
+      "name": "windows-release-vs2022",
+      "displayName": "Build Windows Release (VS 2022)",
+      "configurePreset": "windows-release-vs2022",
       "configuration": "Release",
       "targets": ["ShowCue"]
     },

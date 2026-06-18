@@ -21,7 +21,8 @@ cmake --build build-win --config Release --target ShowCue -j
 # cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64
 ```
 
-Chi tiết: [ShowCue/docs/BUILD.md](ShowCue/docs/BUILD.md)
+Chi tiết: [ShowCue/docs/BUILD.md](ShowCue/docs/BUILD.md)  
+**Thành viên Windows mới:** [ShowCue/docs/ONBOARDING_WINDOWS.md](ShowCue/docs/ONBOARDING_WINDOWS.md)
 
 ## Cấu trúc repo
 
