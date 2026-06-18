@@ -1,5 +1,8 @@
 #include "SystemPermissionsPanel.h"
 #include "ShowLocalization.h"
+#if JUCE_MAC
+#include "ShowBackupMacNetwork.h"
+#endif
 
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
@@ -286,6 +289,16 @@ SystemPermissionsPanel::SystemPermissionsPanel()
         });
     };
 
+   #if JUCE_MAC
+    networkCard.setAllowGrantButton (true);
+    networkCard.onGrantRequested = [this]
+    {
+        showcontrol::backup::mac::requestLocalNetworkPermissionPrompt();
+        showcontrol::backup::mac::openLocalNetworkPrivacySettings();
+        updatePermissionUi();
+    };
+   #endif
+
    #if JUCE_WINDOWS
     cardsContainer.addAndMakeVisible (dragDropCard);
    #endif
@@ -362,6 +375,8 @@ void SystemPermissionsPanel::performResetPermissions()
 
     juce::URL ("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         .launchInDefaultBrowser();
+
+    showcontrol::backup::mac::openLocalNetworkPrivacySettings();
    #elif JUCE_WINDOWS
     juce::URL ("ms-settings:privacy-microphone").launchInDefaultBrowser();
 

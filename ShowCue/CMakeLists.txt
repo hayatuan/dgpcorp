@@ -13,6 +13,8 @@ add_subdirectory(JUCE)
 # Khởi tạo cấu hình ứng dụng Âm thanh (Audio Application)
 # ICON_BIG / ICON_SMALL: JUCE tự tạo .icns (macOS) và .ico (Windows) qua juceaide.
 # PNG 1024×1024 cho macOS; ICO riêng cho Windows khi cross-build.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/InfoPlistExtra.plist" SHOWCUE_PLIST_EXTRA)
+
 juce_add_gui_app(ShowCue
     PRODUCT_NAME "ShowCue"
     VERSION 1.0.0
@@ -23,7 +25,8 @@ juce_add_gui_app(ShowCue
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "ShowCue cần truy cập thiết bị âm thanh để kết nối với Soundcard/Mixer sân khấu của bạn."
     LOCAL_NETWORK_PERMISSION_ENABLED TRUE
-    LOCAL_NETWORK_PERMISSION_TEXT "ShowCue cần truy cập mạng để kiểm tra cập nhật phần mềm và đồng bộ dữ liệu show."
+    LOCAL_NETWORK_PERMISSION_TEXT "ShowCue cần Mạng cục bộ (LAN/Wi‑Fi) để quét máy Primary/Backup và đồng bộ show."
+    PLIST_TO_MERGE "${SHOWCUE_PLIST_EXTRA}"
     IS_AUDIO_APPLICATION TRUE)
 
 # Chỉ khai báo translation units (.cpp/.mm) — header được kéo qua #include.
@@ -46,7 +49,8 @@ juce_add_binary_data (ShowCueAssets SOURCES
     Resources/Fonts/Roboto-Bold.ttf)
 
 if (APPLE)
-    target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm)
+    target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm
+                                 Source/ShowBackupMacNetworkBonjour.mm)
 
     set(_showcontrol_app_icon_png "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png")
     if(EXISTS "${_showcontrol_app_icon_png}")

@@ -15,6 +15,9 @@
 #include "ShowOscListener.h"
 #include "ShowBackupSync.h"
 #include "ShowBackupLanDiscovery.h"
+#if JUCE_MAC
+#include "ShowBackupMacNetwork.h"
+#endif
 #include <cstdlib>
 
 namespace
@@ -13325,6 +13328,10 @@ void MainComponent::scanLanPeersAsync (
 {
     const int syncPort = showcontrol::prefs::loadBackupSyncPort();
 
+   #if JUCE_MAC
+    showcontrol::backup::mac::requestLocalNetworkPermissionPrompt();
+   #endif
+
     std::thread ([wantRole, syncPort, onDone = std::move (onDone)]() mutable
     {
         const auto peers = showcontrol::backup::scanLanPeers (wantRole, syncPort);
@@ -13352,15 +13359,24 @@ void MainComponent::startBackupDiscoveryResponder()
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
     backupDiscoverySocket->setEnablePortReuse (true);
 
-    if (! backupDiscoverySocket->bindToPort (discoveryPort))
+    if (backupDiscoverySocket->bindToPort (discoveryPort) <= 0)
     {
         backupDiscoverySocket.reset();
         std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort << std::endl;
+        return;
     }
+
+   #if JUCE_MAC
+    showcontrol::backup::mac::startLanServiceAdvertiser (discoveryPort);
+   #endif
 }
 
 void MainComponent::stopBackupDiscoveryResponder()
 {
+   #if JUCE_MAC
+    showcontrol::backup::mac::stopLanServiceAdvertiser();
+   #endif
+
     backupDiscoverySocket.reset();
 }
 
@@ -13479,6 +13495,11 @@ void MainComponent::restartBackupSync()
     }
 
     startBackupDiscoveryResponder();
+
+   #if JUCE_MAC
+    if (role != (int) showcontrol::backup::Role::standalone)
+        showcontrol::backup::mac::requestLocalNetworkPermissionPrompt();
+   #endif
 
     if (! listenEnabled)
     {
