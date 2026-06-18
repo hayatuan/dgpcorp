@@ -81,7 +81,7 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
 
     juce::DatagramSocket socket;
 
-    if (socket.bindToPort (0) <= 0)
+    if (! socket.bindToPort (0))
         return results;
 
     const int replyPort = socket.getBoundPort();

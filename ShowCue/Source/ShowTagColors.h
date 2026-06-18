@@ -42,6 +42,12 @@ inline constexpr float kPadWaveformInkAlpha          = 0.45f;
 inline constexpr float kInspectorWaveformInkAlpha    = 0.45f;
 inline constexpr float kInspectorWaveformPlayedAlpha = 0.62f;
 
+/** Màu waveform phủ opaque lên nền — tránh chồng alpha gây vệt ma khi repaint playhead. */
+inline juce::Colour opaqueWaveformInk (juce::Colour background, juce::Colour ink, float alpha) noexcept
+{
+    return background.interpolatedWith (ink.withAlpha (1.0f), juce::jlimit (0.0f, 1.0f, alpha));
+}
+
 inline constexpr int kTagPaletteSize = 9;
 
 inline juce::String colourToHexString (juce::Colour c)

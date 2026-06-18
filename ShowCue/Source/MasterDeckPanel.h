@@ -388,10 +388,12 @@ public:
 };
 
 //==============================================================================
-class MasterDeckPanel : public juce::Component, public juce::Timer
+class MasterDeckPanel : public juce::Component,
+                        public juce::Timer,
+                        private juce::ChangeListener
 {
 public:
-    MasterDeckPanel() : isDarkMode(true), activePad(nullptr), isDraggingPlayhead(false), isPaused(false), isBgmMode(false)
+    MasterDeckPanel() : isDarkMode(true), isDraggingPlayhead(false), isPaused(false), isBgmMode(false)
     {
         addAndMakeVisible (remainingTimeLabel);
         remainingTimeLabel.setText ("00:00.0", juce::dontSendNotification);
@@ -550,6 +552,7 @@ public:
 
     ~MasterDeckPanel() override
     {
+        detachActiveThumbnailListener();
         stopTimer();
         pauseAllBtn.setLookAndFeel (nullptr);
         stopAllBtn.setLookAndFeel (nullptr);
@@ -592,6 +595,7 @@ public:
 
         if (padChanged)
         {
+            attachActiveThumbnailListener (pad);
             refreshTransportLabels();
             repaint();
         }
@@ -788,7 +792,11 @@ public:
             }
         }
 
-        if (transportActive && ! isDraggingPlayhead)
+        const bool thumbStillLoading = activePad != nullptr
+                                           && activePad->hasAudioFile()
+                                           && activePad->getThumbnail().getTotalLength() <= 0.0;
+
+        if ((transportActive && ! isDraggingPlayhead) || thumbStillLoading)
         {
             repaint (getWaveformComponentBounds());
             repaint (getLeftColumnBounds());
@@ -905,6 +913,16 @@ public:
         if (activePad != nullptr && activePad->hasAudioFile())
         {
             auto& thumb = activePad->getThumbnail();
+
+            if (thumb.getTotalLength() <= 0.0)
+            {
+                g.setColour (findColour (MasterDeckComponent::standbyTextColourId).withAlpha (0.68f));
+                g.setFont (ShowTheme::font (11.5f));
+                g.drawFittedText (showcontrol::localization::tr (u8"Đang nạp..."),
+                                  waveBounds, juce::Justification::centred, 1);
+                return;
+            }
+
             const double currentPos = activePad->getPlaybackPosition();
             double tStart = 0.0, tEnd = 0.0;
             activePad->getTrimmedDisplayRange (tStart, tEnd);
@@ -1259,10 +1277,39 @@ private:
             activePad->seekTo (tStart + (double) ratio * tLen);
     }
 
+    void changeListenerCallback (juce::ChangeBroadcaster* source) override
+    {
+        juce::ignoreUnused (source);
+        repaint (getWaveformComponentBounds());
+        repaint (getLeftColumnBounds());
+    }
+
+    void detachActiveThumbnailListener() noexcept
+    {
+        if (thumbnailListenerPad != nullptr)
+        {
+            thumbnailListenerPad->getThumbnail().removeChangeListener (this);
+            thumbnailListenerPad = nullptr;
+        }
+    }
+
+    void attachActiveThumbnailListener (SoundPad* pad)
+    {
+        detachActiveThumbnailListener();
+
+        if (pad == nullptr || ! pad->hasAudioFile())
+            return;
+
+        pad->setThumbnailLoadAllowed (true);
+        thumbnailListenerPad = pad;
+        pad->getThumbnail().addChangeListener (this);
+    }
+
     bool isDarkMode, isDraggingPlayhead, isPaused, isBgmMode = false;
     bool wasTransportAnimatingLastTick = false;
     juce::String backupRoleStatusText;
-    SoundPad* activePad;
+    SoundPad* activePad = nullptr;
+    SoundPad* thumbnailListenerPad = nullptr;
     juce::Colour trackAccent { showcontrol::colours::tagColourAt (7) };
     juce::Label remainingTimeLabel, totalTimeLabel, trackMetaLabel, volLabel, volValueLabel, systemTimeLabel;
     juce::Slider masterVolSlider, positionSlider;

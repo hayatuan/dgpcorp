@@ -413,24 +413,11 @@ public:
 
     static juce::String describeKeyPress (const juce::KeyPress& key)
     {
-        juce::String desc;
-        auto mods = key.getModifiers();
-        #if JUCE_MAC
-            if (mods.isCommandDown())  desc += juce::String::fromUTF8 (u8"⌘");
-            if (mods.isCtrlDown())     desc += juce::String::fromUTF8 (u8"⌃");
-            if (mods.isAltDown())      desc += juce::String::fromUTF8 (u8"⌥");
-            if (mods.isShiftDown())    desc += juce::String::fromUTF8 (u8"⇧");
-        #else
-            if (mods.isCtrlDown())     desc += "Ctrl+";
-            if (mods.isAltDown())      desc += "Alt+";
-            if (mods.isShiftDown())    desc += "Shift+";
-        #endif
-        desc += key.getTextDescription().toUpperCase();
-        return desc;
+        return showcontrol::keyboard::formatKeyPressDescription (key);
     }
 
 private:
-    static constexpr juce::uint32 kKeyDebounceMs = 250;
+    static constexpr juce::uint32 kKeyDebounceMs = 60;
 
     juce::CriticalSection keyDebounceLock;
     int           lastKeyCode      = 0;

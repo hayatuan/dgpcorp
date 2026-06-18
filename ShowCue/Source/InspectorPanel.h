@@ -192,11 +192,19 @@ public:
         g.setColour (isDark ? pal.border : juce::Colour (0xFFE5E5EA));
         g.drawRoundedRectangle (b, 5.0f, 1.0f);
 
-        if (thumbnail == nullptr || thumbnail->getTotalLength() <= 0.0)
+        if (thumbnail == nullptr)
         {
             g.setColour (pal.border);
             g.setFont (showcontrol::inspector::waveEmptyHintFont());
             g.drawText (juce::String::fromUTF8 (u8"Chưa có file âm thanh"), getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+
+        if (thumbnail->getTotalLength() <= 0.0)
+        {
+            g.setColour (pal.textMuted);
+            g.setFont (ShowTheme::font (11.0f));
+            g.drawText (showcontrol::localization::tr (u8"Đang nạp..."), getLocalBounds(), juce::Justification::centred);
             return;
         }
 
@@ -216,23 +224,57 @@ public:
         if (showTimeRuler)
             drawTimeRuler (g, showcontrol::gfx::sanitise (getRulerBounds()));
 
-        g.setColour (itemInk.withAlpha (showcontrol::colours::kInspectorWaveformInkAlpha));
-        thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
+        const auto waveBg = isDark ? pal.listRowBg : juce::Colours::white;
+        g.setColour (waveBg);
+        g.fillRect (waveArea);
+
+        const auto dimInk = showcontrol::colours::opaqueWaveformInk (
+            waveBg, itemInk, showcontrol::colours::kInspectorWaveformInkAlpha);
+        const auto playedInk = showcontrol::colours::opaqueWaveformInk (
+            waveBg, itemInk, showcontrol::colours::kInspectorWaveformPlayedAlpha);
 
         if (totalLen > 0.0 && currentPos > viewStart)
         {
             const float ratio = showcontrol::gfx::timeToRatio (currentPos, viewStart, viewEnd);
-            auto playedBounds = waveArea;
-            playedBounds.setWidth (showcontrol::gfx::clampDimension ((int) std::round ((float) playedBounds.getWidth() * ratio)));
+            const int splitX = showcontrol::gfx::clampDimension (
+                waveArea.getX() + (int) std::round ((float) waveArea.getWidth() * ratio));
 
-            if (showcontrol::gfx::canClip (playedBounds))
+            if (splitX > waveArea.getX())
             {
-                g.saveState();
-                g.reduceClipRegion (playedBounds);
-                g.setColour (itemInk.withAlpha (showcontrol::colours::kInspectorWaveformPlayedAlpha));
-                thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
-                g.restoreState();
+                auto playedClip = waveArea;
+                playedClip.setWidth (splitX - waveArea.getX());
+
+                if (showcontrol::gfx::canClip (playedClip))
+                {
+                    g.saveState();
+                    g.reduceClipRegion (playedClip);
+                    g.setColour (waveBg);
+                    g.fillRect (waveArea);
+                    g.setColour (playedInk);
+                    thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
+                    g.restoreState();
+                }
             }
+
+            if (splitX < waveArea.getRight())
+            {
+                auto unplayedClip = waveArea;
+                unplayedClip.setLeft (splitX);
+
+                if (showcontrol::gfx::canClip (unplayedClip))
+                {
+                    g.saveState();
+                    g.reduceClipRegion (unplayedClip);
+                    g.setColour (dimInk);
+                    thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
+                    g.restoreState();
+                }
+            }
+        }
+        else
+        {
+            g.setColour (dimInk);
+            thumbnail->drawChannel (g, waveArea, viewStart, viewEnd, 0, 1.0f);
         }
 
         const double effectiveEnd = (trimEnd > 0.0) ? trimEnd : totalLen;
@@ -928,6 +970,9 @@ public:
     {
         onUpdate = callbacks.onInspectorSync;
         onGestureFinished = callbacks.onGestureFinished;
+
+        if (currentPad != nullptr)
+            currentPad->setThumbnailLoadAllowed (true);
 
         setSize (780, 420);
         addAndMakeVisible (largeWaveform);

@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "ShowKeyboardInput.h"
 
 /** Ma trận Farrago cố định 8 hàng × 10 cột — hotkey theo tọa độ ô. */
 namespace showcontrol::padgrid
@@ -107,8 +108,7 @@ inline GridHotkey hotkeyForCell (int row, int col) noexcept
     }
     else
     {
-        result.label    = juce::String::charToString ((juce::juce_wchar) 0x2325)
-                        + juce::String::charToString (ch);
+        result.label    = showcontrol::keyboard::formatPadMatrixAltShortcut (ch);
         result.keyPress = juce::KeyPress ((int) ch, juce::ModifierKeys::altModifier, 0);
     }
 

@@ -249,6 +249,9 @@ public:
 
            #if ! JUCE_MAC
             setMenuBar (&desktopMenuBar);
+
+            if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
+                main->syncWindowChromeWithTheme();
            #endif
 
 

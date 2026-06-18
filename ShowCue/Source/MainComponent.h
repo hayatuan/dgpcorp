@@ -122,6 +122,8 @@ public:
     juce::File getProjectFile();
     void triggerManualMusicIngestion();
     void applyThemePreference (int themeId);
+    /** Đồng bộ nền DocumentWindow + menu bar với theme (gọi sau setMenuBar). */
+    void syncWindowChromeWithTheme();
     void setAppLanguage (int languageIndex);
     void lookAndFeelChanged() override;
     void refreshSidebarPlayingStatus();

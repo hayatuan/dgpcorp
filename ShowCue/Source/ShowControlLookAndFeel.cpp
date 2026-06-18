@@ -306,6 +306,41 @@ void ShowControlLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, 
     }
 }
 
+void ShowControlLookAndFeel::drawMenuBarBackground (juce::Graphics& g, int width, int height,
+                                                    bool, juce::MenuBarComponent&)
+{
+    const auto pal = ShowTheme::get (currentIsDark);
+    g.fillAll (pal.windowBg);
+    g.setColour (pal.borderSubtle);
+    g.fillRect (0, height - 1, width, 1);
+}
+
+void ShowControlLookAndFeel::drawMenuBarItem (juce::Graphics& g, int width, int height,
+                                              int itemIndex, const juce::String& itemText,
+                                              bool isMouseOverItem, bool isMenuOpen,
+                                              bool, juce::MenuBarComponent& menuBar)
+{
+    const auto pal = ShowTheme::get (currentIsDark);
+
+    if (! menuBar.isEnabled())
+    {
+        g.setColour (pal.textPrimary.withMultipliedAlpha (0.5f));
+    }
+    else if (isMenuOpen || isMouseOverItem)
+    {
+        g.setColour (currentIsDark ? pal.rowSelected : pal.accent.withAlpha (0.14f));
+        g.fillRect (0, 0, width, height);
+        g.setColour (pal.textPrimary);
+    }
+    else
+    {
+        g.setColour (pal.textPrimary);
+    }
+
+    g.setFont (getMenuBarFont (menuBar, itemIndex, itemText));
+    g.drawFittedText (itemText, 0, 0, width, height, juce::Justification::centred, 1);
+}
+
 void ShowControlLookAndFeel::applyPalette (bool dark)
 {
     currentIsDark = dark;

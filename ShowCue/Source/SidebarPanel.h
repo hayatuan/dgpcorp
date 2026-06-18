@@ -674,7 +674,11 @@ private:
 
     static juce::Font sidebarListRowHotkeyFont() noexcept
     {
+       #if JUCE_WINDOWS
+        return ShowTheme::font (11.0f);
+       #else
         return showcontrol::bgmList::playlistCellFontBold();
+       #endif
     }
 
     /** Ép lại font sau PopupMenu / lookAndFeelChanged — tránh sụt size khi chuột phải hoặc chọn dòng. */
@@ -807,7 +811,11 @@ private:
     };
 
     static constexpr int kRowRightPadding   = 12;
+   #if JUCE_WINDOWS
+    static constexpr int kRowHotkeyWidth    = 78;
+   #else
     static constexpr int kRowHotkeyWidth    = 28;
+   #endif
     static constexpr int kRowIconSlotWidth  = 18;
     static constexpr int kRowIconGap        = 6;
     static constexpr int kRowLeftPadding    = 14;
@@ -1131,12 +1139,12 @@ private:
                                                   hasListTheme || isSelected);
         }
 
-        juce::String shortcutText;
         const auto hotkeyChar = showcontrol::keyboard::getHotkeyCharForIndex (displayCount - 1);
-        shortcutText = showcontrol::keyboard::playlistHotkeyPrefix (sets[index].isGridMode) + hotkeyChar;
+        const juce::String shortcutText = showcontrol::keyboard::formatPlaylistShortcut (
+            sets[index].isGridMode, hotkeyChar);
         g.setColour (cols.textMuted);
         g.setFont (sidebarListRowHotkeyFont());
-        g.drawText (shortcutText, rowLayout.hotkeyArea, juce::Justification::centredRight, true);
+        g.drawFittedText (shortcutText, rowLayout.hotkeyArea, juce::Justification::centredRight, 1, 0.85f);
 
         if (isDraggedRow)
             g.setOpacity (1.0f);

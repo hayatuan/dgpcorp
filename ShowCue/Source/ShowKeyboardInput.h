@@ -193,7 +193,7 @@ inline bool playlistModifierTargetsGrid (const juce::ModifierKeys& mods) noexcep
    #if JUCE_MAC
     return mods.isCommandDown() && ! mods.isCtrlDown() && ! mods.isAltDown();
    #else
-    return mods.isCtrlDown() && ! mods.isAltDown();
+    return mods.isCtrlDown() && ! mods.isShiftDown() && ! mods.isAltDown();
    #endif
 }
 
@@ -202,7 +202,7 @@ inline bool playlistModifierTargetsCueList (const juce::ModifierKeys& mods) noex
    #if JUCE_MAC
     return mods.isCtrlDown() && ! mods.isCommandDown() && ! mods.isAltDown();
    #else
-    return mods.isAltDown() && ! mods.isCtrlDown() && ! mods.isShiftDown();
+    return mods.isCtrlDown() && mods.isShiftDown() && ! mods.isAltDown();
    #endif
 }
 
@@ -261,6 +261,84 @@ inline void forEachFarragoMatrixKeyCode (const std::function<void (int)>& visit)
 
     for (int f = 0; f < 8; ++f)
         visit (juce::KeyPress::F1Key + f);
+}
+
+/** Nhãn modifier theo nền tảng — sidebar, PAD badge, hộp thoại gán phím. */
+inline juce::String commandModifierLabel() noexcept
+{
+   #if JUCE_MAC
+    return juce::String::fromUTF8 (u8"⌘");
+   #else
+    return "Ctrl+";
+   #endif
+}
+
+inline juce::String controlModifierLabel() noexcept
+{
+   #if JUCE_MAC
+    return juce::String::fromUTF8 (u8"⌃");
+   #else
+    return "Ctrl+";
+   #endif
+}
+
+inline juce::String altModifierLabel() noexcept
+{
+   #if JUCE_MAC
+    return juce::String::fromUTF8 (u8"⌥");
+   #else
+    return "Alt+";
+   #endif
+}
+
+inline juce::String shiftModifierLabel() noexcept
+{
+   #if JUCE_MAC
+    return juce::String::fromUTF8 (u8"⇧");
+   #else
+    return "Shift+";
+   #endif
+}
+
+/** Sidebar: Mac CUE=⌘ / BGM=⌃. Windows CUE=Ctrl / BGM=Ctrl+Shift (Alt dành cho PAD hàng 5–8). */
+inline juce::String formatPlaylistShortcut (bool isCueGridList, const juce::String& hotkeyChar) noexcept
+{
+   #if JUCE_MAC
+    return (isCueGridList ? commandModifierLabel() : controlModifierLabel()) + hotkeyChar;
+   #else
+    return (isCueGridList ? juce::String ("Ctrl+") : juce::String ("Ctrl+Shift+")) + hotkeyChar;
+   #endif
+}
+
+/** PAD hàng 5–8: Option/Alt + phím ma trận. */
+inline juce::String formatPadMatrixAltShortcut (juce::juce_wchar keyChar) noexcept
+{
+    return altModifierLabel() + juce::String::charToString (keyChar);
+}
+
+inline juce::String formatKeyPressDescription (const juce::KeyPress& key)
+{
+    juce::String desc;
+    const auto mods = key.getModifiers();
+
+   #if JUCE_MAC
+    if (mods.isCommandDown())  desc += commandModifierLabel();
+    if (mods.isCtrlDown())     desc += controlModifierLabel();
+    if (mods.isAltDown())      desc += altModifierLabel();
+    if (mods.isShiftDown())    desc += shiftModifierLabel();
+   #else
+    if (mods.isCommandDown() || mods.isCtrlDown())
+        desc += "Ctrl+";
+
+    if (mods.isAltDown())
+        desc += "Alt+";
+
+    if (mods.isShiftDown())
+        desc += "Shift+";
+   #endif
+
+    desc += key.getTextDescription().toUpperCase();
+    return desc;
 }
 
 } // namespace showcontrol::keyboard

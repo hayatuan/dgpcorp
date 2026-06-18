@@ -230,7 +230,7 @@ public:
     bool isUiCallbacksWired = false;
 
     /** Chặn trigger hotkey/GO trùng trên cùng pad (message thread, 300ms). */
-    bool tryClaimPadHotkeyTrigger (juce::uint32 holdoffMs = 300) noexcept
+    bool tryClaimPadHotkeyTrigger (juce::uint32 holdoffMs = 100) noexcept
     {
         const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
         const juce::uint32 untilMs = hotkeyTriggerGuardUntilMs.load (std::memory_order_acquire);
@@ -1333,16 +1333,30 @@ public:
     /** Waveform + normalize — message thread kế tiếp, không chặn click chọn. */
     void scheduleDeferredInspectorLoads()
     {
+        auto loadNow = [this]
+        {
+            setThumbnailLoadAllowed (true, false);
+            setNormalizationLoadAllowed (true, false);
+            ensureThumbnailLoaded();
+            maybeStartNormalization();
+        };
+
+        if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        {
+            loadNow();
+            return;
+        }
+
         juce::Component::SafePointer<SoundPad> safe (this);
         juce::MessageManager::callAsync ([safe]
         {
-            if (safe == nullptr)
-                return;
-
-            safe->setThumbnailLoadAllowed (true, false);
-            safe->setNormalizationLoadAllowed (true, false);
-            safe->ensureThumbnailLoaded();
-            safe->maybeStartNormalization();
+            if (safe != nullptr)
+            {
+                safe->setThumbnailLoadAllowed (true, false);
+                safe->setNormalizationLoadAllowed (true, false);
+                safe->ensureThumbnailLoaded();
+                safe->maybeStartNormalization();
+            }
         });
     }
 
@@ -2252,12 +2266,21 @@ private:
         if (wb.getWidth() <= 0 || wb.getHeight() <= 0)
             return;
 
+        if (thumbnail.getTotalLength() <= 0.0)
+            return;
+
         double tStart = 0.0, tEnd = 0.0;
         getTrimmedDisplayRange (tStart, tEnd);
 
         waveformBaseCache = juce::Image (juce::Image::ARGB, wb.getWidth(), wb.getHeight(), true);
         juce::Graphics cacheG (waveformBaseCache);
-        cacheG.setColour (getWaveformFillColour());
+        const auto surface = getPadSurfaceColour();
+        cacheG.fillAll (surface);
+
+        const auto dimInk = showcontrol::colours::opaqueWaveformInk (
+            surface, getWaveformFillColour().withAlpha (1.0f),
+            showcontrol::colours::kPadWaveformInkAlpha);
+        cacheG.setColour (dimInk);
         thumbnail.drawChannel (cacheG, wb.withPosition (0, 0), tStart, tEnd, 0, 1.0f);
         waveformBaseCacheValid = true;
     }
@@ -2743,15 +2766,45 @@ private:
         if (waveformBounds.getWidth() <= 0 || waveformBounds.getHeight() <= 0)
             return;
 
+        if (thumbnail.getTotalLength() <= 0.0)
+        {
+            const auto pal = ShowTheme::get (isDarkMode);
+            g.setColour (pal.textMuted.withAlpha (0.72f));
+            g.setFont (ShowTheme::font (juce::jmax (8.5f, (float) waveformBounds.getHeight() * 0.28f)));
+            g.drawFittedText (showcontrol::localization::tr (u8"Đang nạp..."),
+                              waveformBounds, juce::Justification::centred, 1);
+            return;
+        }
+
         rebuildWaveformBaseCacheIfNeeded();
 
-        if (waveformBaseCacheValid)
-            g.drawImage (waveformBaseCache, waveformBounds.toFloat());
-        else
+        const auto surface = getPadSurfaceColour();
+        const auto dimInk = showcontrol::colours::opaqueWaveformInk (
+            surface, getWaveformFillColour().withAlpha (1.0f),
+            showcontrol::colours::kPadWaveformInkAlpha);
+        const auto brightInk = showcontrol::colours::opaqueWaveformInk (
+            surface, getWaveformFillColour().withAlpha (1.0f),
+            juce::jmin (1.0f, showcontrol::colours::kPadWaveformInkAlpha
+                              + (hasCustomTint ? 0.12f : 0.18f)));
+
+        auto drawDimWaveform = [&]
         {
-            g.setColour (getWaveformFillColour());
+            if (waveformBaseCacheValid)
+                g.drawImage (waveformBaseCache, waveformBounds.toFloat());
+            else
+            {
+                g.setColour (surface);
+                g.fillRect (waveformBounds);
+                g.setColour (dimInk);
+                thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+            }
+        };
+
+        auto drawBrightWaveform = [&]
+        {
+            g.setColour (brightInk);
             thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
-        }
+        };
 
         if (effectiveLen > 0.0 && currentPos > tStart)
         {
@@ -2759,25 +2812,57 @@ private:
             const float progress = showcontrol::gfx::isFinite ((float) (relativePos / effectiveLen))
                 ? juce::jlimit (0.0f, 1.0f, (float) (relativePos / effectiveLen))
                 : 0.0f;
-            auto progressBounds = showcontrol::gfx::sanitise (
-                waveformBounds.toFloat().withWidth ((float) waveformBounds.getWidth() * progress));
 
-            if (showcontrol::gfx::canClip (progressBounds))
+            if (progress <= 0.0f)
             {
-                g.saveState();
-                g.reduceClipRegion (progressBounds.toNearestInt());
-                g.setColour (getWaveformFillColour().brighter (hasCustomTint ? 0.12f : 0.18f));
+                drawDimWaveform();
+            }
+            else if (progress >= 1.0f)
+            {
+                g.setColour (surface);
+                g.fillRect (waveformBounds);
+                drawBrightWaveform();
+            }
+            else
+            {
+                const int splitX = showcontrol::gfx::clampDimension (
+                    waveformBounds.getX()
+                    + (int) std::round ((float) waveformBounds.getWidth() * progress));
 
-                if (waveformBaseCacheValid)
-                    g.drawImage (waveformBaseCache, waveformBounds.toFloat());
-                else
+                if (splitX > waveformBounds.getX())
                 {
-                    g.setColour (getWaveformFillColour());
-                    thumbnail.drawChannel (g, waveformBounds, tStart, tEnd, 0, 1.0f);
+                    auto playedClip = waveformBounds;
+                    playedClip.setWidth (splitX - waveformBounds.getX());
+
+                    if (showcontrol::gfx::canClip (playedClip))
+                    {
+                        g.saveState();
+                        g.reduceClipRegion (playedClip);
+                        g.setColour (surface);
+                        g.fillRect (waveformBounds);
+                        drawBrightWaveform();
+                        g.restoreState();
+                    }
                 }
 
-                g.restoreState();
+                if (splitX < waveformBounds.getRight())
+                {
+                    auto unplayedClip = waveformBounds;
+                    unplayedClip.setLeft (splitX);
+
+                    if (showcontrol::gfx::canClip (unplayedClip))
+                    {
+                        g.saveState();
+                        g.reduceClipRegion (unplayedClip);
+                        drawDimWaveform();
+                        g.restoreState();
+                    }
+                }
             }
+        }
+        else
+        {
+            drawDimWaveform();
         }
 
         const auto& palWave = ShowTheme::get (isDarkMode);

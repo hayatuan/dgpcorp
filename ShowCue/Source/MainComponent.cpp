@@ -116,7 +116,7 @@ bool writeXmlAtomically (const juce::File& destination, const juce::XmlElement& 
 // Msg thread only: chỉ dùng atomic timestamp + không ảnh hưởng RT audio thread.
 static std::atomic<juce::uint32> g_lastGlobalSpacebarPressTime { 0 };
 static std::atomic<juce::uint32> g_gateQuietUntilMs { 0 };
-static constexpr juce::uint32 kGlobalSpacebarDebounceMs = 350;
+static constexpr juce::uint32 kGlobalSpacebarDebounceMs = 160;
 
 /** Debounce Cmd+Delete / Cmd+Backspace — tránh kích đúp hộp thoại xóa. */
 static int g_lastDeleteKeyCode = 0;
@@ -6733,30 +6733,24 @@ void MainComponent::applySelectionForPadClick (int clickedIndex, const juce::Mod
     const int deferredBgmIndex = selectedBgmIndex;
     const int deferredListIndex = activeListIndex;
     const bool prefetchBgm = ! list->isGrid;
-    juce::Component::SafePointer<MainComponent> safeThis (this);
 
-    juce::MessageManager::callAsync ([safeThis, deferredListIndex, deferredIndices, deferredBgmIndex, prefetchBgm]()
+    if (deferredListIndex >= 0 && deferredListIndex < allLists.size())
     {
-        if (safeThis == nullptr || deferredListIndex < 0 || deferredListIndex >= safeThis->allLists.size())
-            return;
-
-        auto* deferredList = safeThis->allLists[deferredListIndex];
-
-        if (deferredList == nullptr)
-            return;
-
-        for (auto idx : deferredIndices)
+        if (auto* deferredList = allLists[deferredListIndex])
         {
-            if (idx < 0 || idx >= deferredList->pads.size())
-                continue;
+            for (auto idx : deferredIndices)
+            {
+                if (idx < 0 || idx >= deferredList->pads.size())
+                    continue;
 
-            if (auto* p = deferredList->pads[idx])
-                p->scheduleDeferredInspectorLoads();
+                if (auto* p = deferredList->pads[idx])
+                    p->scheduleDeferredInspectorLoads();
+            }
+
+            if (prefetchBgm)
+                prefetchBgmPadAtIndex (deferredBgmIndex);
         }
-
-        if (prefetchBgm)
-            safeThis->prefetchBgmPadAtIndex (deferredBgmIndex);
-    });
+    }
 
     if (isShowing())
         grabKeyboardFocus();
@@ -9300,6 +9294,10 @@ bool MainComponent::trySwitchListByShortcut (const juce::KeyPress& key)
         {
             sidebarPanel.setSelectedIndex (i);
             loadList (i, sidebarPanel.getListTrackCount (i), list->isGrid);
+
+            if (isShowing())
+                grabKeyboardFocus();
+
             return true;
         }
 
@@ -10441,6 +10439,8 @@ void MainComponent::loadList (int listIndex, int trackCount, bool isGridHint)
             p->setRenderMode (isGrid);
             p->setClickToTrigger (false);
             p->setVisible (true);
+            if (isGrid)
+                p->refreshHotkeyLabel();
             wireSoundPad (p);
         }
     }
@@ -11001,6 +11001,8 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     armPad (pad);
     forwardUiSelectionToPad (pad, false);
     inspectorPanel.selectPad (pad);
+    refreshSidebarPlayingStatus();
+    updateMainDeskDisplay();
 
     pendingGoTimer.reset();
 
@@ -11144,6 +11146,8 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
     armPad (pad);
     forwardUiSelectionToPad (pad, false);
     inspectorPanel.selectPad (pad);
+    refreshSidebarPlayingStatus();
+    updateMainDeskDisplay();
 
     pendingGoTimer.reset();
     auto runCueGoPad = [this] (SoundPad* goPad)
@@ -11806,6 +11810,29 @@ void MainComponent::refreshLocalizedBusNames()
     inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
 }
 
+void MainComponent::syncWindowChromeWithTheme()
+{
+    if (auto* top = getTopLevelComponent())
+    {
+        if (auto* dw = dynamic_cast<juce::DocumentWindow*> (top))
+        {
+            dw->setBackgroundColour (appLookAndFeel.findColour (juce::ResizableWindow::backgroundColourId));
+
+            if (auto* menuBar = dw->getMenuBarComponent())
+            {
+                menuBar->setLookAndFeel (&appLookAndFeel);
+                menuBar->sendLookAndFeelChange();
+                menuBar->repaint();
+            }
+
+            dw->repaint();
+            return;
+        }
+
+        top->repaint();
+    }
+}
+
 void MainComponent::applyThemePreference (int themeId)
 {
     themePreferenceId = themeId;
@@ -11820,18 +11847,7 @@ void MainComponent::applyThemePreference (int themeId)
 
     refreshAllPanelThemes (shouldBeDark);
 
-    if (auto* top = getTopLevelComponent())
-    {
-        if (auto* dw = dynamic_cast<juce::DocumentWindow*> (top))
-        {
-            dw->setBackgroundColour (appLookAndFeel.findColour (juce::ResizableWindow::backgroundColourId));
-            dw->repaint();
-        }
-        else
-        {
-            top->repaint();
-        }
-    }
+    syncWindowChromeWithTheme();
 
     if (! isInitialLoading.load (std::memory_order_relaxed))
         saveApplicationState();
@@ -12608,8 +12624,8 @@ void MainComponent::loadApplicationState()
                     + " pad=" + juce::String (selectedPadAtStartup)
                     + " play=0");
 
-    constexpr int kStartupReassertDelayMs  = 900;
-    constexpr int kStartupPlaybackGuardMs = 2200;
+    constexpr int kStartupReassertDelayMs  = 400;
+    constexpr int kStartupPlaybackGuardMs = 750;
     startupInputGuardUntilMs = juce::Time::getMillisecondCounter() + kStartupPlaybackGuardMs;
 
     // Async load callback có thể ghi đè selection muộn; chốt lại sau startup (không phát nhạc).
@@ -13335,7 +13351,7 @@ void MainComponent::startBackupDiscoveryResponder()
 
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket>();
 
-    if (backupDiscoverySocket->bindToPort (discoveryPort) <= 0)
+    if (! backupDiscoverySocket->bindToPort (discoveryPort))
     {
         backupDiscoverySocket.reset();
         std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort << std::endl;
@@ -13613,7 +13629,9 @@ void MainComponent::importProjectShowcuePackage()
     const int chooserFlags = juce::FileBrowserComponent::openMode
                            | juce::FileBrowserComponent::canSelectFiles;
 
-    mainFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    const auto safeThis = juce::Component::SafePointer<MainComponent> (this);
+
+    mainFileChooser->launchAsync (chooserFlags, [safeThis] (const juce::FileChooser& fc)
     {
         const auto source = fc.getResult();
 
@@ -13644,7 +13662,7 @@ void MainComponent::importProjectShowcuePackage()
                 .withMessage (confirmMessage)
                 .withButton (showcontrol::localization::tr (u8"Nhập"))
                 .withButton (showcontrol::localization::tr (u8"Hủy")),
-            [safeThis = juce::Component::SafePointer<MainComponent> (this), package] (int result)
+            [safeThis, package] (int result)
             {
                 if (safeThis == nullptr || result != 0)
                     return;

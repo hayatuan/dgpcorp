@@ -132,6 +132,11 @@ if(SHOWCUE_BUILD_IDE_INDEX)
         COMMENT "Build optional TU + sync compile_commands for clangd")
 endif()
 
+# MSVC: đọc nguồn UTF-8 đúng — u8"..." và chuỗi tiếng Việt không bị mojibake trên Windows.
+if(MSVC)
+    target_compile_options(ShowCue PRIVATE /utf-8)
+endif()
+
 # Bundle ffmpeg cạnh binary (.app/Contents/MacOS) — ưu tiên ThirdParty tĩnh, rồi ffmpeg hệ thống lúc build.
 set(_showcontrol_ffmpeg_src "")
 if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/ffmpeg/mac/ffmpeg")
