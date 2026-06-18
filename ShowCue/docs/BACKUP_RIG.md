@@ -28,6 +28,8 @@ Hướng dẫn vận hành **Primary + Backup** với đồng bộ live qua LAN 
 
 Thanh trạng thái trên Master Deck: `Máy chính → IP` / `Máy phụ — Follower` / cảnh báo mất heartbeat.
 
+**Mirror từ Primary sang Backup:** vị trí chọn (chuột, mũi tên, chuyển list Ctrl/Alt+số), chế độ Pad/Cue list, GO/Stop/Panic/Pause qua OSC. Phím **S** (stop all) trên grid cũng được gửi sang Backup.
+
 ## Chuẩn bị
 
 | Bước | Primary (FOH) | Backup |
@@ -77,6 +79,37 @@ Primary gửi heartbeat mỗi ~1s. Backup hiển thị **Mất kết nối Prima
 | `/showcue/sync/takeover` | `0/1` |
 
 Legacy (standalone OSC): `/showcue/go`, `/showcue/panic`
+
+## Cổng UDP & firewall
+
+| Cổng | Giao thức | Mục đích |
+|------|-----------|----------|
+| **9000** | UDP (OSC) | Đồng bộ GO/Panic/Stop/heartbeat |
+| **9001** | UDP (text) | Quét LAN, announce, ping peer |
+
+**macOS:** bật **Quyền Mạng cục bộ** (Local Network) cho ShowCue — *System Settings → Privacy & Security → Local Network*.
+
+**Windows:** Windows Defender thường **chặn UDP inbound** lần đầu. Cần cho phép `ShowCue.exe` hoặc mở cổng 9000–9001:
+
+```powershell
+# PowerShell chạy quyền Administrator, từ root repo:
+powershell -ExecutionPolicy Bypass -File ShowCue\scripts\setup-firewall-win.ps1
+```
+
+Hoặc thủ công: *Windows Security → Firewall → Allow an app* → bật **ShowCue** cho **Private network** (không chỉ Public).
+
+**Lưu ý:** Cả hai máy phải cùng subnet LAN (Wi‑Fi/Ethernet thật, tránh chỉ qua VPN/VMware). Primary và Backup dùng **cùng cổng** trong Cài đặt → Mạng.
+
+## Khắc phục kết nối chập chờn / treo UI
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+|-------------|------------------------|------------|
+| Backup báo mất Primary | Firewall chặn UDP 9000, Mac chưa cấp Local Network | Mở firewall + quyền Mac |
+| Quét LAN không thấy máy | Subnet khác, adapter ảo (VMware) | Dùng Wi‑Fi/Ethernet có gateway; tắt VPN |
+| UI đơ vài giây khi mất mạng | Ping health chạy trên luồng UI (đã chuyển nền từ bản mới) | Cập nhật ShowCue; giảm số IP backup |
+| Sync GO trễ | Wi‑Fi yếu | Ưu tiên Ethernet cho máy Primary |
+
+Heartbeat: Primary gửi mỗi **~800 ms**; Backup coi là mất sau **~6 s** không nhận.
 
 ## Hardware failover (tùy chọn)
 

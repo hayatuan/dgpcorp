@@ -2326,6 +2326,8 @@ void MainComponent::forwardUiSelectionToPad (SoundPad* pad, bool scrollIntoView)
                     viewScroller.setViewPosition (viewScroller.getViewPositionX(), padBottom - vHeight + padding);
             }
         }
+
+        broadcastSelectionSyncIfPrimary();
     }
 }
 
@@ -9436,6 +9438,11 @@ void MainComponent::routePhysicalHotkeyFromKeyCode (int keyCode)
                     if (pad != nullptr)
                         pad->triggerStop();
 
+                broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+                {
+                    b.sendStopAll();
+                });
+
                 return;
             }
 
@@ -9708,6 +9715,7 @@ bool MainComponent::handleArrowNavigationKey (const juce::KeyPress& key)
             cueListPanel->setSelectedIndex (selectedBgmIndex);
     }
 
+    broadcastSelectionSyncIfPrimary();
     return true;
 }
 
@@ -10511,6 +10519,7 @@ void MainComponent::loadList (int listIndex, int trackCount, bool isGridHint)
 
     updateMainDeskDisplay();
     hidePadsForAllListsExcept (listIndex);
+    broadcastSelectionSyncIfPrimary();
 }
 
 void MainComponent::syncCueMetadataFromPads (ListData& list)
@@ -13459,43 +13468,22 @@ void MainComponent::tickBackupPeerHealth()
 
     const auto now = juce::Time::getMillisecondCounter();
 
-    if (lastPeerHealthTickMs != 0 && now - lastPeerHealthTickMs < 2000u)
+    if (lastPeerHealthTickMs != 0 && now - lastPeerHealthTickMs < 4000u)
         return;
 
-    lastPeerHealthTickMs = now;
-
     const int syncPort = showcontrol::prefs::loadBackupSyncPort();
-    backupPeerStatuses.clear();
 
-    if (role == (int) showcontrol::backup::Role::primary)
+    if (role == (int) showcontrol::backup::Role::backup)
     {
-        for (const auto& ip : showcontrol::prefs::loadBackupPeerHosts())
-        {
-            showcontrol::backup::PeerRuntimeStatus status;
-            status.address = ip;
-            status.latencyMs = showcontrol::backup::pingShowCuePeer (
-                ip, syncPort, (int) showcontrol::backup::Role::backup, 650);
+        lastPeerHealthTickMs = now;
+        backupPeerStatuses.clear();
 
-            if (status.latencyMs > 0)
-                status.quality = status.latencyMs <= 120
-                               ? showcontrol::backup::LinkQuality::good
-                               : showcontrol::backup::LinkQuality::degraded;
-            else
-                status.quality = showcontrol::backup::LinkQuality::offline;
-
-            backupPeerStatuses.add (status);
-        }
-    }
-    else
-    {
         const auto peers = showcontrol::prefs::loadBackupPeerHosts();
 
         if (peers.size() > 0)
         {
             showcontrol::backup::PeerRuntimeStatus status;
-            status.address   = peers[0];
-            status.latencyMs = showcontrol::backup::pingShowCuePeer (
-                peers[0], syncPort, (int) showcontrol::backup::Role::primary, 650);
+            status.address = peers[0];
 
             const auto heartbeatNow = juce::Time::getMillisecondCounter();
 
@@ -13512,9 +13500,50 @@ void MainComponent::tickBackupPeerHealth()
 
             backupPeerStatuses.add (status);
         }
+
+        updateBackupConnectionUi();
+        return;
     }
 
-    updateBackupConnectionUi();
+    if (backupPeerHealthPingInFlight.exchange (true))
+        return;
+
+    lastPeerHealthTickMs = now;
+
+    const auto peerHosts = showcontrol::prefs::loadBackupPeerHosts();
+    const int wantRole   = (int) showcontrol::backup::Role::backup;
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    std::thread ([safeThis, peerHosts, syncPort, wantRole]() mutable
+    {
+        juce::Array<showcontrol::backup::PeerRuntimeStatus> statuses;
+
+        for (const auto& ip : peerHosts)
+        {
+            showcontrol::backup::PeerRuntimeStatus status;
+            status.address   = ip;
+            status.latencyMs = showcontrol::backup::pingShowCuePeer (ip, syncPort, wantRole, 400);
+
+            if (status.latencyMs > 0)
+                status.quality = status.latencyMs <= 120
+                               ? showcontrol::backup::LinkQuality::good
+                               : showcontrol::backup::LinkQuality::degraded;
+            else
+                status.quality = showcontrol::backup::LinkQuality::offline;
+
+            statuses.add (status);
+        }
+
+        juce::MessageManager::callAsync ([safeThis, statuses = std::move (statuses)]() mutable
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->backupPeerHealthPingInFlight = false;
+            safeThis->backupPeerStatuses           = std::move (statuses);
+            safeThis->updateBackupConnectionUi();
+        });
+    }).detach();
 }
 
 void MainComponent::reconnectBackupSync()

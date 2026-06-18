@@ -210,6 +210,22 @@ inline juce::Array<LanScanTarget> collectLanScanTargets()
     return targets;
 }
 
+/** Cache ngắn cho announce định kỳ — tránh gọi GetAdaptersAddresses trên UI thread (Windows). */
+inline juce::Array<LanScanTarget> collectLanScanTargetsCached (int maxAgeMs = 8000)
+{
+    static juce::Array<LanScanTarget> cached;
+    static int lastRefreshMs = 0;
+    const int now            = (int) juce::Time::getMillisecondCounter();
+
+    if (cached.isEmpty() || now - lastRefreshMs >= maxAgeMs)
+    {
+        cached         = collectLanScanTargets();
+        lastRefreshMs  = now;
+    }
+
+    return cached;
+}
+
 inline LocalLanNetworkInfo getPrimaryLocalLanNetworkInfo()
 {
     const auto targets = collectLanScanTargets();
@@ -358,7 +374,7 @@ inline void broadcastLanAnnounce (juce::DatagramSocket& socket,
     const int discoveryPort = discoveryPortForSyncPort (syncPort);
     const int bytes         = (int) announce.getNumBytesAsUTF8();
     const char* data        = announce.toRawUTF8();
-    const auto targets      = collectLanScanTargets();
+    const auto targets      = collectLanScanTargetsCached();
 
     for (const auto& target : targets)
     {
@@ -467,7 +483,7 @@ inline int pingShowCuePeer (const juce::String& address,
         return -1;
 
     const int discoveryPort = discoveryPortForSyncPort (syncPort);
-    const auto targets      = collectLanScanTargets();
+    const auto targets      = collectLanScanTargetsCached();
 
     if (targets.isEmpty())
         return -1;
