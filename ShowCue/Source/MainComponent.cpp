@@ -13333,7 +13333,8 @@ void MainComponent::startBackupDiscoveryResponder()
     const int discoveryPort = showcontrol::backup::discoveryPortForSyncPort (
         showcontrol::prefs::loadBackupSyncPort());
 
-    backupDiscoverySocket = std::make_unique<juce::DatagramSocket>();
+    backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
+    backupDiscoverySocket->setEnablePortReuse (true);
 
     if (backupDiscoverySocket->bindToPort (discoveryPort) <= 0)
     {
@@ -13388,9 +13389,8 @@ void MainComponent::pollBackupDiscoverySocket()
             juce::SystemStats::getComputerName(),
             showcontrol::prefs::loadBackupSyncPort());
 
-        juce::DatagramSocket replySocket;
-        replySocket.write (senderHost, replyPort, announce.toRawUTF8(),
-                         (int) announce.getNumBytesAsUTF8());
+        backupDiscoverySocket->write (senderHost, replyPort, announce.toRawUTF8(),
+                                       (int) announce.getNumBytesAsUTF8());
     }
 }
 

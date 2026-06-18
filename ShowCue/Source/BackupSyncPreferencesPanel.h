@@ -218,7 +218,7 @@ public:
         takeoverBtn.setBounds (area.removeFromTop (32));
         area.removeFromTop (gap);
 
-        helpLabel.setBounds (area.removeFromTop (108));
+        helpLabel.setBounds (area.removeFromTop (120));
     }
 
     void refreshSectionLabelColours()
@@ -257,7 +257,8 @@ public:
             u8"Máy chính: gửi GO/Panic/Stop tới một hoặc nhiều IP máy phụ.\n"
             u8"Máy phụ: nhận lệnh, phát từ file local (mute FOH cho đến khi takeover).\n"
             u8"Máy phụ mirror vị trí chọn và chế độ xem từ máy chính (GO/Stop/Pause vẫn đồng bộ như trước).\n"
-            u8"Cả hai máy cần cùng media và cùng bản ShowCue. Dùng Quét LAN trên cùng subnet."),
+            u8"Quét LAN dùng subnet Wi‑Fi/Ethernet đang active. Cần bật Quyền Mạng cục bộ (macOS).\n"
+            u8"Cả hai máy cần cùng media và cùng bản ShowCue."),
             juce::dontSendNotification);
         takeoverBtn.setButtonText (showcontrol::localization::tr (u8"Takeover — điều khiển local (máy phụ)"));
 
@@ -537,6 +538,10 @@ private:
             if (safeThis->isPrimaryRole())
             {
                 safeThis->showScanResults (peers);
+
+                if (peers.isEmpty())
+                    safeThis->showLanScanEmptyHint();
+
                 return;
             }
 
@@ -545,7 +550,25 @@ private:
                 safeThis->peerEditor.setText (peers.getReference (0).address);
                 safeThis->notifyChanged();
             }
+            else
+            {
+                safeThis->showLanScanEmptyHint();
+            }
         });
+    }
+
+    void showLanScanEmptyHint()
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::InfoIcon,
+            showcontrol::localization::tr (u8"Quét LAN"),
+            showcontrol::localization::tr (
+                u8"Không tìm thấy máy ShowCue trên cùng subnet.\n\n"
+                u8"• Cả hai máy cùng Wi‑Fi / LAN\n"
+                u8"• Máy đối tác đang mở ShowCue (vai trò Primary/Backup)\n"
+                u8"• Bật 「Bật nhận OSC / đồng bộ LAN」\n"
+                u8"• macOS: Cài đặt hệ thống → Quyền riêng tư → Mạng cục bộ → bật ShowCue"),
+            showcontrol::localization::tr (u8"Đã hiểu"));
     }
 
     juce::Label roleLabel, peerLabel, portLabel, helpLabel, scanResultsLabel;
