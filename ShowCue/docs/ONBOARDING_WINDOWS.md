@@ -5,6 +5,8 @@ Repo: https://github.com/hayatuan/dgpcorp
 
 Tài liệu build chi tiết hơn: [BUILD.md](BUILD.md)
 
+**Đường dẫn chuẩn trên máy Windows của team:** `D:\app\dgpcorp` (tạo thư mục `D:\app` nếu chưa có).
+
 ---
 
 ## Checklist nhanh
@@ -19,7 +21,7 @@ Tài liệu build chi tiết hơn: [BUILD.md](BUILD.md)
 [ ] cmake --preset windows-debug
 [ ] cmake --build --preset windows-debug
 [ ] Chạy ShowCue.exe OK
-[ ] Mở Cursor/VS Code tại thư mục root dgpcorp (không phải ShowCue/)
+[ ] Mở Cursor/VS Code tại D:\app\dgpcorp (thư mục root, không phải ShowCue/)
 ```
 
 ---
@@ -51,7 +53,7 @@ Nếu thiếu CMake: https://cmake.org/download/ hoặc `winget install Kitware.
 ## Bước 2 — Clone repository
 
 ```powershell
-cd D:\APP
+cd D:\app
 git clone https://github.com/hayatuan/dgpcorp.git
 cd dgpcorp
 git pull origin main
@@ -74,7 +76,7 @@ Kết quả phải là `True`.
 Cần cho trích audio từ video. Chạy **một lần** sau clone:
 
 ```powershell
-cd D:\APP\dgpcorp
+cd D:\app\dgpcorp
 powershell -ExecutionPolicy Bypass -File ShowCue\scripts\setup-thirdparty-win.ps1
 ```
 
@@ -85,7 +87,7 @@ CMake sẽ copy `ffmpeg.exe` cạnh `ShowCue.exe` khi build.
 
 ## Bước 4 — Mở project trong Cursor / VS Code
 
-1. **File → Open Folder** → chọn thư mục **root** `dgpcorp` (cùng cấp với `CMakeLists.txt` gốc).
+1. **File → Open Folder** → `D:\app\dgpcorp` (thư mục **root** repo, có file `CMakeLists.txt` gốc).
 2. Cài extension **CMake Tools** (Microsoft).
 3. Repo đã có `.vscode/settings.json` cấu hình sẵn cho VS 2026.
 
@@ -96,7 +98,7 @@ CMake sẽ copy `ffmpeg.exe` cạnh `ShowCue.exe` khi build.
 ### Máy có Visual Studio 2026 (khuyến nghị)
 
 ```powershell
-cd D:\APP\dgpcorp
+cd D:\app\dgpcorp
 cmake --preset windows-debug
 cmake --build --preset windows-debug
 ```
@@ -169,7 +171,7 @@ Mở `ShowCue.exe` — cửa sổ app hiện ra, không thoát ngay.
 **Trước khi làm việc mỗi ngày:**
 
 ```powershell
-cd D:\APP\dgpcorp
+cd D:\app\dgpcorp
 git pull origin main
 ```
 
