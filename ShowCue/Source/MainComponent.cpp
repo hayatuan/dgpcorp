@@ -41,6 +41,28 @@ juce::String importPackageErrorMessage (showcontrol::persistence::ImportPackageE
     }
 }
 
+juce::String formatConfigurationPackageStats (
+    const showcontrol::persistence::ConfigurationPackageSummary& summary)
+{
+    return juce::String (summary.listCount)
+         + " "
+         + showcontrol::localization::tr (u8"bộ list")
+         + " · "
+         + juce::String (summary.trackCount)
+         + " "
+         + showcontrol::localization::tr (u8"track");
+}
+
+void showConfigurationPackageAlert (juce::AlertWindow::AlertIconType icon,
+                                    const juce::String& title,
+                                    const juce::String& message)
+{
+    juce::AlertWindow::showMessageBoxAsync (icon,
+                                            title,
+                                            message,
+                                            showcontrol::localization::tr (u8"Đóng"));
+}
+
 class StateOperationScope
 {
 public:
@@ -10982,6 +11004,9 @@ bool MainComponent::isCueListViewActive() const noexcept
 
 bool MainComponent::triggerCueListPlay (int padIndex)
 {
+    if (shouldBlockLocalPlaybackCommand())
+        return false;
+
     if (isPlaybackCommandBlocked())
         return false;
 
@@ -11014,6 +11039,12 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     if (preWaitMs > 1.0)
     {
         pendingGoPadIndex = padIndex;
+
+        broadcastSyncIfPrimary ([this, padIndex, preWaitMs] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendGo (activeListIndex, padIndex, (float) preWaitMs);
+        });
+
         auto* timer = new PendingCueGoTimer();
         pendingGoTimer.reset (timer);
         timer->onFire = [this, padIndex]
@@ -11041,6 +11072,15 @@ bool MainComponent::triggerCueListPlay (int padIndex)
     const bool ok = audioEngine.playCue (pad);
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
+
+    if (ok)
+    {
+        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendGo (activeListIndex, padIndex, 0.0f);
+        });
+    }
+
     return ok;
 }
 
@@ -13004,6 +13044,8 @@ void MainComponent::handleSyncPanic()
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
+    showcontrol::backup::logSyncEvent ("RX panic");
+
     const bool wasSyncing = syncApplying.exchange (true);
     struct SyncScope
     {
@@ -13020,6 +13062,10 @@ void MainComponent::handleSyncGo (int listIndex, int padIndex, float preWaitMs)
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
+    showcontrol::backup::logSyncEvent ("RX go list=" + juce::String (listIndex)
+                                       + " pad=" + juce::String (padIndex)
+                                       + " preWaitMs=" + juce::String (preWaitMs, 1));
+
     triggerExternalSyncGo (listIndex, padIndex, preWaitMs);
 }
 
@@ -13027,6 +13073,8 @@ void MainComponent::handleSyncStopAll()
 {
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
+
+    showcontrol::backup::logSyncEvent ("RX stopAll");
 
     const bool wasSyncing = syncApplying.exchange (true);
     struct SyncScope
@@ -13054,6 +13102,8 @@ void MainComponent::handleSyncPauseAll()
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
+    showcontrol::backup::logSyncEvent ("RX pauseAll");
+
     const bool wasSyncing = syncApplying.exchange (true);
     struct SyncScope
     {
@@ -13079,6 +13129,9 @@ void MainComponent::handleSyncStopCue (int listIndex, int padIndex)
 {
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
+
+    showcontrol::backup::logSyncEvent ("RX stopCue list=" + juce::String (listIndex)
+                                       + " pad=" + juce::String (padIndex));
 
     const bool wasSyncing = syncApplying.exchange (true);
     struct SyncScope
@@ -13107,6 +13160,9 @@ void MainComponent::handleSyncPauseCue (int listIndex, int padIndex)
 {
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
+
+    showcontrol::backup::logSyncEvent ("RX pauseCue list=" + juce::String (listIndex)
+                                       + " pad=" + juce::String (padIndex));
 
     const bool wasSyncing = syncApplying.exchange (true);
     struct SyncScope
@@ -13284,6 +13340,10 @@ void MainComponent::handleSyncSelection (int listIndex,
 
     if (backupTakeoverActive)
         return;
+
+    showcontrol::backup::logSyncEvent ("RX selection list=" + juce::String (listIndex)
+                                       + " pad=" + juce::String (padIndex)
+                                       + " view=" + juce::String (viewMode));
 
     applySyncedSelection (listIndex, padIndex, viewMode, multiIndices);
 }
@@ -13749,10 +13809,19 @@ void MainComponent::restartBackupSync()
 
 void MainComponent::exportProjectShowcuePackage()
 {
+    saveApplicationStateInternal();
+
     auto xml = buildProjectXml();
 
     if (xml == nullptr)
+    {
+        showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Xuất file cấu hình"),
+            showcontrol::localization::tr (u8"Không thể tạo dữ liệu xuất. Thử lưu project trước rồi xuất lại."));
         return;
+    }
+
+    const auto summary = showcontrol::persistence::summarizeProjectXml (*xml);
 
     juce::DynamicObject::Ptr root (new juce::DynamicObject());
     root->setProperty ("projectSchema", showcontrol::persistence::kProjectSchemaVersion);
@@ -13772,7 +13841,8 @@ void MainComponent::exportProjectShowcuePackage()
     const int chooserFlags = juce::FileBrowserComponent::saveMode
                            | juce::FileBrowserComponent::canSelectFiles;
 
-    mainFileChooser->launchAsync (chooserFlags, [this, jsonText, xmlText = xml->toString()] (const juce::FileChooser& fc)
+    mainFileChooser->launchAsync (chooserFlags, [this, jsonText, xmlText = xml->toString(), summary]
+                                  (const juce::FileChooser& fc)
     {
         auto dest = fc.getResult();
 
@@ -13784,17 +13854,22 @@ void MainComponent::exportProjectShowcuePackage()
 
         if (! showcontrol::persistence::exportShowcuePackage (dest, jsonText, xmlText))
         {
-            juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+            showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
                 showcontrol::localization::tr (u8"Xuất file cấu hình"),
-                showcontrol::localization::tr (u8"Không ghi được file cấu hình."),
-                showcontrol::localization::tr (u8"Đóng"));
+                showcontrol::localization::tr (u8"Không ghi được file cấu hình."));
             return;
         }
 
-        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
-            showcontrol::localization::tr (u8"Xuất file cấu hình"),
-            showcontrol::localization::tr (u8"Đã lưu: ") + dest.getFullPathName(),
-            showcontrol::localization::tr (u8"Đóng"));
+        const juce::String body =
+            showcontrol::localization::tr (u8"File: ") + dest.getFileName() + "\n"
+            + formatConfigurationPackageStats (summary) + "\n"
+            + dest.getFullPathName() + "\n\n"
+            + showcontrol::localization::tr (
+                u8"Lưu ý: File âm thanh không nằm trong gói — hãy copy thư mục media sang máy đích.");
+
+        showConfigurationPackageAlert (juce::AlertWindow::InfoIcon,
+            showcontrol::localization::tr (u8"Xuất cấu hình thành công"),
+            body);
     });
 }
 
@@ -13802,10 +13877,9 @@ void MainComponent::importProjectShowcuePackage()
 {
     if (isOperatingState())
     {
-        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+        showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
             showcontrol::localization::tr (u8"Nhập file cấu hình"),
-            showcontrol::localization::tr (u8"Không thể nhập khi đang phát cue. Dừng phát trước."),
-            showcontrol::localization::tr (u8"Đóng"));
+            showcontrol::localization::tr (u8"Không thể nhập khi đang phát cue. Dừng phát trước."));
         return;
     }
 
@@ -13830,16 +13904,22 @@ void MainComponent::importProjectShowcuePackage()
 
         if (! package.success)
         {
-            juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+            showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
                 showcontrol::localization::tr (u8"Nhập file cấu hình"),
-                importPackageErrorMessage (package.error),
-                showcontrol::localization::tr (u8"Đóng"));
+                importPackageErrorMessage (package.error));
             return;
         }
+
+        showcontrol::persistence::ConfigurationPackageSummary summary;
+
+        if (const auto xml = juce::parseXML (package.projectXml))
+            summary = showcontrol::persistence::summarizeProjectXml (*xml);
 
         const juce::String confirmMessage =
             showcontrol::localization::tr (u8"Ghi đè cấu hình hiện tại bằng file:\n")
             + source.getFileName()
+            + "\n"
+            + formatConfigurationPackageStats (summary)
             + "\n\n"
             + showcontrol::localization::tr (u8"Bản hiện tại sẽ được sao lưu vào thư mục backups/.");
 
@@ -13850,7 +13930,7 @@ void MainComponent::importProjectShowcuePackage()
                 .withMessage (confirmMessage)
                 .withButton (showcontrol::localization::tr (u8"Nhập"))
                 .withButton (showcontrol::localization::tr (u8"Hủy")),
-            [safeThis, package] (int result)
+            [safeThis, package, source, summary] (int result)
             {
                 if (safeThis == nullptr || result != 0)
                     return;
@@ -13858,20 +13938,28 @@ void MainComponent::importProjectShowcuePackage()
                 if (! showcontrol::persistence::installImportedConfiguration (package.configJson,
                                                                               package.projectXml))
                 {
-                    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                    showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
                         showcontrol::localization::tr (u8"Nhập file cấu hình"),
-                        showcontrol::localization::tr (u8"Không ghi được cấu hình."),
-                        showcontrol::localization::tr (u8"Đóng"));
+                        showcontrol::localization::tr (u8"Không ghi được cấu hình."));
                     return;
                 }
 
                 safeThis->forceStopActiveAudioForSafety();
                 safeThis->loadApplicationState();
+                safeThis->applyThemePreference (safeThis->themePreferenceId);
+                safeThis->restartBackupSync();
+                safeThis->updateBackupConnectionUi();
 
-                juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
-                    showcontrol::localization::tr (u8"Nhập file cấu hình"),
-                    showcontrol::localization::tr (u8"Đã nhập cấu hình. Kiểm tra media nếu đường dẫn file âm thanh khác máy nguồn."),
-                    showcontrol::localization::tr (u8"Đóng"));
+                const juce::String body =
+                    showcontrol::localization::tr (u8"File: ") + source.getFileName() + "\n"
+                    + formatConfigurationPackageStats (summary) + "\n\n"
+                    + showcontrol::localization::tr (u8"Bản cũ đã sao lưu vào thư mục backups/.") + "\n"
+                    + showcontrol::localization::tr (
+                        u8"Kiểm tra đường dẫn media và cấu hình tab Mạng trên máy này.");
+
+                showConfigurationPackageAlert (juce::AlertWindow::InfoIcon,
+                    showcontrol::localization::tr (u8"Nhập cấu hình thành công"),
+                    body);
             });
     });
 }

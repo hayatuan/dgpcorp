@@ -260,4 +260,31 @@ inline bool exportShowcuePackage (const juce::File& destination,
     return temp.overwriteTargetFileWithTemporary();
 }
 
+struct ConfigurationPackageSummary
+{
+    int listCount  = 0;
+    int trackCount = 0;
+};
+
+inline ConfigurationPackageSummary summarizeProjectXml (const juce::XmlElement& xml)
+{
+    ConfigurationPackageSummary summary;
+
+    for (auto* listElem : xml.getChildIterator())
+    {
+        if (! listElem->hasTagName ("List"))
+            continue;
+
+        ++summary.listCount;
+
+        for (auto* padElem : listElem->getChildIterator())
+        {
+            if (padElem->hasTagName ("Pad"))
+                ++summary.trackCount;
+        }
+    }
+
+    return summary;
+}
+
 } // namespace showcontrol::persistence

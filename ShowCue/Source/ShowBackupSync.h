@@ -47,6 +47,22 @@ inline constexpr const char* legacyPanic = "/showcue/panic";
 inline constexpr const char* legacyGo    = "/showcue/go";
 } // namespace addresses
 
+inline bool syncDebugLoggingEnabled() noexcept
+{
+    if (const char* env = std::getenv ("SHOWCUE_SYNC_DEBUG"))
+        return env[0] != '0' && env[0] != '\0';
+
+    return false;
+}
+
+inline void logSyncEvent (const juce::String& message)
+{
+    if (! syncDebugLoggingEnabled())
+        return;
+
+    std::cout << "[SYNC] " << message << std::endl;
+}
+
 /** Primary → Backup OSC broadcast (UDP unicast to one or more peers). */
 class ShowBackupSyncBroadcaster
 {
@@ -194,7 +210,11 @@ private:
             if (sender.connect (host, targetPort))
             {
                 if (sender.send (message))
+                {
                     anyOk = true;
+                    logSyncEvent ("TX " + message.getAddressPattern().toString()
+                                  + " -> " + host + ":" + juce::String (targetPort));
+                }
 
                 sender.disconnect();
             }
