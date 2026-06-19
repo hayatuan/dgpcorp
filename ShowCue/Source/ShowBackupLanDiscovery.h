@@ -236,6 +236,12 @@ inline LocalLanNetworkInfo getPrimaryLocalLanNetworkInfo()
     return makeLocalLanNetworkInfo (targets.getReference (0));
 }
 
+/** IPv4 interface đang dùng cho bind socket LAN (OSC/discovery) — tránh VMware/virtual trên Windows. */
+inline juce::String getLocalLanBindAddress()
+{
+    return getPrimaryLocalLanNetworkInfo().ip;
+}
+
 inline juce::String describeLocalLanNetwork (const LocalLanNetworkInfo& info)
 {
     if (info.ip.isEmpty())

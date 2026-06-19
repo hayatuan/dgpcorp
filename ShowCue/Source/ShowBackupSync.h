@@ -27,6 +27,7 @@ inline constexpr int kPeerHealthIntervalMs        = 1000;
 inline constexpr int kPeerPingTimeoutMs           = 400;
 inline constexpr int kLanAnnounceIntervalMs       = 1500;
 inline constexpr int kPadPatchDebounceMs          = 60;
+inline constexpr int kSelectionSyncDebounceMs     = 20;
 inline constexpr int kMaxBackupPeers            = 16;
 
 enum class LinkQuality : int

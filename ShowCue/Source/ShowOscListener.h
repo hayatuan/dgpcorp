@@ -26,7 +26,7 @@ struct ShowOscCallbacks
 
 /** OSC Inbound — điều khiển show / đồng bộ Primary→Backup trên LAN. */
 class ShowOscListener final : private juce::OSCReceiver,
-                              private juce::OSCReceiver::Listener<juce::OSCReceiver::RealtimeCallback>
+                              private juce::OSCReceiver::Listener<juce::OSCReceiver::MessageLoopCallback>
 {
 public:
     explicit ShowOscListener (ShowOscCallbacks callbacksIn)
@@ -40,23 +40,47 @@ public:
         removeListener (this);
     }
 
-    bool start (int port)
+    bool start (int port, const juce::String& bindAddress = {})
     {
         removeListener (this);
         disconnect();
+        ownedSocket.reset();
 
-        if (! connect (port))
-            return false;
+        if (bindAddress.isNotEmpty())
+        {
+            ownedSocket = std::make_unique<juce::DatagramSocket> (true);
+            ownedSocket->setEnablePortReuse (true);
 
-        addListener (this);
-        listeningPort = port;
-        return true;
+            if (ownedSocket->bindToPort (port, bindAddress)
+                && connectToSocket (*ownedSocket))
+            {
+                addListener (this);
+                listeningPort = port;
+                return true;
+            }
+
+            ownedSocket.reset();
+        }
+
+        auto fallbackSocket = std::make_unique<juce::DatagramSocket> (true);
+        fallbackSocket->setEnablePortReuse (true);
+
+        if (fallbackSocket->bindToPort (port) && connectToSocket (*fallbackSocket))
+        {
+            ownedSocket = std::move (fallbackSocket);
+            addListener (this);
+            listeningPort = port;
+            return true;
+        }
+
+        return false;
     }
 
     void stop()
     {
         removeListener (this);
         disconnect();
+        ownedSocket.reset();
         listeningPort = 0;
     }
 
@@ -95,17 +119,6 @@ private:
         return fallback;
     }
 
-    void dispatchGo (int listIndex, int padIndex, float preWaitMs, int playMode)
-    {
-        if (! callbacks.onGo)
-            return;
-
-        juce::MessageManager::callAsync ([cb = callbacks.onGo, listIndex, padIndex, preWaitMs, playMode]
-        {
-            cb (listIndex, padIndex, preWaitMs, playMode);
-        });
-    }
-
     void oscMessageReceived (const juce::OSCMessage& message) override
     {
         const auto address = message.getAddressPattern().toString();
@@ -114,13 +127,16 @@ private:
             || address == showcontrol::backup::addresses::legacyPanic)
         {
             if (callbacks.onPanic)
-                juce::MessageManager::callAsync ([cb = callbacks.onPanic] { cb(); });
+                callbacks.onPanic();
             return;
         }
 
         if (address == showcontrol::backup::addresses::go
             || address == showcontrol::backup::addresses::legacyGo)
         {
+            if (! callbacks.onGo)
+                return;
+
             int listIndex = 0;
             int padIndex  = 0;
 
@@ -137,21 +153,21 @@ private:
             const float preWaitMs = readFloatArg (message, 2, 0.0f);
             const int playMode    = message.size() >= 4 ? readIntArg (message, 3, (int) showcontrol::backup::SyncPlayMode::legacy)
                                                         : (int) showcontrol::backup::SyncPlayMode::legacy;
-            dispatchGo (listIndex, padIndex, preWaitMs, playMode);
+            callbacks.onGo (listIndex, padIndex, preWaitMs, playMode);
             return;
         }
 
         if (address == showcontrol::backup::addresses::stopAll)
         {
             if (callbacks.onStopAll)
-                juce::MessageManager::callAsync ([cb = callbacks.onStopAll] { cb(); });
+                callbacks.onStopAll();
             return;
         }
 
         if (address == showcontrol::backup::addresses::pauseAll)
         {
             if (callbacks.onPauseAll)
-                juce::MessageManager::callAsync ([cb = callbacks.onPauseAll] { cb(); });
+                callbacks.onPauseAll();
             return;
         }
 
@@ -161,10 +177,7 @@ private:
             {
                 const int listIndex = readIntArg (message, 0, 0);
                 const int padIndex  = readIntArg (message, 1, 0);
-                juce::MessageManager::callAsync ([cb = callbacks.onStopCue, listIndex, padIndex]
-                {
-                    cb (listIndex, padIndex);
-                });
+                callbacks.onStopCue (listIndex, padIndex);
             }
             return;
         }
@@ -175,10 +188,7 @@ private:
             {
                 const int listIndex = readIntArg (message, 0, 0);
                 const int padIndex  = readIntArg (message, 1, 0);
-                juce::MessageManager::callAsync ([cb = callbacks.onPauseCue, listIndex, padIndex]
-                {
-                    cb (listIndex, padIndex);
-                });
+                callbacks.onPauseCue (listIndex, padIndex);
             }
             return;
         }
@@ -188,10 +198,7 @@ private:
             if (callbacks.onHeartbeat)
             {
                 const auto seq = (juce::uint32) readIntArg (message, 0, 0);
-                juce::MessageManager::callAsync ([cb = callbacks.onHeartbeat, seq]
-                {
-                    cb (seq);
-                });
+                callbacks.onHeartbeat (seq);
             }
             return;
         }
@@ -201,10 +208,7 @@ private:
             if (callbacks.onTakeover)
             {
                 const bool active = readIntArg (message, 0, 0) != 0;
-                juce::MessageManager::callAsync ([cb = callbacks.onTakeover, active]
-                {
-                    cb (active);
-                });
+                callbacks.onTakeover (active);
             }
 
             return;
@@ -231,11 +235,7 @@ private:
                     multiIndices.add (idx);
             }
 
-            juce::MessageManager::callAsync ([cb = callbacks.onSelection, listIndex, padIndex, viewMode, multiIndices]
-            {
-                cb (listIndex, padIndex, viewMode, multiIndices);
-            });
-
+            callbacks.onSelection (listIndex, padIndex, viewMode, multiIndices);
             return;
         }
 
@@ -289,11 +289,7 @@ private:
                 patch.trimEnd   = readFloatArg (message, arg++, 0.0f);
             }
 
-            juce::MessageManager::callAsync ([cb = callbacks.onPadPatch, patch]
-            {
-                cb (patch);
-            });
-
+            callbacks.onPadPatch (patch);
             return;
         }
 
@@ -305,12 +301,7 @@ private:
             const int listIndex = readIntArg (message, 0, -1);
             const int fromIndex = readIntArg (message, 1, -1);
             const int toIndex   = readIntArg (message, 2, -1);
-
-            juce::MessageManager::callAsync ([cb = callbacks.onPadReorder, listIndex, fromIndex, toIndex]
-            {
-                cb (listIndex, fromIndex, toIndex);
-            });
-
+            callbacks.onPadReorder (listIndex, fromIndex, toIndex);
             return;
         }
 
@@ -333,11 +324,7 @@ private:
                     keys.add (message[argIndex].getString());
             }
 
-            juce::MessageManager::callAsync ([cb = callbacks.onPadOrder, listIndex, keys]
-            {
-                cb (listIndex, keys);
-            });
-
+            callbacks.onPadOrder (listIndex, keys);
             return;
         }
 
@@ -363,11 +350,7 @@ private:
             if ((patch.flags & showcontrol::backup::listpatch::kThemeColour) != 0 && arg < message.size())
                 patch.colourArgb = (juce::uint32) readIntArg (message, arg++, 0);
 
-            juce::MessageManager::callAsync ([cb = callbacks.onListPatch, patch]
-            {
-                cb (patch);
-            });
-
+            callbacks.onListPatch (patch);
             return;
         }
 
@@ -378,15 +361,12 @@ private:
 
             const int fromIndex = readIntArg (message, 0, -1);
             const int toIndex   = readIntArg (message, 1, -1);
-
-            juce::MessageManager::callAsync ([cb = callbacks.onListReorder, fromIndex, toIndex]
-            {
-                cb (fromIndex, toIndex);
-            });
+            callbacks.onListReorder (fromIndex, toIndex);
         }
     }
 
     ShowOscCallbacks callbacks;
+    std::unique_ptr<juce::DatagramSocket> ownedSocket;
     int listeningPort = 0;
 };
 

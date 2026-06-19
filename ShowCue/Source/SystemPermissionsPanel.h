@@ -79,6 +79,7 @@ private:
     bool checkAudioPermission();
     bool checkNetworkPermission();
     bool checkWindowsAdminConflict();
+    bool checkWindowsFirewallPermission();
 
     void updatePermissionUi();
     void rebuildCardLayout();
@@ -93,6 +94,7 @@ private:
     PermissionCardComponent audioCard;
     PermissionCardComponent networkCard;
    #if JUCE_WINDOWS
+    PermissionCardComponent firewallCard;
     PermissionCardComponent dragDropCard;
    #endif
 

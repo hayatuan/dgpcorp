@@ -1,7 +1,11 @@
 #include "SystemPermissionsPanel.h"
 #include "ShowLocalization.h"
+#include "ShowAppPreferences.h"
 #if JUCE_MAC
 #include "ShowBackupMacNetwork.h"
+#endif
+#if JUCE_WINDOWS
+#include "ShowBackupFirewallWin.h"
 #endif
 
 #if JUCE_WINDOWS
@@ -263,6 +267,10 @@ SystemPermissionsPanel::SystemPermissionsPanel()
                    juce::String::fromUTF8 (
                        u8"Trạng thái kết nối Internet/mạng nội bộ để kiểm tra cập nhật từ GitHub và đồng bộ show."))
    #if JUCE_WINDOWS
+      , firewallCard (PermissionCardComponent::IconKind::shield,
+                      "Windows Firewall (LAN sync)",
+                      juce::String::fromUTF8 (
+                          u8"Cho phép UDP cổng đồng bộ (9000–9001) inbound — bắt buộc khi máy là Máy phụ hoặc nhận OSC."))
       , dragDropCard (PermissionCardComponent::IconKind::shield,
                       "Drag & Drop File Access",
                       juce::String::fromUTF8 (
@@ -300,6 +308,19 @@ SystemPermissionsPanel::SystemPermissionsPanel()
    #endif
 
    #if JUCE_WINDOWS
+    cardsContainer.addAndMakeVisible (firewallCard);
+    firewallCard.setAllowGrantButton (true);
+    firewallCard.onGrantRequested = [this]
+    {
+        const int port = showcontrol::prefs::loadBackupSyncPort();
+        const bool ready = showcontrol::backup::win::ensureWindowsFirewallRules (port);
+
+        if (! ready)
+            showcontrol::backup::win::requestElevatedFirewallSetup (port);
+
+        updatePermissionUi();
+    };
+
     cardsContainer.addAndMakeVisible (dragDropCard);
    #endif
 
@@ -330,7 +351,17 @@ void SystemPermissionsPanel::haltActiveTimers() noexcept
 
 bool SystemPermissionsPanel::checkAudioPermission()
 {
+   #if JUCE_WINDOWS
+    juce::AudioDeviceManager probe;
+    const auto err = probe.initialise (0, 2, nullptr, true);
+
+    if (err.isNotEmpty())
+        return false;
+
+    return probe.getCurrentAudioDevice() != nullptr;
+   #else
     return juce::RuntimePermissions::isGranted (juce::RuntimePermissions::recordAudio);
+   #endif
 }
 
 bool SystemPermissionsPanel::checkNetworkPermission()
@@ -362,6 +393,16 @@ bool SystemPermissionsPanel::checkWindowsAdminConflict()
     return IsUserAnAdmin() != FALSE;
    #else
     return false;
+   #endif
+}
+
+bool SystemPermissionsPanel::checkWindowsFirewallPermission()
+{
+   #if JUCE_WINDOWS
+    const int port = showcontrol::prefs::loadBackupSyncPort();
+    return showcontrol::backup::win::areWindowsFirewallRulesPresent (port);
+   #else
+    return true;
    #endif
 }
 
@@ -402,6 +443,9 @@ void SystemPermissionsPanel::updatePermissionUi()
                                                    : PermissionStatus::disabled);
 
    #if JUCE_WINDOWS
+    firewallCard.setStatus (checkWindowsFirewallPermission() ? PermissionStatus::enabled
+                                                            : PermissionStatus::disabled);
+
     if (checkWindowsAdminConflict())
     {
         dragDropCard.setStatus (PermissionStatus::warning,
@@ -459,6 +503,7 @@ void SystemPermissionsPanel::refreshLocalizedText()
     audioCard.refreshLocalizedText();
     networkCard.refreshLocalizedText();
    #if JUCE_WINDOWS
+    firewallCard.refreshLocalizedText();
     dragDropCard.refreshLocalizedText();
    #endif
     updatePermissionUi();
@@ -511,6 +556,9 @@ void SystemPermissionsPanel::rebuildCardLayout()
     y += cardH + gap;
 
    #if JUCE_WINDOWS
+    firewallCard.setBounds (0, y, w, cardH);
+    y += cardH + gap;
+
     dragDropCard.setBounds (0, y, w, cardH);
     y += cardH + gap;
    #endif

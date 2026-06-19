@@ -89,7 +89,7 @@ Legacy (standalone OSC): `/showcue/go`, `/showcue/panic`
 
 **macOS:** bật **Quyền Mạng cục bộ** (Local Network) cho ShowCue — *System Settings → Privacy & Security → Local Network*.
 
-**Windows:** Windows Defender thường **chặn UDP inbound** lần đầu. Cần cho phép `ShowCue.exe` hoặc mở cổng 9000–9001:
+**Windows:** Windows Defender thường **chặn UDP inbound** lần đầu — đặc biệt khi máy Windows là **Máy phụ** (phải *nhận* OSC cổng 9000 từ Primary). Khi bật vai trò **Máy chính** hoặc **Máy phụ**, ShowCue **tự thử** tạo rule firewall; nếu cần quyền Admin sẽ hiện hộp thoại **Cấp quyền (UAC)**. Hoặc chạy script thủ công:
 
 ```powershell
 # PowerShell chạy quyền Administrator, từ root repo:
@@ -106,7 +106,7 @@ Hoặc thủ công: *Windows Security → Firewall → Allow an app* → bật *
 |-------------|------------------------|------------|
 | Backup báo mất Primary | Firewall chặn UDP 9000, Mac chưa cấp Local Network | Mở firewall + quyền Mac |
 | Quét LAN không thấy máy | Subnet khác, adapter ảo (VMware) | Dùng Wi‑Fi/Ethernet có gateway; tắt VPN |
-| UI đơ vài giây khi mất mạng | Ping health chạy trên luồng UI (đã chuyển nền từ bản mới) | Cập nhật ShowCue; giảm số IP backup |
+| UI đơ / chập chờn khi Win làm **Máy phụ** | Firewall inbound + selection sync nặng | Chạy `setup-firewall-win.ps1`; build bản mới (bind Wi‑Fi, debounce selection) |
 | Sync GO trễ | Wi‑Fi yếu | Ưu tiên Ethernet cho máy Primary |
 
 Heartbeat: Primary gửi mỗi **~800 ms**; Backup coi là mất sau **~6 s** không nhận.

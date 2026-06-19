@@ -88,9 +88,10 @@ endif()
 
 if(WIN32)
     target_sources(ShowCue PRIVATE Source/ShowBackupLanDiscoveryWin.cpp
-                                 Source/ShowDisplaySleepPreventerWin.cpp)
+                                 Source/ShowDisplaySleepPreventerWin.cpp
+                                 Source/ShowBackupFirewallWin.cpp)
 
-    target_link_libraries(ShowCue PRIVATE iphlpapi)
+    target_link_libraries(ShowCue PRIVATE iphlpapi ole32 oleaut32)
 
     set(_showcue_resources_dir "${CMAKE_CURRENT_SOURCE_DIR}/Resources")
     foreach(_runtime_asset IN ITEMS AppIcon.png DonateQR.png)

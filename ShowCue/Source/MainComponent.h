@@ -224,6 +224,11 @@ private:
     void broadcastListReorderIfPrimary (int fromIndex, int toIndex);
     void schedulePadPatchBroadcast (int listIndex, int padIndex, juce::uint32 flags);
     void flushPendingPadPatchBroadcast();
+    void scheduleSyncedSelectionApply (int listIndex,
+                                       int padIndex,
+                                       int viewMode,
+                                       const juce::Array<int>& multiIndices);
+    void flushPendingSyncedSelection();
     void applySyncedSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
     void broadcastSelectionSyncIfPrimary();
     int currentSyncViewMode() const noexcept;
@@ -283,8 +288,8 @@ private:
     void syncBgmListHeaderScrollbar();
     int getPlaylistViewportContentWidth() noexcept;
     void refreshCueListPanel (bool resetScrollToTop = true);
-    bool triggerCueGo (int padIndex, bool fromSync = false);
-    bool triggerCueListPlay (int padIndex, bool fromSync = false);
+    bool triggerCueGo (int padIndex, bool fromSync = false, int listIndexOverride = -1);
+    bool triggerCueListPlay (int padIndex, bool fromSync = false, int listIndexOverride = -1);
     bool triggerCueListPause (int padIndex);
     bool triggerCueListStop (int padIndex);
     bool isCueListViewActive() const noexcept;
@@ -324,7 +329,8 @@ private:
     void triggerBgmPlayPause();
     void triggerBgmNext();
     void triggerBgmPrev();
-    bool triggerBgmSyncPlayAtIndex (int padIndex);
+    bool triggerBgmSyncPlayAtIndex (int padIndex, int listIndexOverride = -1);
+    void deferSyncTransportUi (int listIndex, int padIndex);
     void broadcastGoSync (int listIndex, int padIndex, float preWaitMs, showcontrol::backup::SyncPlayMode mode);
     /** Preload reader + waveform cho dòng BGM đang chọn (và hàng lân cận). */
     void prefetchBgmPadAtIndex (int index);
@@ -836,6 +842,23 @@ private:
     int pendingPadPatchListIdx = -1;
     int pendingPadPatchPadIdx  = -1;
     juce::uint32 pendingPadPatchFlags = 0;
+
+    class PendingSelectionSyncTimer final : public juce::Timer
+    {
+    public:
+        std::function<void()> onFire;
+        void timerCallback() override
+        {
+            if (onFire != nullptr)
+                onFire();
+        }
+    };
+
+    std::unique_ptr<PendingSelectionSyncTimer> pendingSelectionSyncTimer;
+    int pendingSelectionList = -1;
+    int pendingSelectionPad  = -1;
+    int pendingSelectionView = -1;
+    juce::Array<int> pendingSelectionMulti;
     juce::uint32 lastAutosaveAtMs = 0;
     void maybeRunAutosave();
 

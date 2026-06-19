@@ -18,6 +18,9 @@
 #if JUCE_MAC
 #include "ShowBackupMacNetwork.h"
 #endif
+#if JUCE_WINDOWS
+#include "ShowBackupFirewallWin.h"
+#endif
 #include <cstdlib>
 
 namespace
@@ -1161,6 +1164,7 @@ void MainComponent::shutdownActiveTimers() noexcept
     startupReassertTimer.reset();
     startupGuardTimer.reset();
     deferredIdlePadsTimer.reset();
+    pendingSelectionSyncTimer.reset();
     panicFadeDispatchScheduled.store (false, std::memory_order_release);
 
     if (padReorderOverlay != nullptr)
@@ -2179,9 +2183,9 @@ void MainComponent::triggerBgmPlayPause()
         if (! playing->isFadeOutInProgress())
             playing->startFadeOut();
 
+        broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
         targetPad->triggerPlay();
         syncUiToPlayingPad (targetPad, false);
-        broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
         return;
     }
 
@@ -2214,9 +2218,9 @@ void MainComponent::triggerBgmPlayPause()
         if (other != nullptr && other != targetPad)
             other->triggerStop();
 
+    broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
     targetPad->triggerPlay();
     syncUiToPlayingPad (targetPad, true);
-    broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::triggerBgmNext()
@@ -2248,9 +2252,9 @@ void MainComponent::triggerBgmNext()
         if (pad != nullptr && pad != nextPad)
             pad->triggerStop();
 
+    broadcastGoSync (activeListIndex, nextIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
     nextPad->triggerPlay();
     syncUiToPlayingPad (nextPad, false);
-    broadcastGoSync (activeListIndex, nextIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::triggerBgmPrev()
@@ -2282,9 +2286,9 @@ void MainComponent::triggerBgmPrev()
         if (pad != nullptr && pad != prevPad)
             pad->triggerStop();
 
+    broadcastGoSync (activeListIndex, prevIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
     prevPad->triggerPlay();
     syncUiToPlayingPad (prevPad, false);
-    broadcastGoSync (activeListIndex, prevIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
 }
 
 void MainComponent::forwardUiSelectionToPad (SoundPad* pad, bool scrollIntoView)
@@ -8670,6 +8674,10 @@ void MainComponent::finishDeferredStartup()
     startTimer (100);
     deferredStartupComplete = true;
 
+   #if JUCE_WINDOWS
+    showcontrol::backup::win::warnIfRunningAsAdministrator();
+   #endif
+
     if (updateChecker != nullptr)
         updateChecker->checkForUpdatesAsync (false);
 
@@ -9901,26 +9909,14 @@ void MainComponent::triggerGlobalPanicFadeAll()
         return;
 
     lastPanicFadeRequestMs = nowMs;
-
-    if (panicFadeDispatchScheduled.exchange (true, std::memory_order_acq_rel))
-        return;
-
-    juce::Component::SafePointer<MainComponent> safeThis (this);
-    juce::MessageManager::callAsync ([safeThis]
-    {
-        if (safeThis == nullptr)
-            return;
-
-        safeThis->panicFadeDispatchScheduled.store (false, std::memory_order_release);
-        safeThis->executePanicFadeAllLocked();
-    });
+    executePanicFadeAllLocked();
 }
 
 void MainComponent::executePanicFadeAllLocked()
 {
     static constexpr double kPanicFadeMs = 1500.0;
 
-    if (! syncApplying.load())
+    if (! syncApplying.load (std::memory_order_acquire))
     {
         broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
         {
@@ -11103,7 +11099,7 @@ bool MainComponent::isCueListViewActive() const noexcept
     return list != nullptr && list->isGrid && list->useCueListPanel;
 }
 
-bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
+bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync, int listIndexOverride)
 {
     if (! fromSync && shouldBlockLocalPlaybackCommand())
         return false;
@@ -11111,10 +11107,12 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
     if (isPlaybackCommandBlocked())
         return false;
 
-    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+    const int listIdx = listIndexOverride >= 0 ? listIndexOverride : activeListIndex;
+
+    if (listIdx < 0 || listIdx >= allLists.size())
         return false;
 
-    auto* list = allLists[activeListIndex];
+    auto* list = allLists[listIdx];
     if (list == nullptr || ! list->isGrid || ! juce::isPositiveAndBelow (padIndex, list->pads.size()))
         return false;
 
@@ -11129,11 +11127,14 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
     if (padIndex < list->cueMeta.size())
         preWaitMs = list->cueMeta.getReference (padIndex).preWaitMs;
 
-    armPad (pad);
-    forwardUiSelectionToPad (pad, false);
-    inspectorPanel.selectPad (pad);
-    refreshSidebarPlayingStatus();
-    updateMainDeskDisplay();
+    if (! fromSync)
+    {
+        armPad (pad);
+        forwardUiSelectionToPad (pad, false);
+        inspectorPanel.selectPad (pad);
+        refreshSidebarPlayingStatus();
+        updateMainDeskDisplay();
+    }
 
     pendingGoTimer.reset();
 
@@ -11141,18 +11142,19 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
     {
         pendingGoPadIndex = padIndex;
 
-        broadcastGoSync (activeListIndex, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::cueListPlay);
+        if (! fromSync)
+            broadcastGoSync (listIdx, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::cueListPlay);
 
         auto* timer = new PendingCueGoTimer();
         pendingGoTimer.reset (timer);
-        timer->onFire = [this, padIndex]
+        timer->onFire = [this, listIdx, padIndex]
         {
             pendingGoPadIndex = -1;
 
-            if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            if (listIdx < 0 || listIdx >= allLists.size())
                 return;
 
-            auto* activeList = allLists[activeListIndex];
+            auto* activeList = allLists[listIdx];
             if (activeList == nullptr || ! juce::isPositiveAndBelow (padIndex, activeList->pads.size()))
                 return;
 
@@ -11164,15 +11166,22 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync)
             }
         };
         timer->startMs (preWaitMs);
+
+        if (fromSync)
+            deferSyncTransportUi (listIdx, padIndex);
+
         return true;
     }
+
+    if (! fromSync)
+        broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::cueListPlay);
 
     const bool ok = audioEngine.playCue (pad);
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
 
-    if (ok && ! fromSync)
-        broadcastGoSync (activeListIndex, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::cueListPlay);
+    if (fromSync)
+        deferSyncTransportUi (listIdx, padIndex);
 
     return ok;
 }
@@ -11240,7 +11249,7 @@ bool MainComponent::triggerCueListStop (int padIndex)
     return ok;
 }
 
-bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
+bool MainComponent::triggerCueGo (int padIndex, bool fromSync, int listIndexOverride)
 {
     if (! fromSync && shouldBlockLocalPlaybackCommand())
         return false;
@@ -11248,10 +11257,12 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
     if (isPlaybackCommandBlocked())
         return false;
 
-    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+    const int listIdx = listIndexOverride >= 0 ? listIndexOverride : activeListIndex;
+
+    if (listIdx < 0 || listIdx >= allLists.size())
         return false;
 
-    auto* list = allLists[activeListIndex];
+    auto* list = allLists[listIdx];
 
     if (list == nullptr)
         return false;
@@ -11264,7 +11275,7 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
     if (pad == nullptr || ! pad->hasAudioFile())
         return false;
 
-    if (! pad->tryClaimPadHotkeyTrigger())
+    if (! fromSync && ! pad->tryClaimPadHotkeyTrigger())
     {
         logHotkeyTrace ("trigger blocked pad guard cue pad=" + juce::String (padIndex));
         return false;
@@ -11281,11 +11292,14 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
     if (padIndex < list->cueMeta.size())
         preWaitMs = list->cueMeta.getReference (padIndex).preWaitMs;
 
-    armPad (pad);
-    forwardUiSelectionToPad (pad, false);
-    inspectorPanel.selectPad (pad);
-    refreshSidebarPlayingStatus();
-    updateMainDeskDisplay();
+    if (! fromSync)
+    {
+        armPad (pad);
+        forwardUiSelectionToPad (pad, false);
+        inspectorPanel.selectPad (pad);
+        refreshSidebarPlayingStatus();
+        updateMainDeskDisplay();
+    }
 
     pendingGoTimer.reset();
     auto runCueGoPad = [this] (SoundPad* goPad)
@@ -11325,20 +11339,18 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
         pendingGoPadIndex = padIndex;
 
         if (! fromSync)
-        {
-            broadcastGoSync (activeListIndex, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::padGo);
-        }
+            broadcastGoSync (listIdx, padIndex, (float) preWaitMs, showcontrol::backup::SyncPlayMode::padGo);
 
         auto* timer = new PendingCueGoTimer();
         pendingGoTimer.reset (timer);
-        timer->onFire = [this, padIndex, runCueGoPad]
+        timer->onFire = [this, listIdx, padIndex, runCueGoPad]
         {
             pendingGoPadIndex = -1;
 
-            if (activeListIndex < 0 || activeListIndex >= allLists.size())
+            if (listIdx < 0 || listIdx >= allLists.size())
                 return;
 
-            auto* activeList = allLists[activeListIndex];
+            auto* activeList = allLists[listIdx];
 
             if (activeList == nullptr || padIndex < 0 || padIndex >= activeList->pads.size())
                 return;
@@ -11346,15 +11358,20 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync)
             runCueGoPad (activeList->pads[padIndex]);
         };
         timer->startMs (preWaitMs);
+
+        if (fromSync)
+            deferSyncTransportUi (listIdx, padIndex);
+
         return true;
     }
 
+    if (! fromSync)
+        broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::padGo);
+
     runCueGoPad (pad);
 
-    if (! fromSync)
-    {
-        broadcastGoSync (activeListIndex, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::padGo);
-    }
+    if (fromSync)
+        deferSyncTransportUi (listIdx, padIndex);
 
     return true;
 }
@@ -13019,17 +13036,6 @@ bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float pr
         ~SyncScope() { if (restore) flag.store (false); }
     } scope { syncApplying, ! wasSyncing };
 
-    if (listIndex >= 0 && listIndex < allLists.size() && listIndex != activeListIndex)
-    {
-        auto* list = allLists[listIndex];
-
-        if (list != nullptr)
-        {
-            sidebarPanel.setSelectedIndex (listIndex);
-            loadList (listIndex, sidebarPanel.getListTrackCount (listIndex), list->isGrid);
-        }
-    }
-
     if (listIndex < 0 || listIndex >= allLists.size())
         return false;
 
@@ -13041,19 +13047,66 @@ bool MainComponent::triggerExternalSyncGo (int listIndex, int padIndex, float pr
     const auto mode = (showcontrol::backup::SyncPlayMode) playMode;
 
     if (! list->isGrid || mode == showcontrol::backup::SyncPlayMode::bgmPlay)
-        return triggerBgmSyncPlayAtIndex (padIndex);
+        return triggerBgmSyncPlayAtIndex (padIndex, listIndex);
 
     if (mode == showcontrol::backup::SyncPlayMode::cueListPlay
         || (mode == showcontrol::backup::SyncPlayMode::legacy && list->useCueListPanel))
-        return triggerCueListPlay (padIndex, true);
+        return triggerCueListPlay (padIndex, true, listIndex);
 
-    return triggerCueGo (padIndex, true);
+    return triggerCueGo (padIndex, true, listIndex);
+}
+
+void MainComponent::deferSyncTransportUi (int listIndex, int padIndex)
+{
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    juce::MessageManager::callAsync ([safeThis, listIndex, padIndex]
+    {
+        if (safeThis == nullptr)
+            return;
+
+        if (listIndex >= 0 && listIndex < safeThis->allLists.size()
+            && listIndex != safeThis->activeListIndex)
+        {
+            auto* list = safeThis->allLists[listIndex];
+
+            if (list != nullptr)
+            {
+                safeThis->sidebarPanel.setSelectedIndex (listIndex);
+                safeThis->loadList (listIndex,
+                                    safeThis->sidebarPanel.getListTrackCount (listIndex),
+                                    list->isGrid);
+            }
+        }
+
+        if (listIndex < 0 || listIndex >= safeThis->allLists.size())
+            return;
+
+        auto* list = safeThis->allLists[listIndex];
+
+        if (list == nullptr || padIndex < 0 || padIndex >= list->pads.size())
+            return;
+
+        if (auto* pad = list->pads[padIndex])
+        {
+            safeThis->armPad (pad);
+            safeThis->forwardUiSelectionToPad (pad, false);
+            safeThis->inspectorPanel.selectPad (pad);
+            safeThis->refreshSidebarPlayingStatus();
+            safeThis->updateMainDeskDisplay();
+        }
+    });
 }
 
 void MainComponent::triggerGlobalStopAll()
 {
     if (shouldBlockLocalPlaybackCommand())
         return;
+
+    broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+    {
+        b.sendStopAll();
+    });
 
     for (auto* list : allLists)
     {
@@ -13066,11 +13119,6 @@ void MainComponent::triggerGlobalStopAll()
                 pad->triggerStop();
         }
     }
-
-    broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
-    {
-        b.sendStopAll();
-    });
 }
 
 void MainComponent::triggerGlobalPauseAll()
@@ -13548,12 +13596,14 @@ void MainComponent::handleSyncListReorder (int fromIndex, int toIndex)
     moveListInProject (fromIndex, toIndex);
 }
 
-bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
+bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex, int listIndexOverride)
 {
-    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+    const int listIdx = listIndexOverride >= 0 ? listIndexOverride : activeListIndex;
+
+    if (listIdx < 0 || listIdx >= allLists.size())
         return false;
 
-    auto* list = allLists[activeListIndex];
+    auto* list = allLists[listIdx];
 
     if (list == nullptr || list->isGrid)
         return false;
@@ -13567,10 +13617,6 @@ bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
         return false;
 
     targetPad->prepareForInstantPlay();
-    selectedBgmIndex = padIndex;
-    selectedPadIndices.clear();
-    selectedPadIndices.add (padIndex);
-    forwardUiSelectionToPad (targetPad, true);
 
     for (auto* other : list->pads)
     {
@@ -13579,6 +13625,28 @@ bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex)
     }
 
     targetPad->triggerPlay();
+
+    if (listIndexOverride >= 0)
+    {
+        deferSyncTransportUi (listIdx, padIndex);
+        juce::MessageManager::callAsync ([this, targetPad]
+        {
+            if (targetPad != nullptr)
+            {
+                selectedBgmIndex = targetPad->getPadIndex();
+                selectedPadIndices.clear();
+                selectedPadIndices.add (targetPad->getPadIndex());
+                syncUiToPlayingPad (targetPad, false);
+                refreshMasterDeckBgmTransportState();
+            }
+        });
+        return true;
+    }
+
+    selectedBgmIndex = padIndex;
+    selectedPadIndices.clear();
+    selectedPadIndices.add (padIndex);
+    forwardUiSelectionToPad (targetPad, true);
     syncUiToPlayingPad (targetPad, false);
     refreshMasterDeckBgmTransportState();
     return true;
@@ -13904,7 +13972,40 @@ void MainComponent::handleSyncSelection (int listIndex,
                                        + " pad=" + juce::String (padIndex)
                                        + " view=" + juce::String (viewMode));
 
-    applySyncedSelection (listIndex, padIndex, viewMode, multiIndices);
+    scheduleSyncedSelectionApply (listIndex, padIndex, viewMode, multiIndices);
+}
+
+void MainComponent::scheduleSyncedSelectionApply (int listIndex,
+                                                  int padIndex,
+                                                  int viewMode,
+                                                  const juce::Array<int>& multiIndices)
+{
+    pendingSelectionList  = listIndex;
+    pendingSelectionPad   = padIndex;
+    pendingSelectionView  = viewMode;
+    pendingSelectionMulti = multiIndices;
+
+    if (pendingSelectionSyncTimer == nullptr)
+    {
+        pendingSelectionSyncTimer = std::make_unique<PendingSelectionSyncTimer>();
+        pendingSelectionSyncTimer->onFire = [this] { flushPendingSyncedSelection(); };
+    }
+
+    pendingSelectionSyncTimer->startTimer (showcontrol::backup::kSelectionSyncDebounceMs);
+}
+
+void MainComponent::flushPendingSyncedSelection()
+{
+    if (pendingSelectionSyncTimer != nullptr)
+        pendingSelectionSyncTimer->stopTimer();
+
+    if (pendingSelectionList < 0)
+        return;
+
+    applySyncedSelection (pendingSelectionList,
+                          pendingSelectionPad,
+                          pendingSelectionView,
+                          pendingSelectionMulti);
 }
 
 void MainComponent::updateBackupConnectionUi()
@@ -14144,12 +14245,30 @@ void MainComponent::startBackupDiscoveryResponder()
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
     backupDiscoverySocket->setEnablePortReuse (true);
 
-    if (! backupDiscoverySocket->bindToPort (discoveryPort))
+    const auto bindAddress = showcontrol::backup::getLocalLanBindAddress();
+    bool bound = false;
+
+    if (bindAddress.isNotEmpty())
+        bound = backupDiscoverySocket->bindToPort (discoveryPort, bindAddress);
+
+    if (! bound)
+        bound = backupDiscoverySocket->bindToPort (discoveryPort);
+
+    if (! bound)
     {
         backupDiscoverySocket.reset();
-        std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort << std::endl;
+        std::cout << "[BACKUP] [WARN] Cannot bind discovery UDP " << discoveryPort;
+
+        if (bindAddress.isNotEmpty())
+            std::cout << " on " << bindAddress.toRawUTF8();
+
+        std::cout << std::endl;
         return;
     }
+
+    if (bindAddress.isNotEmpty())
+        std::cout << "[BACKUP] Discovery listening on " << bindAddress.toRawUTF8()
+                  << ":" << discoveryPort << std::endl;
 
    #if JUCE_MAC
     showcontrol::backup::mac::startLanServiceAdvertiser (discoveryPort);
@@ -14293,6 +14412,21 @@ void MainComponent::restartBackupSync()
     if (role != (int) showcontrol::backup::Role::standalone)
         listenEnabled = true;
 
+#if JUCE_WINDOWS
+    const bool needsFirewall = listenEnabled
+                               || role != (int) showcontrol::backup::Role::standalone;
+
+    if (needsFirewall)
+    {
+        const bool fwReady = showcontrol::backup::win::ensureWindowsFirewallRules (port);
+
+        juce::MessageManager::callAsync ([port, fwReady]()
+        {
+            showcontrol::backup::win::promptWindowsFirewallAccessIfNeeded (port, fwReady);
+        });
+    }
+#endif
+
     if (role == (int) showcontrol::backup::Role::primary)
     {
         backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
@@ -14307,6 +14441,8 @@ void MainComponent::restartBackupSync()
     if (role == (int) showcontrol::backup::Role::backup)
     {
         lastPrimaryHeartbeatRxMs = 0;
+        pendingSelectionSyncTimer.reset();
+        pendingSelectionList = -1;
 
         if (peers.size() > 0)
         {
@@ -14418,15 +14554,53 @@ void MainComponent::restartBackupSync()
     }
 
     auto listener = std::make_unique<showcontrol::osc::ShowOscListener> (callbacks);
+    const auto bindAddress = showcontrol::backup::getLocalLanBindAddress();
 
-    if (! listener->start (port))
+    if (! listener->start (port, bindAddress))
     {
-        std::cout << "[BACKUP] [WARN] Cannot bind UDP port " << port << std::endl;
+        std::cout << "[BACKUP] [WARN] Cannot bind UDP port " << port;
+
+        if (bindAddress.isNotEmpty())
+            std::cout << " on " << bindAddress.toRawUTF8();
+
+        std::cout << " — kiểm tra firewall Windows (inbound UDP "
+                  << port << ") khi vai trò Máy phụ." << std::endl;
+
+       #if JUCE_WINDOWS
+        const int fwPort = port;
+        juce::MessageManager::callAsync ([fwPort]()
+        {
+            const int discoveryPort = fwPort + 1;
+            const auto title = showcontrol::localization::tr (u8"ShowCue — Không mở được cổng UDP");
+            const auto body  = showcontrol::localization::tr (
+                u8"Không thể lắng nghe UDP cổng ")
+                + juce::String (fwPort) + "-" + juce::String (discoveryPort)
+                + showcontrol::localization::tr (
+                u8". Windows Firewall thường chặn inbound — chọn «Cấp quyền» để mở rule.");
+
+            juce::AlertWindow::showOkCancelBox (
+                juce::AlertWindow::WarningIcon,
+                title,
+                body,
+                showcontrol::localization::tr (u8"Cấp quyền (UAC)"),
+                showcontrol::localization::tr (u8"Đóng"),
+                nullptr,
+                juce::ModalCallbackFunction::create ([fwPort] (int result)
+                {
+                    if (result == 1)
+                        showcontrol::backup::win::requestElevatedFirewallSetup (fwPort);
+                }));
+        });
+       #endif
+
         updateBackupConnectionUi();
         return;
     }
 
-    std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
+    if (bindAddress.isNotEmpty())
+        std::cout << "[BACKUP] Listening on " << bindAddress.toRawUTF8() << ":" << port << std::endl;
+    else
+        std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
     oscListener = std::move (listener);
     updateBackupConnectionUi();
 }
