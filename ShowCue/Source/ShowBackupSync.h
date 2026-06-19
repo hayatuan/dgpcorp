@@ -23,6 +23,7 @@ enum class SyncPlayMode : int
 inline constexpr int kDefaultSyncPort           = 9000;
 inline constexpr int kHeartbeatIntervalMs         = 400;
 inline constexpr int kHeartbeatStaleThresholdMs   = 5000;
+inline constexpr int kHeartbeatOfflineProbeMs     = 5000;
 inline constexpr int kPeerHealthIntervalMs        = 1000;
 inline constexpr int kPeerPingTimeoutMs           = 400;
 inline constexpr int kLanAnnounceIntervalMs       = 1500;
@@ -62,6 +63,9 @@ inline constexpr const char* padReorder = "/showcue/sync/padReorder";
 inline constexpr const char* padOrder   = "/showcue/sync/padOrder";
 inline constexpr const char* listPatch   = "/showcue/sync/listPatch";
 inline constexpr const char* listReorder = "/showcue/sync/listReorder";
+inline constexpr const char* configBegin = "/showcue/sync/configBegin";
+inline constexpr const char* configChunk = "/showcue/sync/configChunk";
+inline constexpr const char* configEnd   = "/showcue/sync/configEnd";
 inline constexpr const char* legacyPanic = "/showcue/panic";
 inline constexpr const char* legacyGo    = "/showcue/go";
 } // namespace addresses
@@ -314,6 +318,31 @@ public:
         return sendMessage (msg);
     }
 
+    bool sendConfigBegin (int transferId, int totalBytes, int chunkCount)
+    {
+        juce::OSCMessage msg (addresses::configBegin);
+        msg.addInt32 (transferId);
+        msg.addInt32 (totalBytes);
+        msg.addInt32 (chunkCount);
+        return sendMessage (msg);
+    }
+
+    bool sendConfigChunk (int transferId, int chunkIndex, const juce::String& chunkUtf8)
+    {
+        juce::OSCMessage msg (addresses::configChunk);
+        msg.addInt32 (transferId);
+        msg.addInt32 (chunkIndex);
+        msg.addString (chunkUtf8);
+        return sendMessage (msg, false);
+    }
+
+    bool sendConfigEnd (int transferId)
+    {
+        juce::OSCMessage msg (addresses::configEnd);
+        msg.addInt32 (transferId);
+        return sendMessage (msg);
+    }
+
 private:
     struct PeerSender
     {
@@ -326,7 +355,7 @@ private:
         return sendMessage (juce::OSCMessage (address));
     }
 
-    bool sendMessage (const juce::OSCMessage& message)
+    bool sendMessage (const juce::OSCMessage& message, bool logTx = true)
     {
         if (! isConnected())
             return false;
@@ -338,8 +367,17 @@ private:
             if (peer->sender.send (message))
             {
                 anyOk = true;
-                logSyncEvent ("TX " + message.getAddressPattern().toString()
-                              + " -> " + peer->host + ":" + juce::String (targetPort));
+
+                if (! logTx)
+                    continue;
+
+                const auto addr = message.getAddressPattern().toString();
+
+                if (addr != addresses::heartbeat && addr != addresses::configChunk)
+                {
+                    logSyncEvent ("TX " + addr + " -> " + peer->host + ":"
+                                  + juce::String (targetPort));
+                }
             }
         }
 

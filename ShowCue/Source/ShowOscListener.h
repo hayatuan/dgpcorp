@@ -22,6 +22,9 @@ struct ShowOscCallbacks
     std::function<void (int listIndex, const juce::StringArray& padKeysInOrder)> onPadOrder;
     std::function<void (const showcontrol::backup::listpatch::PatchMessage&)> onListPatch;
     std::function<void (int fromIndex, int toIndex)> onListReorder;
+    std::function<void (int transferId, int totalBytes, int chunkCount)> onConfigBegin;
+    std::function<void (int transferId, int chunkIndex, const juce::String& chunkUtf8)> onConfigChunk;
+    std::function<void (int transferId)> onConfigEnd;
 };
 
 /** OSC Inbound — điều khiển show / đồng bộ Primary→Backup trên LAN. */
@@ -36,8 +39,7 @@ public:
 
     ~ShowOscListener() override
     {
-        disconnect();
-        removeListener (this);
+        stop();
     }
 
     bool start (int port, const juce::String& bindAddress = {})
@@ -362,6 +364,35 @@ private:
             const int fromIndex = readIntArg (message, 0, -1);
             const int toIndex   = readIntArg (message, 1, -1);
             callbacks.onListReorder (fromIndex, toIndex);
+            return;
+        }
+
+        if (address == showcontrol::backup::addresses::configBegin)
+        {
+            if (! callbacks.onConfigBegin)
+                return;
+
+            callbacks.onConfigBegin (readIntArg (message, 0, -1),
+                                     readIntArg (message, 1, 0),
+                                     readIntArg (message, 2, 0));
+            return;
+        }
+
+        if (address == showcontrol::backup::addresses::configChunk)
+        {
+            if (! callbacks.onConfigChunk || message.size() < 3 || ! message[2].isString())
+                return;
+
+            callbacks.onConfigChunk (readIntArg (message, 0, -1),
+                                     readIntArg (message, 1, -1),
+                                     message[2].getString());
+            return;
+        }
+
+        if (address == showcontrol::backup::addresses::configEnd)
+        {
+            if (callbacks.onConfigEnd)
+                callbacks.onConfigEnd (readIntArg (message, 0, -1));
         }
     }
 

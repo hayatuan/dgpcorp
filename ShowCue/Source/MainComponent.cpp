@@ -12,6 +12,8 @@
 #include "ShowAppPreferences.h"
 #include "ShowApplicationState.h"
 #include "ShowProjectPersistence.h"
+#include "ShowProjectPathRemap.h"
+#include "ShowBackupConfigSync.h"
 #include "ShowOscListener.h"
 #include "ShowBackupSync.h"
 #include "ShowBackupLanDiscovery.h"
@@ -54,6 +56,47 @@ juce::String formatConfigurationPackageStats (
          + juce::String (summary.trackCount)
          + " "
          + showcontrol::localization::tr (u8"track");
+}
+
+juce::String formatPathRemapSyncMessage (
+    const showcontrol::persistence::pathremap::RemapSummary& summary)
+{
+    juce::String message = showcontrol::localization::tr (
+        u8"Đã nhận cấu hình từ máy chính.\n"
+        u8"Đường dẫn file nhạc được giữ theo máy phụ (khớp theo tên file trong cùng list).");
+
+    if (summary.remappedCount > 0)
+    {
+        message += "\n"
+                 + showcontrol::localization::tr (u8"Đã map %COUNT% track sang đường dẫn local.")
+                       .replace ("%COUNT%", juce::String (summary.remappedCount));
+    }
+
+    if (summary.unmatchedCount > 0)
+    {
+        message += "\n\n"
+                 + showcontrol::localization::tr (
+                     u8"Cảnh báo: một số track chưa có file tương ứng trên máy phụ:");
+
+        for (int i = 0; i < juce::jmin (6, summary.unmatchedTokens.size()); ++i)
+            message += "\n• " + summary.unmatchedTokens[i];
+
+        if (summary.unmatchedTokens.size() > 6)
+            message += "\n…";
+    }
+
+    message += "\n\n"
+             + showcontrol::localization::tr (
+                 u8"GO/Stop đồng bộ theo vị trí cue — thứ tự list phải khớp sau khi đồng bộ.");
+
+    return message;
+}
+
+juce::String remapProjectXmlKeepingLocalPaths (const juce::String& incomingProjectXml,
+                                                const juce::String& localProjectXml)
+{
+    return showcontrol::persistence::pathremap::remapIncomingProjectXml (
+        incomingProjectXml, localProjectXml);
 }
 
 void showConfigurationPackageAlert (juce::AlertWindow::AlertIconType icon,
@@ -1165,6 +1208,10 @@ void MainComponent::shutdownActiveTimers() noexcept
     startupGuardTimer.reset();
     deferredIdlePadsTimer.reset();
     pendingSelectionSyncTimer.reset();
+    selectionSyncTxTimer.reset();
+    backupSyncRestartTimer.reset();
+    if (configBroadcastTimer != nullptr)
+        configBroadcastTimer->stopTimer();
     panicFadeDispatchScheduled.store (false, std::memory_order_release);
 
     if (padReorderOverlay != nullptr)
@@ -1179,7 +1226,9 @@ void MainComponent::shutdownActiveTimers() noexcept
 
 void MainComponent::prepareForApplicationShutdown()
 {
+    applicationShuttingDown.store (true, std::memory_order_release);
     shutdownActiveTimers();
+    stopBackupNetworking();
     OutputBusNamingOverlay::dismissActive (false);
 
     if (updateChecker != nullptr)
@@ -1197,9 +1246,9 @@ void MainComponent::prepareForApplicationShutdown()
 
 MainComponent::~MainComponent()
 {
+    applicationShuttingDown.store (true, std::memory_order_release);
     shutdownActiveTimers();
-    oscListener.reset();
-    backupBroadcaster.reset();
+    stopBackupNetworking();
     updateChecker.reset();
 
     juce::Desktop::getInstance().removeDarkModeSettingListener (this);
@@ -1558,7 +1607,8 @@ void MainComponent::wireSoundPad (SoundPad* pad)
             inspectorPanel.selectPad (p);
         }
 
-        saveProject();
+        if (! isInitialLoading.load (std::memory_order_relaxed))
+            saveProject();
     };
 }
 
@@ -8681,7 +8731,7 @@ void MainComponent::finishDeferredStartup()
     if (updateChecker != nullptr)
         updateChecker->checkForUpdatesAsync (false);
 
-    restartBackupSync();
+    scheduleRestartBackupSync (200);
 }
 
 void MainComponent::triggerManualMusicIngestion()
@@ -11622,7 +11672,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
 
     callbacks.onBackupSettingsChanged = [this]
     {
-        restartBackupSync();
+        scheduleRestartBackupSync();
         updateBackupConnectionUi();
     };
 
@@ -11649,6 +11699,11 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
         reconnectBackupSync();
     };
 
+    callbacks.onSyncProjectConfigToBackups = [this]
+    {
+        broadcastProjectConfigToBackups();
+    };
+
     auto* dialog = new GlobalPreferencesDialog (deviceManager,
                                                 isDarkMode,
                                                 multiOutputCallback.getAllBusNames(),
@@ -11668,7 +11723,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
 
     if (auto* dw = opts.launchAsync())
     {
-        dw->centreWithSize (680, 800);
+        GlobalPreferencesDialog::configureDialogWindow (*dw);
         dw->grabKeyboardFocus();
         dialog->grabKeyboardFocus();
 
@@ -12939,6 +12994,12 @@ void MainComponent::handleAsyncUpdate()
 
 void MainComponent::executeActualDiskWriteJSON()
 {
+    if (isInitialLoading.load (std::memory_order_relaxed))
+        return;
+
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     StateOperationScope stateGuard (isPerformingStateOperation);
 
     if (! stateGuard.enteredSuccessfully())
@@ -12950,6 +13011,12 @@ void MainComponent::executeActualDiskWriteJSON()
 void MainComponent::saveApplicationState()
 {
     if (isOperatingState())
+        return;
+
+    if (isInitialLoading.load (std::memory_order_relaxed))
+        return;
+
+    if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
 
     triggerAsyncUpdate();
@@ -13230,7 +13297,7 @@ void MainComponent::broadcastPadListOrderIfPrimary (int listIndex)
     juce::StringArray keys;
 
     for (auto* pad : list->pads)
-        keys.add (showcontrol::backup::padpatch::makePadSyncKey (pad));
+        keys.add (showcontrol::backup::padpatch::makePadSyncKey (listIndex, pad));
 
     broadcastSyncIfPrimary ([listIndex, keys] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
     {
@@ -13431,7 +13498,7 @@ void MainComponent::applySyncedPadListOrder (int listIndex, const juce::StringAr
             if (used[i])
                 continue;
 
-            if (showcontrol::backup::padpatch::makePadSyncKey (list->pads[i]).equalsIgnoreCase (key))
+            if (showcontrol::backup::padpatch::padSyncKeysMatch (listIndex, list->pads[i], key))
             {
                 match = i;
                 break;
@@ -13556,8 +13623,6 @@ void MainComponent::applySyncedListPatch (const showcontrol::backup::listpatch::
         sidebarPanel.setListThemeColour (patch.listIndex, list->themeColour);
         sidebarPanel.repaint();
     }
-
-    triggerSave();
 }
 
 void MainComponent::handleSyncListPatch (const showcontrol::backup::listpatch::PatchMessage& patch)
@@ -13657,6 +13722,9 @@ void MainComponent::setBackupTakeoverActive (bool active)
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::standalone)
         active = false;
 
+    if (backupTakeoverActive == active)
+        return;
+
     backupTakeoverActive = active;
     updateBackupConnectionUi();
 
@@ -13670,6 +13738,9 @@ void MainComponent::setBackupTakeoverActive (bool active)
 
 void MainComponent::handleSyncPanic()
 {
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
@@ -13688,6 +13759,9 @@ void MainComponent::handleSyncPanic()
 
 void MainComponent::handleSyncGo (int listIndex, int padIndex, float preWaitMs, int playMode)
 {
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
@@ -13844,6 +13918,45 @@ int MainComponent::currentSyncViewMode() const noexcept
 
 void MainComponent::broadcastSelectionSyncIfPrimary()
 {
+    scheduleSelectionSyncBroadcast();
+}
+
+void MainComponent::scheduleSelectionSyncBroadcast()
+{
+    if (! deferredStartupComplete
+        || applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
+    if (syncApplying.load (std::memory_order_acquire))
+        return;
+
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::primary)
+        return;
+
+    if (backupBroadcaster == nullptr || ! backupBroadcaster->isConnected())
+        return;
+
+    if (activeListIndex < 0)
+        return;
+
+    if (selectionSyncTxTimer == nullptr)
+    {
+        selectionSyncTxTimer = std::make_unique<PendingSelectionSyncTimer>();
+        selectionSyncTxTimer->onFire = [this] { flushSelectionSyncBroadcast(); };
+    }
+
+    selectionSyncTxTimer->startTimer (showcontrol::backup::kSelectionSyncDebounceMs);
+}
+
+void MainComponent::flushSelectionSyncBroadcast()
+{
+    if (selectionSyncTxTimer != nullptr)
+        selectionSyncTxTimer->stopTimer();
+
+    if (! deferredStartupComplete
+        || applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     if (syncApplying.load (std::memory_order_acquire))
         return;
 
@@ -13962,6 +14075,9 @@ void MainComponent::handleSyncSelection (int listIndex,
                                          int viewMode,
                                          const juce::Array<int>& multiIndices)
 {
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
         return;
 
@@ -13996,6 +14112,9 @@ void MainComponent::scheduleSyncedSelectionApply (int listIndex,
 
 void MainComponent::flushPendingSyncedSelection()
 {
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
     if (pendingSelectionSyncTimer != nullptr)
         pendingSelectionSyncTimer->stopTimer();
 
@@ -14107,6 +14226,9 @@ void MainComponent::updateBackupConnectionUi()
 
 void MainComponent::tickBackupPeerHealth()
 {
+    if (! deferredStartupComplete)
+        return;
+
     const int role = showcontrol::prefs::loadBackupRole();
 
     if (role == (int) showcontrol::backup::Role::standalone)
@@ -14200,7 +14322,7 @@ void MainComponent::tickBackupPeerHealth()
 void MainComponent::reconnectBackupSync()
 {
     lastPrimaryHeartbeatRxMs = 0;
-    restartBackupSync();
+    scheduleRestartBackupSync (0);
     updateBackupConnectionUi();
 }
 
@@ -14216,13 +14338,18 @@ void MainComponent::scanLanPeersAsync (
 
     stopBackupDiscoveryResponder();
 
-    std::thread ([wantRole, syncPort, onDone = std::move (onDone), this]() mutable
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    std::thread ([safeThis, wantRole, syncPort, onDone = std::move (onDone)]() mutable
     {
         const auto peers = showcontrol::backup::scanLanPeers (wantRole, syncPort);
 
-        juce::MessageManager::callAsync ([this, peers, onDone = std::move (onDone)]() mutable
+        juce::MessageManager::callAsync ([safeThis, peers, onDone = std::move (onDone)]() mutable
         {
-            startBackupDiscoveryResponder();
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->startBackupDiscoveryResponder();
 
             if (onDone)
                 onDone (peers);
@@ -14287,6 +14414,9 @@ void MainComponent::stopBackupDiscoveryResponder()
 
 void MainComponent::pollBackupDiscoverySocket()
 {
+    if (! deferredStartupComplete)
+        return;
+
     if (backupDiscoverySocket == nullptr)
         return;
 
@@ -14352,6 +14482,9 @@ void MainComponent::pollBackupDiscoverySocket()
 
 void MainComponent::tickBackupHeartbeat()
 {
+    if (! deferredStartupComplete)
+        return;
+
     const int role = showcontrol::prefs::loadBackupRole();
     const auto now = juce::Time::getMillisecondCounter();
 
@@ -14369,21 +14502,81 @@ void MainComponent::tickBackupHeartbeat()
     if (role != (int) showcontrol::backup::Role::primary)
         return;
 
+    if (backupBroadcaster == nullptr || ! backupBroadcaster->isConnected())
+        return;
+
+    const bool peerReachable = hasReachableBackupPeer();
+    const int intervalMs     = peerReachable ? showcontrol::backup::kHeartbeatIntervalMs
+                                               : showcontrol::backup::kHeartbeatOfflineProbeMs;
+
     if (lastHeartbeatTickMs != 0
-        && now - lastHeartbeatTickMs < (juce::uint32) showcontrol::backup::kHeartbeatIntervalMs)
+        && now - lastHeartbeatTickMs < (juce::uint32) intervalMs)
         return;
 
     lastHeartbeatTickMs = now;
+    backupBroadcaster->sendHeartbeat (++heartbeatSendSeq);
+}
 
-    if (backupBroadcaster != nullptr && backupBroadcaster->isConnected())
-        backupBroadcaster->sendHeartbeat (++heartbeatSendSeq);
+bool MainComponent::hasReachableBackupPeer() const noexcept
+{
+    if (backupPeerStatuses.isEmpty())
+        return false;
+
+    for (const auto& status : backupPeerStatuses)
+    {
+        if (status.quality != showcontrol::backup::LinkQuality::offline)
+            return true;
+    }
+
+    return false;
+}
+
+void MainComponent::scheduleRestartBackupSync (int delayMs)
+{
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
+    if (backupSyncRestartTimer == nullptr)
+    {
+        backupSyncRestartTimer = std::make_unique<OneShotApplicationTimer>();
+        backupSyncRestartTimer->onFire = [this] { restartBackupSync(); };
+    }
+
+    backupSyncRestartTimer->startMs (juce::jmax (1, delayMs));
+}
+
+void MainComponent::stopBackupNetworking() noexcept
+{
+    pendingSelectionSyncTimer.reset();
+    selectionSyncTxTimer.reset();
+    pendingSelectionList = -1;
+
+    if (padPatchBroadcastTimer != nullptr)
+        padPatchBroadcastTimer->stopTimer();
+
+    if (configBroadcastTimer != nullptr)
+        configBroadcastTimer->stopTimer();
+
+    pendingConfigChunks.clear();
+    configTransferReceiver.reset();
+
+    if (oscListener != nullptr)
+    {
+        oscListener->stop();
+        oscListener.reset();
+    }
+
+    backupBroadcaster.reset();
+    stopBackupDiscoveryResponder();
+    backupPeerHealthPingInFlight.store (false, std::memory_order_release);
 }
 
 void MainComponent::restartBackupSync()
 {
-    oscListener.reset();
-    backupBroadcaster.reset();
-    stopBackupDiscoveryResponder();
+    if (applicationShuttingDown.load (std::memory_order_acquire))
+        return;
+
+    stopBackupNetworking();
 
     const int role     = showcontrol::prefs::loadBackupRole();
     const int port     = showcontrol::prefs::loadBackupSyncPort();
@@ -14418,12 +14611,17 @@ void MainComponent::restartBackupSync()
 
     if (needsFirewall)
     {
-        const bool fwReady = showcontrol::backup::win::ensureWindowsFirewallRules (port);
+        const int fwPort = port;
 
-        juce::MessageManager::callAsync ([port, fwReady]()
+        std::thread ([fwPort]()
         {
-            showcontrol::backup::win::promptWindowsFirewallAccessIfNeeded (port, fwReady);
-        });
+            const bool fwReady = showcontrol::backup::win::ensureWindowsFirewallRules (fwPort);
+
+            juce::MessageManager::callAsync ([fwPort, fwReady]()
+            {
+                showcontrol::backup::win::promptWindowsFirewallAccessIfNeeded (fwPort, fwReady);
+            });
+        }).detach();
     }
 #endif
 
@@ -14441,8 +14639,6 @@ void MainComponent::restartBackupSync()
     if (role == (int) showcontrol::backup::Role::backup)
     {
         lastPrimaryHeartbeatRxMs = 0;
-        pendingSelectionSyncTimer.reset();
-        pendingSelectionList = -1;
 
         if (peers.size() > 0)
         {
@@ -14544,6 +14740,18 @@ void MainComponent::restartBackupSync()
         {
             handleSyncListReorder (fromIndex, toIndex);
         };
+        callbacks.onConfigBegin = [this] (int transferId, int totalBytes, int chunkCount)
+        {
+            handleSyncConfigBegin (transferId, totalBytes, chunkCount);
+        };
+        callbacks.onConfigChunk = [this] (int transferId, int chunkIndex, const juce::String& chunkUtf8)
+        {
+            handleSyncConfigChunk (transferId, chunkIndex, chunkUtf8);
+        };
+        callbacks.onConfigEnd = [this] (int transferId)
+        {
+            handleSyncConfigEnd (transferId);
+        };
     }
     else if (role == (int) showcontrol::backup::Role::primary)
     {
@@ -14603,6 +14811,229 @@ void MainComponent::restartBackupSync()
         std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
     oscListener = std::move (listener);
     updateBackupConnectionUi();
+}
+
+juce::String MainComponent::buildProjectConfigJsonForSync() const
+{
+    auto xml = const_cast<MainComponent*> (this)->buildProjectXml();
+
+    if (xml == nullptr)
+        return {};
+
+    juce::DynamicObject::Ptr root (new juce::DynamicObject());
+    root->setProperty ("projectSchema", showcontrol::persistence::kProjectSchemaVersion);
+    root->setProperty ("appTheme", themePreferenceId);
+    root->setProperty ("appLanguage", languagePreferenceIndex);
+    root->setProperty ("projectXml", xml->toString());
+    root->setProperty ("savedAtMs", juce::Time::getMillisecondCounterHiRes());
+    root->setProperty ("configPath", showcontrol::state::getCanonicalConfigFile().getFullPathName());
+    root->setProperty ("playlist", const_cast<MainComponent*> (this)->buildPlaylistJson());
+
+    return juce::JSON::toString (juce::var (root.get()), false);
+}
+
+void MainComponent::broadcastProjectConfigToBackups()
+{
+    if (isOperatingState())
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Đồng bộ cấu hình"),
+            showcontrol::localization::tr (u8"Dừng phát trước khi đồng bộ cấu hình sang máy phụ."),
+            showcontrol::localization::tr (u8"Đã hiểu"));
+        return;
+    }
+
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::primary)
+        return;
+
+    if (backupBroadcaster == nullptr || ! backupBroadcaster->isConnected())
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Đồng bộ cấu hình"),
+            showcontrol::localization::tr (u8"Chưa có máy phụ được cấu hình hoặc chưa kết nối."),
+            showcontrol::localization::tr (u8"Đã hiểu"));
+        return;
+    }
+
+    const auto json = buildProjectConfigJsonForSync();
+
+    if (json.isEmpty())
+        return;
+
+    pendingConfigChunks       = showcontrol::backup::configsync::splitPayload (json);
+    pendingConfigTransferId   = (int) (juce::Time::getMillisecondCounter() & 0x7fffffff);
+    pendingConfigNextChunk    = 0;
+
+    if (pendingConfigChunks.isEmpty())
+        return;
+
+    backupBroadcaster->sendConfigBegin (pendingConfigTransferId,
+                                        json.getNumBytesAsUTF8(),
+                                        pendingConfigChunks.size());
+
+    if (configBroadcastTimer == nullptr)
+    {
+        configBroadcastTimer = std::make_unique<ConfigBroadcastTimer>();
+        configBroadcastTimer->onFire = [this] { tickConfigBroadcast(); };
+    }
+
+    showcontrol::backup::logSyncEvent ("TX config begin id=" + juce::String (pendingConfigTransferId)
+                                       + " bytes=" + juce::String (json.getNumBytesAsUTF8())
+                                       + " chunks=" + juce::String (pendingConfigChunks.size()));
+    tickConfigBroadcast();
+}
+
+void MainComponent::tickConfigBroadcast()
+{
+    if (backupBroadcaster == nullptr || pendingConfigChunks.isEmpty())
+    {
+        if (configBroadcastTimer != nullptr)
+            configBroadcastTimer->stopTimer();
+
+        return;
+    }
+
+    if (pendingConfigNextChunk < pendingConfigChunks.size())
+    {
+        backupBroadcaster->sendConfigChunk (pendingConfigTransferId,
+                                            pendingConfigNextChunk,
+                                            pendingConfigChunks[pendingConfigNextChunk]);
+        ++pendingConfigNextChunk;
+    }
+
+    if (pendingConfigNextChunk >= pendingConfigChunks.size())
+    {
+        backupBroadcaster->sendConfigEnd (pendingConfigTransferId);
+        showcontrol::backup::logSyncEvent ("TX config end id=" + juce::String (pendingConfigTransferId));
+        pendingConfigChunks.clear();
+
+        if (configBroadcastTimer != nullptr)
+            configBroadcastTimer->stopTimer();
+
+        return;
+    }
+
+    if (configBroadcastTimer != nullptr)
+        configBroadcastTimer->startTimer (showcontrol::backup::configsync::kInterChunkDelayMs);
+}
+
+void MainComponent::handleSyncConfigBegin (int transferId, int totalBytes, int chunkCount)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    configTransferReceiver.begin (transferId, totalBytes, chunkCount);
+    showcontrol::backup::logSyncEvent ("RX config begin id=" + juce::String (transferId)
+                                       + " bytes=" + juce::String (totalBytes)
+                                       + " chunks=" + juce::String (chunkCount));
+}
+
+void MainComponent::handleSyncConfigChunk (int transferId, int chunkIndex, const juce::String& chunkUtf8)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    configTransferReceiver.addChunk (transferId, chunkIndex, chunkUtf8);
+}
+
+void MainComponent::handleSyncConfigEnd (int transferId)
+{
+    if (showcontrol::prefs::loadBackupRole() != (int) showcontrol::backup::Role::backup)
+        return;
+
+    if (backupTakeoverActive)
+        return;
+
+    if (transferId != configTransferReceiver.getTransferId())
+        return;
+
+    if (! configTransferReceiver.isComplete())
+        return;
+
+    const auto payload = configTransferReceiver.takePayload();
+
+    if (payload.isEmpty())
+        return;
+
+    showcontrol::backup::logSyncEvent ("RX config end id=" + juce::String (transferId)
+                                       + " applying");
+
+    applyImportedProjectConfig (payload);
+}
+
+void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
+{
+    if (configJson.isEmpty())
+        return;
+
+    const auto parsed = juce::JSON::parse (configJson);
+
+    if (auto* obj = parsed.getDynamicObject())
+    {
+        const int jsonTheme = static_cast<int> (obj->getProperty ("appTheme"));
+        const int jsonLang  = static_cast<int> (obj->getProperty ("appLanguage"));
+
+        if (jsonTheme >= 1 && jsonTheme <= 3)
+            themePreferenceId = jsonTheme;
+
+        if (jsonLang >= 0 && jsonLang <= 2)
+            languagePreferenceIndex = jsonLang;
+    }
+
+    const auto projectXml = parsed.getProperty ("projectXml", {}).toString();
+
+    if (projectXml.isEmpty())
+        return;
+
+    juce::String localProjectXml;
+
+    if (auto localXml = buildProjectXml())
+        localProjectXml = localXml->toString();
+
+    const auto remappedProjectXml = remapProjectXmlKeepingLocalPaths (projectXml, localProjectXml);
+    const auto remapSummary = showcontrol::persistence::pathremap::summarizeRemap (
+        projectXml, remappedProjectXml);
+
+    juce::var configToSave = parsed;
+
+    if (auto* obj = configToSave.getDynamicObject())
+    {
+        obj->setProperty ("projectXml", remappedProjectXml);
+        obj->setProperty ("configPath", showcontrol::state::getCanonicalConfigFile().getFullPathName());
+    }
+
+    const juce::String configJsonToSave = juce::JSON::toString (configToSave, false);
+
+    if (! showcontrol::persistence::installImportedConfiguration (configJsonToSave, remappedProjectXml))
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Đồng bộ cấu hình"),
+            showcontrol::localization::tr (u8"Không ghi được cấu hình nhận từ máy chính."),
+            showcontrol::localization::tr (u8"Đã hiểu"));
+        return;
+    }
+
+    forceStopActiveAudioForSafety();
+    loadApplicationState();
+    applyThemePreference (themePreferenceId);
+    setAppLanguage (languagePreferenceIndex);
+    scheduleRestartBackupSync();
+    updateBackupConnectionUi();
+
+    juce::AlertWindow::showMessageBoxAsync (
+        juce::AlertWindow::InfoIcon,
+        showcontrol::localization::tr (u8"Đồng bộ cấu hình"),
+        formatPathRemapSyncMessage (remapSummary),
+        showcontrol::localization::tr (u8"Đã hiểu"));
 }
 
 
@@ -14734,8 +15165,27 @@ void MainComponent::importProjectShowcuePackage()
                 if (safeThis == nullptr || result != 0)
                     return;
 
-                if (! showcontrol::persistence::installImportedConfiguration (package.configJson,
-                                                                              package.projectXml))
+                juce::String localProjectXml;
+
+                if (auto localXml = safeThis->buildProjectXml())
+                    localProjectXml = localXml->toString();
+
+                const auto remappedProjectXml = remapProjectXmlKeepingLocalPaths (
+                    package.projectXml, localProjectXml);
+
+                juce::var configToSave = juce::JSON::parse (package.configJson);
+
+                if (auto* obj = configToSave.getDynamicObject())
+                {
+                    obj->setProperty ("projectXml", remappedProjectXml);
+                    obj->setProperty ("configPath",
+                                      showcontrol::state::getCanonicalConfigFile().getFullPathName());
+                }
+
+                const juce::String configJsonToSave = juce::JSON::toString (configToSave, false);
+
+                if (! showcontrol::persistence::installImportedConfiguration (configJsonToSave,
+                                                                              remappedProjectXml))
                 {
                     showConfigurationPackageAlert (juce::AlertWindow::WarningIcon,
                         showcontrol::localization::tr (u8"Nhập file cấu hình"),
@@ -14746,7 +15196,7 @@ void MainComponent::importProjectShowcuePackage()
                 safeThis->forceStopActiveAudioForSafety();
                 safeThis->loadApplicationState();
                 safeThis->applyThemePreference (safeThis->themePreferenceId);
-                safeThis->restartBackupSync();
+                safeThis->scheduleRestartBackupSync();
                 safeThis->updateBackupConnectionUi();
 
                 const juce::String body =
@@ -14766,6 +15216,12 @@ void MainComponent::importProjectShowcuePackage()
 void MainComponent::triggerSave()
 {
     if (isOperatingState())
+        return;
+
+    if (isInitialLoading.load (std::memory_order_relaxed))
+        return;
+
+    if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
 
     triggerAsyncUpdate();

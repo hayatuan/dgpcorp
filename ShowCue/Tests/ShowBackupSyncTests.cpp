@@ -2,6 +2,8 @@
 #include "../Source/ShowAppPreferences.h"
 #include "../Source/ShowBackupSync.h"
 #include "../Source/ShowBackupLanDiscovery.h"
+#include "../Source/ShowBackupConfigSync.h"
+#include "../Source/ShowProjectPathRemap.h"
 
 class ShowBackupSyncTests final : public juce::UnitTest
 {
@@ -218,6 +220,32 @@ public:
         showcontrol::backup::ShowBackupSyncBroadcaster broadcaster2;
         expect (broadcaster2.configure ("127.0.0.1", 9001));
         expect (broadcaster2.sendSelection (1, 4, 0, selectionMulti));
+
+        beginTest ("config sync chunk round-trip");
+        const juce::String sampleJson = R"({"projectXml":"<ShowCue/>","playlist":[]})";
+        const auto parts = showcontrol::backup::configsync::splitPayload (sampleJson);
+        expect (parts.size() > 0);
+
+        showcontrol::backup::configsync::Receiver receiver;
+        expect (receiver.begin (42, sampleJson.getNumBytesAsUTF8(), parts.size()));
+
+        for (int i = 0; i < parts.size(); ++i)
+            expect (receiver.addChunk (42, i, parts[i]));
+
+        expect (receiver.isComplete());
+        expectEquals (receiver.takePayload(), sampleJson);
+
+        beginTest ("cross-platform path remap");
+        const juce::String localXml =
+            R"(<ShowControlProject><List name="A"><Pad index="0" file="/Users/show/intro.wav"/><Pad index="1" file="/Users/show/outro.wav"/></List></ShowControlProject>)";
+        const juce::String incomingXml =
+            R"(<ShowControlProject><List name="A"><Pad index="0" file="D:\Show\intro.wav"/><Pad index="1" file="D:\Show\missing.wav"/></List></ShowControlProject>)";
+        const auto remapped = showcontrol::persistence::pathremap::remapIncomingProjectXml (
+            incomingXml, localXml);
+        expect (remapped.contains ("/Users/show/intro.wav"));
+        expect (remapped.contains ("missing.wav"));
+        const auto summary = showcontrol::persistence::pathremap::summarizeRemap (incomingXml, remapped);
+        expect (summary.remappedCount + summary.unchangedCount >= 1);
     }
 };
 

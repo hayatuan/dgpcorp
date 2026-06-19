@@ -34,4 +34,8 @@ target_link_libraries(ShowCueTests PRIVATE
 
 juce_generate_juce_header(ShowCueTests)
 
+if(MSVC)
+    target_compile_options(ShowCueTests PRIVATE /utf-8)
+endif()
+
 add_test(NAME ShowCueTests COMMAND $<TARGET_FILE:ShowCueTests>)

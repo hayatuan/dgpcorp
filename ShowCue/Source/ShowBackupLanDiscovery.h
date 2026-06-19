@@ -351,7 +351,8 @@ inline void sendUnicastDiscoverSweep (juce::DatagramSocket& socket,
 inline void sendDiscoverProbes (juce::DatagramSocket& socket,
                               const juce::Array<LanScanTarget>& targets,
                               int discoveryPort,
-                              const juce::String& probe)
+                              const juce::String& probe,
+                              bool includeSubnetSweep = false)
 {
     const int bytes = (int) probe.getNumBytesAsUTF8();
     const char* data = probe.toRawUTF8();
@@ -360,10 +361,11 @@ inline void sendDiscoverProbes (juce::DatagramSocket& socket,
     {
         socket.write (target.broadcastAddress, discoveryPort, data, bytes);
         socket.write ("255.255.255.255", discoveryPort, data, bytes);
-        sendUnicastDiscoverSweep (socket, target, discoveryPort, data, bytes);
+
+        if (includeSubnetSweep)
+            sendUnicastDiscoverSweep (socket, target, discoveryPort, data, bytes);
     }
 
-    // Wi‑Fi đôi khi rớt gói broadcast đầu — gửi thêm một vòng broadcast.
     for (const auto& target : targets)
     {
         socket.write (target.broadcastAddress, discoveryPort, data, bytes);
@@ -415,18 +417,26 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
     const auto probe    = makeDiscoverProbe (wantRole, replyPort);
     const int probeStartMs = (int) juce::Time::getMillisecondCounter();
 
-    sendDiscoverProbes (socket, targets, discoveryPort, probe);
+    sendDiscoverProbes (socket, targets, discoveryPort, probe, false);
 
     const int deadline      = (int) juce::Time::getMillisecondCounter() + timeoutMs;
     const int reprobeAt     = (int) juce::Time::getMillisecondCounter() + timeoutMs / 2;
     bool reprobeSent        = false;
+    bool sweepSent          = false;
 
     while ((int) juce::Time::getMillisecondCounter() < deadline)
     {
         if (! reprobeSent && (int) juce::Time::getMillisecondCounter() >= reprobeAt)
         {
             reprobeSent = true;
-            sendDiscoverProbes (socket, targets, discoveryPort, probe);
+            sendDiscoverProbes (socket, targets, discoveryPort, probe, results.isEmpty());
+        }
+
+        if (! sweepSent && results.isEmpty()
+            && (int) juce::Time::getMillisecondCounter() >= reprobeAt + 400)
+        {
+            sweepSent = true;
+            sendDiscoverProbes (socket, targets, discoveryPort, probe, true);
         }
 
         if (socket.waitUntilReady (true, 80) <= 0)
@@ -483,7 +493,7 @@ inline juce::Array<LanPeerInfo> scanLanPeers (int wantRole,
 inline int pingShowCuePeer (const juce::String& address,
                             int syncPort,
                             int wantRole,
-                            int timeoutMs = 700)
+                            int timeoutMs = 400)
 {
     if (address.trim().isEmpty())
         return -1;

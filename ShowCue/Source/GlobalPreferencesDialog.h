@@ -589,6 +589,54 @@ private:
 class GlobalPreferencesDialog : public juce::Component
 {
 public:
+    static constexpr int kDefaultDialogWidth = 680;
+
+    /** Chiều cao nội dung tab Quyền (đo từ UI mẫu ~645px cửa sổ trên Windows). */
+    static int getDefaultContentHeight() noexcept
+    {
+        const int cardCount =
+       #if JUCE_WINDOWS
+            4;
+       #else
+            2;
+       #endif
+
+        const int cardsH = 4 + cardCount * 116 + (cardCount - 1) * 12 + 4;
+        return kMacTitleDragInset + kTabBarHeight + 1 + 28 + cardsH;
+    }
+
+    static juce::Point<int> getDefaultContentSize() noexcept
+    {
+        return { kDefaultDialogWidth, getDefaultContentHeight() };
+    }
+
+    static int getNativeTitleBarAllowance() noexcept
+    {
+       #if JUCE_WINDOWS
+        return 32;
+       #elif JUCE_MAC
+        return 28;
+       #else
+        return 28;
+       #endif
+    }
+
+    static juce::Point<int> getDefaultWindowSize() noexcept
+    {
+        const auto content = getDefaultContentSize();
+        return { content.x, content.y + getNativeTitleBarAllowance() };
+    }
+
+    static void configureDialogWindow (juce::DialogWindow& window)
+    {
+        const auto windowSize = getDefaultWindowSize();
+        window.setResizeLimits (kDefaultDialogWidth - 120,
+                                windowSize.y - 140,
+                                1200,
+                                1000);
+        window.centreWithSize (windowSize.x, windowSize.y);
+    }
+
     struct Callbacks
     {
         std::function<void (int busIndex, const juce::String& text)> onBusNameLiveChanged;
@@ -603,6 +651,7 @@ public:
                             std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
         std::function<juce::Array<showcontrol::backup::PeerRuntimeStatus>()> queryBackupPeerRuntimeStatus;
         std::function<void()> onReconnectBackupSync;
+        std::function<void()> onSyncProjectConfigToBackups;
     };
 
     GlobalPreferencesDialog (juce::AudioDeviceManager& deviceManager,
@@ -627,7 +676,10 @@ public:
 
             if (cb.onBackupSettingsChanged != nullptr)
                 cb.onBackupSettingsChanged();
+        };
 
+        backupPanel->onTakeoverToggled = [this]
+        {
             if (cb.onBackupTakeoverChanged != nullptr)
                 cb.onBackupTakeoverChanged (backupPanel->isTakeoverActive());
         };
@@ -651,6 +703,12 @@ public:
         {
             if (cb.onReconnectBackupSync != nullptr)
                 cb.onReconnectBackupSync();
+        };
+
+        backupPanel->onSyncConfigRequested = [this]
+        {
+            if (cb.onSyncProjectConfigToBackups != nullptr)
+                cb.onSyncProjectConfigToBackups();
         };
 
         if (cb.onBusNameLiveChanged != nullptr)
@@ -718,11 +776,16 @@ public:
 
         selectTab (0);
         setWantsKeyboardFocus (true);
-        setSize (680, 800);
+
+        const auto contentSize = getDefaultContentSize();
+        setSize (contentSize.x, contentSize.y);
     }
 
     ~GlobalPreferencesDialog() override
     {
+        if (backupPanel != nullptr)
+            backupPanel->haltActiveTimers();
+
         if (permissionsPanel != nullptr)
             permissionsPanel->haltActiveTimers();
     }

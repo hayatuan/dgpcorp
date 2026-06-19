@@ -31,6 +31,7 @@
 #include "StageMonitorComponent.h"
 #include "ShowUndoActions.h"
 #include "ShowBackupLanDiscovery.h"
+#include "ShowBackupConfigSync.h"
 
 namespace showcontrol::update { class ShowUpdateChecker; }
 namespace showcontrol::osc { class ShowOscListener; }
@@ -152,7 +153,9 @@ public:
     void exportProjectShowcuePackage();
     void importProjectShowcuePackage();
     void restartBackupSync();
-    void restartOscListener() { restartBackupSync(); }
+    void scheduleRestartBackupSync (int delayMs = 80);
+    void broadcastProjectConfigToBackups();
+    void restartOscListener() { scheduleRestartBackupSync(); }
     void setBackupTakeoverActive (bool active);
     bool isBackupTakeoverActive() const noexcept { return backupTakeoverActive; }
     void finalizeStartupPlaylistUi();
@@ -214,6 +217,12 @@ private:
     void handleSyncPadOrder (int listIndex, const juce::StringArray& padKeysInOrder);
     void handleSyncListPatch (const showcontrol::backup::listpatch::PatchMessage& patch);
     void handleSyncListReorder (int fromIndex, int toIndex);
+    void handleSyncConfigBegin (int transferId, int totalBytes, int chunkCount);
+    void handleSyncConfigChunk (int transferId, int chunkIndex, const juce::String& chunkUtf8);
+    void handleSyncConfigEnd (int transferId);
+    juce::String buildProjectConfigJsonForSync() const;
+    void applyImportedProjectConfig (const juce::String& configJson);
+    void tickConfigBroadcast();
     void applySyncedListPatch (const showcontrol::backup::listpatch::PatchMessage& patch);
     void applySyncedPadPatch (const showcontrol::backup::padpatch::PatchMessage& patch);
     void applySyncedPadListOrder (int listIndex, const juce::StringArray& padKeysInOrder);
@@ -231,15 +240,19 @@ private:
     void flushPendingSyncedSelection();
     void applySyncedSelection (int listIndex, int padIndex, int viewMode, const juce::Array<int>& multiIndices);
     void broadcastSelectionSyncIfPrimary();
+    void scheduleSelectionSyncBroadcast();
+    void flushSelectionSyncBroadcast();
     int currentSyncViewMode() const noexcept;
     void setPlayoutModeInternal (bool isPadMode, bool persistToDisk);
     void updateBackupConnectionUi();
     void tickBackupPeerHealth();
     void reconnectBackupSync();
     void tickBackupHeartbeat();
+    bool hasReachableBackupPeer() const noexcept;
     void pollBackupDiscoverySocket();
     void startBackupDiscoveryResponder();
     void stopBackupDiscoveryResponder();
+    void stopBackupNetworking() noexcept;
     void scanLanPeersAsync (int wantRole,
                             std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone);
     void shutdownActiveTimers() noexcept;
@@ -824,6 +837,7 @@ private:
     juce::uint32 lastLanAnnounceBroadcastMs = 0;
     juce::uint32 lastPeerHealthTickMs = 0;
     std::atomic<bool> backupPeerHealthPingInFlight { false };
+    std::atomic<bool> applicationShuttingDown { false };
     juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;
     std::unique_ptr<juce::DatagramSocket> backupDiscoverySocket;
 
@@ -836,6 +850,8 @@ private:
             if (onFire != nullptr)
                 onFire();
         }
+
+        ~PadPatchBroadcastTimer() override { stopTimer(); }
     };
 
     std::unique_ptr<PadPatchBroadcastTimer> padPatchBroadcastTimer;
@@ -852,9 +868,32 @@ private:
             if (onFire != nullptr)
                 onFire();
         }
+
+        ~PendingSelectionSyncTimer() override { stopTimer(); }
     };
 
     std::unique_ptr<PendingSelectionSyncTimer> pendingSelectionSyncTimer;
+    std::unique_ptr<PendingSelectionSyncTimer> selectionSyncTxTimer;
+    std::unique_ptr<OneShotApplicationTimer> backupSyncRestartTimer;
+
+    class ConfigBroadcastTimer final : public juce::Timer
+    {
+    public:
+        std::function<void()> onFire;
+        void timerCallback() override
+        {
+            if (onFire != nullptr)
+                onFire();
+        }
+
+        ~ConfigBroadcastTimer() override { stopTimer(); }
+    };
+
+    std::unique_ptr<ConfigBroadcastTimer> configBroadcastTimer;
+    juce::StringArray pendingConfigChunks;
+    int pendingConfigTransferId = 0;
+    int pendingConfigNextChunk  = 0;
+    showcontrol::backup::configsync::Receiver configTransferReceiver;
     int pendingSelectionList = -1;
     int pendingSelectionPad  = -1;
     int pendingSelectionView = -1;

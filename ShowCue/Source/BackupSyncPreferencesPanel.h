@@ -14,6 +14,8 @@ class BackupSyncPreferencesPanel : public juce::Component,
 {
 public:
     std::function<void()> onSettingsChanged;
+    std::function<void()> onTakeoverToggled;
+    std::function<void()> onSyncConfigRequested;
     std::function<void()> onReconnectRequested;
     std::function<void (int wantRole, std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone)> onScanLanPeers;
     std::function<juce::Array<showcontrol::backup::PeerRuntimeStatus>()> queryPeerRuntimeStatus;
@@ -22,8 +24,10 @@ public:
         : scanResultsModel (*this),
           activePeersModel (*this)
     {
-        roleLabel.setFont (showcontrol::preferences::sectionLabelFont());
-        roleLabel.setColour (juce::Label::textColourId, juce::Colours::transparentBlack);
+        panelTitleText = showcontrol::localization::tr (u8"Đồng bộ mạng");
+
+        roleLabel.setFont (showcontrol::preferences::hintFont());
+        roleLabel.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (roleLabel);
         addAndMakeVisible (roleCombo);
         roleCombo.onChange = [this]
@@ -33,15 +37,19 @@ public:
             notifyChanged();
         };
 
-        localMachineTitle.setFont (showcontrol::preferences::sectionLabelFont());
-        addChildComponent (localMachineTitle);
+        machineInfoLabel.setFont (showcontrol::preferences::hintFont());
+        machineInfoLabel.setJustificationType (juce::Justification::centred);
+        addChildComponent (machineInfoLabel);
 
-        localMachineInfoLabel.setFont (juce::FontOptions (12.5f));
-        localMachineInfoLabel.setJustificationType (juce::Justification::centredLeft);
-        addChildComponent (localMachineInfoLabel);
-
-        scanSectionLabel.setFont (showcontrol::preferences::sectionLabelFont());
+        scanSectionLabel.setFont (showcontrol::preferences::hintFont());
+        scanSectionLabel.setJustificationType (juce::Justification::centredLeft);
         addChildComponent (scanSectionLabel);
+
+        portLabel.setFont (showcontrol::preferences::hintFont());
+        portLabel.setJustificationType (juce::Justification::centredRight);
+        addChildComponent (portLabel);
+
+        portEditor.setFont (showcontrol::preferences::hintFont());
 
         scanPeerBtn.onClick = [this] { startLanScan(); };
         addChildComponent (scanPeerBtn);
@@ -55,11 +63,12 @@ public:
         connectBtn.onClick = [this] { connectSelectedPeers(); };
         addChildComponent (connectBtn);
 
-        activePeersLabel.setFont (showcontrol::preferences::sectionLabelFont());
+        activePeersLabel.setFont (showcontrol::preferences::hintFont());
+        activePeersLabel.setJustificationType (juce::Justification::centred);
         addChildComponent (activePeersLabel);
 
         activePeersList.setModel (&activePeersModel);
-        activePeersList.setRowHeight (28);
+        activePeersList.setRowHeight (26);
         activePeersList.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
         activePeersList.setColour (juce::ListBox::outlineColourId, juce::Colours::transparentBlack);
         addChildComponent (activePeersList);
@@ -73,6 +82,13 @@ public:
                 onReconnectRequested();
         };
         addChildComponent (reconnectBtn);
+
+        syncConfigBtn.onClick = [this]
+        {
+            if (onSyncConfigRequested != nullptr)
+                onSyncConfigRequested();
+        };
+        addChildComponent (syncConfigBtn);
 
         peerEditor.setVisible (false);
         addChildComponent (peerEditor);
@@ -88,27 +104,27 @@ public:
             refreshLocalMachineDisplay();
             notifyChanged();
         };
-        addChildComponent (portLabel);
         addChildComponent (portEditor);
 
         followerLockToggle.onClick = [this] { notifyChanged(); };
-        addAndMakeVisible (followerLockToggle);
+        addChildComponent (followerLockToggle);
 
         oscEnableToggle.onClick = [this] { notifyChanged(); };
         addAndMakeVisible (oscEnableToggle);
 
-        helpLabel.setFont (juce::FontOptions (12.0f));
-        helpLabel.setJustificationType (juce::Justification::topLeft);
+        helpLabel.setFont (showcontrol::preferences::hintFont().withHeight (14.0f));
+        helpLabel.setJustificationType (juce::Justification::centred);
         addAndMakeVisible (helpLabel);
 
         takeoverBtn.onClick = [this]
         {
             takeoverActive = ! takeoverActive;
             refreshTakeoverButton();
-            if (onSettingsChanged != nullptr)
-                onSettingsChanged();
+
+            if (onTakeoverToggled != nullptr)
+                onTakeoverToggled();
         };
-        addAndMakeVisible (takeoverBtn);
+        addChildComponent (takeoverBtn);
 
         loadFromPreferences();
         refreshLocalizedText();
@@ -139,7 +155,7 @@ public:
         portEditor.setText (juce::String (showcontrol::prefs::loadBackupSyncPort()), juce::dontSendNotification);
         followerLockToggle.setToggleState (showcontrol::prefs::loadBackupFollowerLock(), juce::dontSendNotification);
         oscEnableToggle.setToggleState (showcontrol::prefs::loadOscEnabled(), juce::dontSendNotification);
-        clearScanResults();
+        clearScanResults (false);
         refreshActivePeerList();
     }
 
@@ -184,118 +200,81 @@ public:
     {
         g.fillAll (findColour (juce::ResizableWindow::backgroundColourId));
 
-        if (! localMachineCardBounds.isEmpty())
-        {
-            const auto cardBg = findColour (juce::TextEditor::backgroundColourId).withAlpha (0.28f);
-            const auto border = findColour (juce::Label::outlineColourId).withAlpha (0.28f);
+        const auto& laf = getLookAndFeel();
+        const auto border = laf.findColour (juce::Label::outlineColourId).withAlpha (0.35f);
+        const auto titleCol = laf.findColour (juce::Label::textColourId);
+        const auto windowBg = findColour (juce::ResizableWindow::backgroundColourId);
 
-            g.setColour (cardBg);
-            g.fillRoundedRectangle (localMachineCardBounds.toFloat(), 6.0f);
+        auto paintBorder = [&] (juce::Rectangle<int> bounds)
+        {
+            if (bounds.isEmpty())
+                return;
+
             g.setColour (border);
-            g.drawRoundedRectangle (localMachineCardBounds.toFloat().reduced (0.5f), 6.0f, 1.0f);
-        }
+            g.drawRoundedRectangle (bounds.toFloat().reduced (0.5f), 8.0f, 1.0f);
+        };
+
+        auto paintCenteredLegend = [&] (juce::Rectangle<int> bounds, const juce::String& text)
+        {
+            if (bounds.isEmpty() || text.isEmpty())
+                return;
+
+            g.setFont (showcontrol::preferences::sectionLabelFont().withHeight (14.0f));
+            const int textW = juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 18;
+            auto legend = juce::Rectangle<int> (bounds.getCentreX() - textW / 2,
+                                                bounds.getY() - 9,
+                                                textW,
+                                                18);
+            g.setColour (windowBg);
+            g.fillRect (legend);
+            g.setColour (titleCol.withAlpha (0.92f));
+            g.drawText (text, legend, juce::Justification::centred, false);
+        };
+
+        paintBorder (mainPanelBounds);
+        paintCenteredLegend (mainPanelBounds, panelTitleText);
+
+        paintBorder (helpPanelBounds);
+        paintCenteredLegend (helpPanelBounds, helpTitleText);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (20, 14);
-        const int rowH = 28;
+        auto bounds = getLocalBounds().reduced (16, 12);
+        const int rowH = 30;
         const int gap  = 8;
-        const int compactGap = 4;
 
-        roleLabel.setBounds (area.removeFromTop (20));
-        area.removeFromTop (compactGap);
-        roleCombo.setBounds (area.removeFromTop (rowH));
-        area.removeFromTop (gap);
+        helpPanelBounds = bounds.removeFromBottom (kHelpPanelH);
+        bounds.removeFromBottom (10);
+        mainPanelBounds = bounds;
 
-        const bool showNetworkUi = isPrimaryRole() || isBackupRole();
-
-        localMachineTitle.setVisible (showNetworkUi);
-        localMachineInfoLabel.setVisible (showNetworkUi);
-
-        if (showNetworkUi)
+        if (! helpPanelBounds.isEmpty())
         {
-            localMachineTitle.setBounds (area.removeFromTop (18));
-            area.removeFromTop (compactGap);
-
-            localMachineCardBounds = area.removeFromTop (30);
-            localMachineInfoLabel.setBounds (localMachineCardBounds.reduced (12, 6));
-            area.removeFromTop (gap);
-
-            auto scanRow = area.removeFromTop (rowH);
-
-            if (removePeerBtn.isVisible())
-            {
-                removePeerBtn.setBounds (scanRow.removeFromRight (58));
-                scanRow.removeFromRight (compactGap);
-            }
-
-            if (scanPeerBtn.isVisible())
-            {
-                scanPeerBtn.setBounds (scanRow.removeFromRight (104));
-                scanRow.removeFromRight (compactGap);
-            }
-
-            portEditor.setBounds (scanRow.removeFromRight (52));
-            scanRow.removeFromRight (compactGap);
-
-            const int portLabelW = juce::jmin (132,
-                juce::GlyphArrangement::getStringWidthInt (portLabel.getFont(), portLabel.getText()) + 6);
-            portLabel.setBounds (scanRow.removeFromRight (juce::jmin (portLabelW, scanRow.getWidth())));
-            scanRow.removeFromRight (compactGap);
-            scanSectionLabel.setBounds (scanRow);
-
-            area.removeFromTop (compactGap);
-
-            if (scanResultsVisible)
-            {
-                const int scanListH = juce::jlimit (52, 150, scanResults.size() * 26 + 4);
-                scanResultsList.setBounds (area.removeFromTop (scanListH));
-                area.removeFromTop (compactGap);
-                connectBtn.setBounds (area.removeFromTop (rowH));
-                area.removeFromTop (gap);
-            }
-
-            activePeersLabel.setBounds (area.removeFromTop (18));
-            area.removeFromTop (compactGap);
-
-            const int peerListMinH = isPrimaryRole() ? 72 : 34;
-            const int peerListH = juce::jmax (peerListMinH, configuredPeerEntries.size() * 28 + 4);
-            activePeersList.setBounds (area.removeFromTop (juce::jmin (peerListH, juce::jmax (peerListMinH, area.getHeight() / 3))));
-            area.removeFromTop (gap);
-
-            if (reconnectBtn.isVisible())
-            {
-                reconnectBtn.setBounds (area.removeFromTop (rowH));
-                area.removeFromTop (gap);
-            }
-        }
-        else
-        {
-            localMachineCardBounds = {};
-
-            auto portRow = area.removeFromTop (rowH);
-            portEditor.setBounds (portRow.removeFromRight (72));
-            portRow.removeFromRight (compactGap);
-            portLabel.setBounds (portRow);
-            area.removeFromTop (gap);
+            auto helpInner = helpPanelBounds.reduced (16, 12);
+            helpInner.removeFromTop (10);
+            helpLabel.setBounds (helpInner);
         }
 
-        followerLockToggle.setBounds (area.removeFromTop (rowH));
-        area.removeFromTop (compactGap);
-        oscEnableToggle.setBounds (area.removeFromTop (rowH));
-        area.removeFromTop (gap);
+        auto inner = mainPanelBounds.reduced (16, 14);
+        stackAreaBounds = inner;
 
-        if (takeoverBtn.isVisible())
-        {
-            takeoverBtn.setBounds (area.removeFromTop (32));
-            area.removeFromTop (gap);
-        }
+        const int contentW = juce::jmin (kStackMaxW, stackAreaBounds.getWidth());
+        auto block = stackAreaBounds.removeFromTop (measureContentHeight (rowH, gap));
+        block = block.withSizeKeepingCentre (contentW, block.getHeight());
 
-        helpLabel.setBounds (area.removeFromTop (juce::jmax (56, area.getHeight())));
+        layoutContentStack (block, rowH, gap);
     }
 
     void refreshSectionLabelColours() { refreshLocalizedText(); }
+
+    void haltActiveTimers() noexcept { stopTimer(); }
+
+    void lookAndFeelChanged() override
+    {
+        juce::Component::lookAndFeelChanged();
+        refreshListChrome();
+        repaint();
+    }
 
     void refreshNetworkInfo()
     {
@@ -305,6 +284,8 @@ public:
 
     void refreshLocalizedText()
     {
+        panelTitleText = showcontrol::localization::tr (u8"Đồng bộ mạng");
+        helpTitleText  = showcontrol::localization::tr (u8"Hướng dẫn kết nối");
         roleLabel.setText (showcontrol::localization::tr (u8"Vai trò máy"), juce::dontSendNotification);
 
         const int roleIndex = roleCombo.getSelectedId() > 0
@@ -312,40 +293,32 @@ public:
             : showcontrol::prefs::loadBackupRole();
 
         roleCombo.clear (juce::dontSendNotification);
-        roleCombo.addItem (showcontrol::localization::tr (u8"Độc lập (Standalone)"), 1);
-        roleCombo.addItem (showcontrol::localization::tr (u8"Máy chính (Primary)"), 2);
-        roleCombo.addItem (showcontrol::localization::tr (u8"Máy phụ (Backup)"), 3);
+        roleCombo.addItem (showcontrol::localization::tr (u8"Độc lập"), 1);
+        roleCombo.addItem (showcontrol::localization::tr (u8"Máy chính"), 2);
+        roleCombo.addItem (showcontrol::localization::tr (u8"Máy phụ"), 3);
         roleCombo.setSelectedId (roleIndex + 1, juce::dontSendNotification);
-
-        localMachineTitle.setText (showcontrol::localization::tr (u8"Máy này"), juce::dontSendNotification);
 
         scanSectionLabel.setText (showcontrol::localization::tr (u8"Quét mạng LAN"), juce::dontSendNotification);
         scanPeerBtn.setButtonText (showcontrol::localization::tr (u8"Quét LAN..."));
         connectBtn.setButtonText (showcontrol::localization::tr (u8"Kết nối"));
+        portLabel.setText (showcontrol::localization::tr (u8"Cổng UDP"), juce::dontSendNotification);
+        removePeerBtn.setButtonText (showcontrol::localization::tr (u8"Gỡ máy đã chọn"));
+        reconnectBtn.setButtonText (showcontrol::localization::tr (u8"Kết nối lại"));
+        syncConfigBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cấu hình sang máy phụ"));
 
-        portLabel.setText (showcontrol::localization::tr (u8"Cổng đồng bộ UDP"), juce::dontSendNotification);
+        followerLockToggle.setButtonText (showcontrol::localization::tr (
+            u8"Khóa điều khiển (Follower)"));
+        oscEnableToggle.setButtonText (showcontrol::localization::tr (u8"Nhận OSC / đồng bộ LAN"));
+        takeoverBtn.setButtonText (showcontrol::localization::tr (u8"Takeover (máy phụ)"));
 
         if (isPrimaryRole())
-            activePeersLabel.setText (showcontrol::localization::tr (u8"Máy dự phòng đang chạy"), juce::dontSendNotification);
+            activePeersLabel.setText (showcontrol::localization::tr (u8"Máy dự phòng đã kết nối"), juce::dontSendNotification);
         else if (isBackupRole())
             activePeersLabel.setText (showcontrol::localization::tr (u8"Máy chính đã kết nối"), juce::dontSendNotification);
         else
             activePeersLabel.setText ({}, juce::dontSendNotification);
 
-        removePeerBtn.setButtonText (showcontrol::localization::tr (u8"Gỡ"));
-        reconnectBtn.setButtonText (showcontrol::localization::tr (u8"Kết nối lại"));
-
-        followerLockToggle.setButtonText (showcontrol::localization::tr (
-            u8"Khóa điều khiển local trên máy phụ (Follower)"));
-        oscEnableToggle.setButtonText (showcontrol::localization::tr (u8"Bật nhận OSC / đồng bộ LAN"));
-        helpLabel.setText (showcontrol::localization::tr (
-            u8"Chọn vai trò → xem IP/Subnet/Port máy này → Quét LAN → chọn máy → Kết nối.\n"
-            u8"Máy chính điều khiển nhiều máy phụ; máy phụ mirror vị trí chọn và GO/Stop/Panic.\n"
-            u8"Trạng thái kết nối hiển thị trên màn hình chính (xanh / vàng / đỏ).\n"
-            u8"Máy phụ: dùng 「Kết nối lại」 trong tab này khi mất kết nối Primary."),
-            juce::dontSendNotification);
-        takeoverBtn.setButtonText (showcontrol::localization::tr (u8"Takeover — điều khiển local (máy phụ)"));
-
+        refreshHelpText();
         refreshLocalMachineDisplay();
         refreshTakeoverButton();
         scanResultsList.updateContent();
@@ -353,15 +326,166 @@ public:
 
         const auto col = getLookAndFeel().findColour (juce::Label::textColourId);
         roleLabel.setColour (juce::Label::textColourId, col);
-        localMachineTitle.setColour (juce::Label::textColourId, col);
-        localMachineInfoLabel.setColour (juce::Label::textColourId, col);
+        machineInfoLabel.setColour (juce::Label::textColourId, col);
         scanSectionLabel.setColour (juce::Label::textColourId, col);
         activePeersLabel.setColour (juce::Label::textColourId, col);
         portLabel.setColour (juce::Label::textColourId, col);
-        helpLabel.setColour (juce::Label::textColourId, col.withAlpha (0.75f));
+        helpLabel.setColour (juce::Label::textColourId, col.withAlpha (0.88f));
+        refreshListChrome();
+    }
+
+    void refreshListChrome()
+    {
+        const auto listBg    = findColour (juce::TextEditor::backgroundColourId).withAlpha (0.20f);
+        const auto listBorder = findColour (juce::Label::outlineColourId).withAlpha (0.30f);
+
+        scanResultsList.setColour (juce::ListBox::backgroundColourId, listBg);
+        scanResultsList.setColour (juce::ListBox::outlineColourId, listBorder);
+        activePeersList.setColour (juce::ListBox::backgroundColourId, listBg);
+        activePeersList.setColour (juce::ListBox::outlineColourId, listBorder);
     }
 
 private:
+    static constexpr int kStackMaxW   = 460;
+    static constexpr int kHelpPanelH  = 108;
+
+    int measureContentHeight (int rowH, int gap) const
+    {
+        int h = rowH;
+
+        if (! isPrimaryRole() && ! isBackupRole())
+            return rowH + gap + rowH;
+
+        h += gap + rowH;
+        h += gap + rowH;
+
+        if (scanResultsVisible && scanResultsList.isVisible())
+        {
+            h += gap + juce::jlimit (54, 132, scanResults.size() * 26 + 4);
+
+            if (connectBtn.isVisible())
+                h += gap + rowH;
+        }
+
+        if (hasConfiguredPeers() && activePeersList.isVisible())
+        {
+            h += gap + 20;
+            h += gap + juce::jlimit (28, 110, configuredPeerEntries.size() * 26 + 4);
+
+            if (reconnectBtn.isVisible())
+                h += gap + rowH;
+        }
+
+        if (followerLockToggle.isVisible())
+            h += gap + rowH;
+
+        if (syncConfigBtn.isVisible())
+            h += gap + rowH;
+
+        return h;
+    }
+
+    void layoutContentStack (juce::Rectangle<int> block, int rowH, int gap)
+    {
+        auto takeRow = [&] (int h) -> juce::Rectangle<int>
+        {
+            auto row = block.removeFromTop (h);
+            block.removeFromTop (gap);
+            return row;
+        };
+
+        auto roleRow = takeRow (rowH);
+        roleLabel.setBounds (roleRow.removeFromLeft (96));
+        roleRow.removeFromLeft (8);
+        roleCombo.setBounds (roleRow);
+
+        if (! isPrimaryRole() && ! isBackupRole())
+        {
+            layoutActionToggles (takeRow, rowH);
+            return;
+        }
+
+        machineInfoLabel.setBounds (takeRow (rowH));
+
+        auto scanRow = takeRow (rowH);
+        const int colW = scanRow.getWidth() / 3;
+        scanSectionLabel.setBounds (scanRow.removeFromLeft (colW).reduced (0, 4));
+
+        auto btnCol = scanRow.removeFromRight (colW);
+        if (scanPeerBtn.isVisible())
+            scanPeerBtn.setBounds (btnCol.reduced (2, 2));
+
+        auto portCol = scanRow.reduced (2, 0);
+        const int editW = 48;
+        const int lblW  = juce::jmin (portCol.getWidth() - editW - 4,
+                                    juce::GlyphArrangement::getStringWidthInt (portLabel.getFont(),
+                                                                               portLabel.getText()) + 6);
+        auto pair = portCol.withSizeKeepingCentre (lblW + 4 + editW, rowH);
+        portLabel.setBounds (pair.removeFromLeft (lblW));
+        pair.removeFromLeft (4);
+        portEditor.setBounds (pair);
+
+        if (scanResultsVisible && scanResultsList.isVisible())
+        {
+            const int scanListH = juce::jlimit (54, 132, scanResults.size() * 26 + 4);
+            scanResultsList.setBounds (takeRow (scanListH));
+
+            if (connectBtn.isVisible())
+                connectBtn.setBounds (takeRow (rowH).withSizeKeepingCentre (kActionBtnW, rowH - 2));
+        }
+
+        if (hasConfiguredPeers() && activePeersList.isVisible())
+        {
+            auto headerRow = takeRow (20);
+            const bool showRemove = removePeerBtn.isVisible();
+
+            if (showRemove)
+            {
+                removePeerBtn.setBounds (headerRow.removeFromRight (kActionBtnW));
+                headerRow.removeFromRight (8);
+            }
+
+            activePeersLabel.setBounds (headerRow);
+            activePeersLabel.setJustificationType (showRemove ? juce::Justification::centredLeft
+                                                              : juce::Justification::centred);
+
+            const int peerListH = juce::jlimit (28, 110, configuredPeerEntries.size() * 26 + 4);
+            activePeersList.setBounds (takeRow (peerListH));
+
+            if (reconnectBtn.isVisible())
+                reconnectBtn.setBounds (takeRow (rowH).withSizeKeepingCentre (kActionBtnW, rowH - 2));
+        }
+
+        if (syncConfigBtn.isVisible())
+            syncConfigBtn.setBounds (takeRow (rowH));
+
+        layoutActionToggles (takeRow, rowH);
+    }
+
+    void layoutActionToggles (const std::function<juce::Rectangle<int> (int)>& takeRow, int rowH)
+    {
+        if (oscEnableToggle.isVisible())
+            oscEnableToggle.setBounds (takeRow (rowH));
+
+        if (! followerLockToggle.isVisible())
+            return;
+
+        auto row = takeRow (rowH);
+
+        if (takeoverBtn.isVisible())
+        {
+            const int slotW = row.getWidth() / 2;
+            followerLockToggle.setBounds (row.removeFromLeft (slotW).reduced (2, 0));
+            takeoverBtn.setBounds (row.reduced (2, 0));
+        }
+        else
+        {
+            followerLockToggle.setBounds (row);
+        }
+    }
+
+    static constexpr int kActionBtnW = 128;
+
     struct ScanResultEntry
     {
         juce::String address;
@@ -375,6 +499,31 @@ private:
         juce::String ip;
         juce::String hostName;
     };
+
+    static void paintCompactPeerColumns (juce::Graphics& g,
+                                         int width,
+                                         int height,
+                                         int nameX,
+                                         const juce::String& displayName,
+                                         const juce::String& ipText,
+                                         const juce::String& latencyText,
+                                         juce::Colour col)
+    {
+        const int ipX  = juce::jmax (nameX + 80, (int) (width * 0.40f));
+        const int latX = juce::jmax (ipX + 100, (int) (width * 0.68f));
+        const int nameW = juce::jmax (48, ipX - nameX - 8);
+
+        g.setFont (ShowTheme::fontBold (12.0f));
+        g.setColour (col);
+        g.drawText (displayName, nameX, 0, nameW, height, juce::Justification::centredLeft, true);
+
+        g.setFont (ShowTheme::font (11.5f));
+        g.setColour (col.withAlpha (0.85f));
+        g.drawText (ipText, ipX, 0, latX - ipX - 4, height, juce::Justification::centredLeft, true);
+
+        g.setColour (col.withAlpha (0.70f));
+        g.drawText (latencyText, latX, 0, width - latX - 4, height, juce::Justification::centredLeft, true);
+    }
 
     class ScanResultsListModel final : public juce::ListBoxModel
     {
@@ -411,26 +560,12 @@ private:
                             (float) boxX + 11.0f, (float) boxY + 4.0f, 1.6f);
             }
 
-            const int nameX = 30;
-            const int latencyW = 56;
-            const int ipW = 108;
-            const int nameW = width - nameX - ipW - latencyW - 10;
-
-            g.setFont (ShowTheme::fontBold (12.0f));
-            g.setColour (col);
-            const auto displayName = entry.hostName.isNotEmpty() ? entry.hostName : entry.address;
-            g.drawText (displayName, nameX, 0, nameW, height, juce::Justification::centredLeft, true);
-
-            g.setFont (ShowTheme::font (11.5f));
-            g.setColour (col.withAlpha (0.82f));
-            g.drawText (entry.address, nameX + nameW, 0, ipW, height, juce::Justification::centredLeft, true);
-
             juce::String latency = "—";
             if (entry.discoveryMs > 0)
                 latency = juce::String (entry.discoveryMs) + " ms";
 
-            g.setColour (col.withAlpha (0.68f));
-            g.drawText (latency, width - latencyW - 6, 0, latencyW, height, juce::Justification::centredRight, true);
+            const auto displayName = entry.hostName.isNotEmpty() ? entry.hostName : entry.address;
+            paintCompactPeerColumns (g, width, height, 30, displayName, entry.address, latency, col);
         }
 
         void listBoxItemClicked (int row, const juce::MouseEvent& e) override
@@ -445,6 +580,7 @@ private:
                 owner.scanResultsList.repaintRow (row);
             }
         }
+
     private:
         BackupSyncPreferencesPanel& owner;
     };
@@ -474,35 +610,21 @@ private:
             g.setColour (owner.linkQualityColour (status.quality));
             g.fillEllipse (dotX - dotR, dotY - dotR, dotR * 2.0f, dotR * 2.0f);
 
-            const int nameX = 24;
-            const int latencyW = 56;
-            const int ipW = 108;
-            const int nameW = width - nameX - ipW - latencyW - 10;
-
-            g.setFont (ShowTheme::fontBold (12.0f));
-            g.setColour (col);
-            const auto displayName = entry.hostName.isNotEmpty() ? entry.hostName
-                                 : (status.hostName.isNotEmpty() ? status.hostName : entry.ip);
-            g.drawText (displayName, nameX, 0, nameW, height, juce::Justification::centredLeft, true);
-
-            g.setFont (ShowTheme::font (11.5f));
-            g.setColour (col.withAlpha (0.82f));
-            g.drawText (entry.ip, nameX + nameW, 0, ipW, height, juce::Justification::centredLeft, true);
-
             juce::String latency = "—";
             if (status.latencyMs > 0)
                 latency = juce::String (status.latencyMs) + " ms";
             else if (entry.ip.isNotEmpty() && status.quality == showcontrol::backup::LinkQuality::offline)
                 latency = showcontrol::localization::tr (u8"Mất");
 
-            g.setColour (col.withAlpha (0.68f));
-            g.drawText (latency, width - latencyW - 6, 0, latencyW, height, juce::Justification::centredRight, true);
+            const auto displayName = entry.hostName.isNotEmpty() ? entry.hostName
+                                 : (status.hostName.isNotEmpty() ? status.hostName : entry.ip);
+            paintCompactPeerColumns (g, width, height, 24, displayName, entry.ip, latency, col);
         }
 
         void selectedRowsChanged (int lastRowSelected) override
         {
             owner.selectedActivePeerIndex = lastRowSelected;
-            owner.updateActionButtonVisibility();
+            owner.applyVisibility();
         }
 
     private:
@@ -514,6 +636,7 @@ private:
 
     bool isPrimaryRole() const noexcept { return roleCombo.getSelectedId() == 2; }
     bool isBackupRole() const noexcept { return roleCombo.getSelectedId() == 3; }
+    bool hasConfiguredPeers() const noexcept { return configuredPeerEntries.size() > 0; }
 
     showcontrol::backup::PeerRuntimeStatus lookupRuntimeStatus (const juce::String& ip) const
     {
@@ -540,6 +663,34 @@ private:
         }
     }
 
+    void refreshHelpText()
+    {
+        if (isPrimaryRole())
+        {
+            helpLabel.setText (showcontrol::localization::tr (
+                u8"Quét LAN → chọn máy phụ → Kết nối. Máy chính gửi GO / Stop / Panic.\n"
+                u8"Thêm cùng file nhạc trên máy phụ (đường dẫn có thể khác Mac/Win).\n"
+                u8"Dùng 「Đồng bộ cấu hình sang máy phụ」 để đồng bộ thứ tự và cài đặt cue.\n"
+                u8"Trạng thái link hiển thị trên màn hình chính (xanh / vàng / đỏ)."),
+                juce::dontSendNotification);
+        }
+        else if (isBackupRole())
+        {
+            helpLabel.setText (showcontrol::localization::tr (
+                u8"Quét LAN → chọn máy chính → Kết nối. Máy phụ mirror lệnh từ Primary.\n"
+                u8"Thêm cùng file nhạc trên máy này — đường dẫn Mac/Win có thể khác máy chính.\n"
+                u8"Dùng 「Kết nối lại」 khi mất link. macOS: bật Local Network."),
+                juce::dontSendNotification);
+        }
+        else
+        {
+            helpLabel.setText (showcontrol::localization::tr (
+                u8"Chế độ độc lập — không đồng bộ với máy khác.\n"
+                u8"Bật tùy chọn phía trên nếu cần điều khiển GO / Stop / Panic từ bên ngoài (OSC hoặc LAN)."),
+                juce::dontSendNotification);
+        }
+    }
+
     void refreshLocalMachineDisplay()
     {
         const auto info = showcontrol::backup::getPrimaryLocalLanNetworkInfo();
@@ -548,64 +699,70 @@ private:
                         ? portEditor.getText().getIntValue()
                         : (int) showcontrol::backup::kDefaultSyncPort;
 
+        const auto prefix = showcontrol::localization::tr (u8"Thông tin máy:");
+
         if (info.ip.isEmpty())
         {
-            localMachineInfoLabel.setText (showcontrol::localization::tr (u8"Không phát hiện giao diện mạng LAN"),
-                                           juce::dontSendNotification);
-            localMachineInfoLabel.setColour (juce::Label::textColourId, col.withAlpha (0.45f));
+            machineInfoLabel.setText (prefix + " "
+                                      + showcontrol::localization::tr (u8"Không phát hiện giao diện mạng LAN"),
+                                      juce::dontSendNotification);
+            machineInfoLabel.setColour (juce::Label::textColourId, col.withAlpha (0.45f));
             return;
         }
 
         const auto subnet = info.subnetCidr.isNotEmpty() ? info.subnetCidr : "—";
-        localMachineInfoLabel.setText (info.ip + "  ·  " + subnet + "  ·  UDP " + juce::String (port),
-                                       juce::dontSendNotification);
-        localMachineInfoLabel.setColour (juce::Label::textColourId, col);
+        machineInfoLabel.setText (prefix + " " + info.ip + " · " + subnet + " · UDP " + juce::String (port),
+                                  juce::dontSendNotification);
+        machineInfoLabel.setColour (juce::Label::textColourId, col);
     }
 
-    void updateActionButtonVisibility()
+    void applyVisibility()
     {
-        const bool showNetworkUi = isPrimaryRole() || isBackupRole();
-        scanPeerBtn.setVisible (showNetworkUi);
-        removePeerBtn.setVisible (isPrimaryRole() && selectedActivePeerIndex >= 0);
-        portLabel.setVisible (true);
-        portEditor.setVisible (true);
-        scanSectionLabel.setVisible (showNetworkUi);
-        resized();
+        const bool primary   = isPrimaryRole();
+        const bool backup    = isBackupRole();
+        const bool networked = primary || backup;
+        const bool hasPeers  = hasConfiguredPeers();
+
+        machineInfoLabel.setVisible (networked);
+        scanSectionLabel.setVisible (networked);
+        scanPeerBtn.setVisible (networked);
+        portLabel.setVisible (networked);
+        portEditor.setVisible (networked);
+
+        scanResultsList.setVisible (networked && scanResultsVisible);
+        connectBtn.setVisible (networked && scanResultsVisible);
+
+        activePeersLabel.setVisible (networked && hasPeers);
+        activePeersList.setVisible (networked && hasPeers);
+        removePeerBtn.setVisible (primary && hasPeers && selectedActivePeerIndex >= 0);
+        reconnectBtn.setVisible (backup && hasPeers);
+
+        syncConfigBtn.setVisible (primary && hasPeers);
+
+        followerLockToggle.setVisible (backup);
+        takeoverBtn.setVisible (backup);
+        oscEnableToggle.setVisible (! networked);
+
+        if (! networked)
+            clearScanResults (false);
     }
 
     void refreshRoleUi()
     {
-        const bool primary = isPrimaryRole();
-        const bool backup  = isBackupRole();
-        const bool showNetworkUi = primary || backup;
-
-        localMachineTitle.setVisible (showNetworkUi);
-        localMachineInfoLabel.setVisible (showNetworkUi);
-        scanSectionLabel.setVisible (showNetworkUi);
-        scanResultsList.setVisible (showNetworkUi && scanResultsVisible);
-        connectBtn.setVisible (showNetworkUi && scanResultsVisible);
-        activePeersLabel.setVisible (showNetworkUi);
-        activePeersList.setVisible (showNetworkUi);
-        portLabel.setVisible (true);
-        portEditor.setVisible (true);
-
-        if (! showNetworkUi)
-            clearScanResults();
-
-        if (backup && configuredPeerEntries.size() > 0)
+        if (isBackupRole() && configuredPeerEntries.size() > 0)
             peerEditor.setText (configuredPeerEntries.getReference (0).ip, juce::dontSendNotification);
 
-        if (primary)
-            activePeersLabel.setText (showcontrol::localization::tr (u8"Máy dự phòng đang chạy"), juce::dontSendNotification);
-        else if (backup)
+        if (isPrimaryRole())
+            activePeersLabel.setText (showcontrol::localization::tr (u8"Máy dự phòng đã kết nối"), juce::dontSendNotification);
+        else if (isBackupRole())
             activePeersLabel.setText (showcontrol::localization::tr (u8"Máy chính đã kết nối"), juce::dontSendNotification);
-        else
-            activePeersLabel.setText ({}, juce::dontSendNotification);
 
+        refreshHelpText();
         refreshLocalMachineDisplay();
         refreshActivePeerList();
         refreshReconnectButton();
-        updateActionButtonVisibility();
+        applyVisibility();
+        resized();
     }
 
     void notifyChanged()
@@ -618,10 +775,7 @@ private:
 
     void refreshReconnectButton()
     {
-        const bool backup = isBackupRole();
-        reconnectBtn.setVisible (backup);
-
-        if (! backup)
+        if (! isBackupRole() || ! hasConfiguredPeers())
             return;
 
         auto quality = showcontrol::backup::LinkQuality::unknown;
@@ -636,8 +790,6 @@ private:
 
     void refreshTakeoverButton()
     {
-        const bool isBackup = isBackupRole();
-        takeoverBtn.setVisible (isBackup);
         takeoverBtn.setToggleState (takeoverActive, juce::dontSendNotification);
 
         if (takeoverActive)
@@ -667,6 +819,7 @@ private:
         entry.hostName = hostName;
         configuredPeerEntries.add (entry);
         refreshActivePeerList();
+        applyVisibility();
     }
 
     void removeSelectedActivePeer()
@@ -681,18 +834,21 @@ private:
         selectedActivePeerIndex = -1;
         activePeersList.deselectAllRows();
         refreshActivePeerList();
-        updateActionButtonVisibility();
+        applyVisibility();
         notifyChanged();
+        resized();
     }
 
-    void clearScanResults()
+    void clearScanResults (bool relayout = true)
     {
         scanResults.clear();
         scanResultsVisible = false;
         scanResultsList.setVisible (false);
         connectBtn.setVisible (false);
         scanResultsList.updateContent();
-        resized();
+
+        if (relayout)
+            resized();
     }
 
     void showScanResults (const juce::Array<showcontrol::backup::LanPeerInfo>& peers)
@@ -710,8 +866,7 @@ private:
         }
 
         scanResultsVisible = scanResults.size() > 0;
-        scanResultsList.setVisible (scanResultsVisible);
-        connectBtn.setVisible (scanResultsVisible);
+        applyVisibility();
         scanResultsList.updateContent();
         resized();
     }
@@ -797,7 +952,7 @@ private:
             u8"Không tìm thấy máy ShowCue trên cùng subnet.\n\n"
             u8"• Cả hai máy cùng Wi‑Fi / LAN\n"
             u8"• Máy đối tác đang mở ShowCue (vai trò Primary/Backup)\n"
-            u8"• Bật 「Bật nhận OSC / đồng bộ LAN」\n"
+            u8"• Bật 「Nhận OSC / đồng bộ LAN」\n"
             u8"• macOS: Cài đặt hệ thống → Quyền riêng tư → Mạng cục bộ → bật ShowCue");
 
         const auto info = showcontrol::backup::getPrimaryLocalLanNetworkInfo();
@@ -825,18 +980,19 @@ private:
         }
     }
 
-    juce::Label roleLabel, portLabel, helpLabel, localMachineTitle, localMachineInfoLabel;
+    juce::String panelTitleText, helpTitleText;
+    juce::Label roleLabel, portLabel, helpLabel, machineInfoLabel;
     juce::Label scanSectionLabel, activePeersLabel;
     juce::ComboBox roleCombo;
     juce::TextEditor peerEditor, portEditor;
-    juce::TextButton scanPeerBtn, connectBtn, removePeerBtn, reconnectBtn, takeoverBtn;
+    juce::TextButton scanPeerBtn, connectBtn, removePeerBtn, reconnectBtn, syncConfigBtn, takeoverBtn;
     juce::ToggleButton followerLockToggle, oscEnableToggle;
     juce::ListBox scanResultsList, activePeersList;
     ScanResultsListModel scanResultsModel;
     ActivePeersListModel activePeersModel;
     juce::Array<ScanResultEntry> scanResults;
     juce::Array<ConfiguredPeerEntry> configuredPeerEntries;
-    juce::Rectangle<int> localMachineCardBounds;
+    juce::Rectangle<int> mainPanelBounds, helpPanelBounds, stackAreaBounds;
     int selectedActivePeerIndex = -1;
     bool scanResultsVisible = false;
     bool takeoverActive = false;

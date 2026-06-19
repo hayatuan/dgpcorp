@@ -21,20 +21,54 @@ constexpr juce::uint32 kTrim      = 1u << 8;
 
 constexpr juce::uint32 kInspectorFields = kVolume | kFadeIn | kFadeOut | kLoop | kOutputBus | kTrim;
 
-inline juce::String makePadSyncKey (const SoundPad* pad)
+inline juce::String makePadSyncKey (int listIndex, const SoundPad* pad)
 {
     if (pad == nullptr)
         return {};
 
     if (pad->hasAudioFile())
     {
-        const auto path = pad->getFilePath();
+        const juce::File f (pad->getFilePath());
+        const auto name = f.getFileName();
 
-        if (path.isNotEmpty())
-            return path;
+        if (name.isNotEmpty())
+            return juce::String (listIndex) + ":" + name;
     }
 
-    return "@" + pad->getPadName() + "#" + juce::String (pad->getPadIndex());
+    return juce::String (listIndex) + ":@" + pad->getPadName() + "#" + juce::String (pad->getPadIndex());
+}
+
+inline bool padSyncKeysMatch (int listIndex, const SoundPad* pad, const juce::String& key)
+{
+    if (pad == nullptr || key.isEmpty())
+        return false;
+
+    if (makePadSyncKey (listIndex, pad).equalsIgnoreCase (key))
+        return true;
+
+    if (pad->hasAudioFile())
+    {
+        const auto path = pad->getFilePath();
+
+        if (path.equalsIgnoreCase (key))
+            return true;
+
+        const auto token = juce::File (path).getFileName();
+
+        if (token.isNotEmpty())
+        {
+            if (key.equalsIgnoreCase (token))
+                return true;
+
+            const auto listPrefix = juce::String (listIndex) + ":";
+
+            if (key.startsWithIgnoreCase (listPrefix)
+                && key.substring (listPrefix.length()).equalsIgnoreCase (token))
+                return true;
+        }
+    }
+
+    return false;
 }
 
 struct PatchMessage
