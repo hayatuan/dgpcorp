@@ -299,6 +299,12 @@ juce::Point<int> PadPanel::gridCellAtPoint (juce::Point<int> local) const noexce
                                                               boundedLayout.activeRows);
 }
 
+juce::Point<int> PadPanel::localPointFromDragDetails (const SourceDetails& dragSourceDetails) const noexcept
+{
+    const auto screenPos = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
+    return showcontrol::crossdrag::screenPointToComponentLocal (*this, screenPos);
+}
+
 bool PadPanel::isInterestedInDragSource (const SourceDetails& dragSourceDetails)
 {
     if (! matrixLayoutEnabled)
@@ -335,7 +341,7 @@ void PadPanel::itemDragMove (const SourceDetails& dragSourceDetails)
         captureDragSource (dragSourceDetails);
 
     auto* sourcePad = dynamic_cast<SoundPad*> (dragSourceDetails.sourceComponent.get());
-    applyGridDragHoverAtLocalPoint (dragSourceDetails.localPosition, sourcePad);
+    applyGridDragHoverAtLocalPoint (localPointFromDragDetails (dragSourceDetails), sourcePad);
 }
 
 void PadPanel::itemDragExit (const SourceDetails& dragSourceDetails)
@@ -389,7 +395,7 @@ void PadPanel::itemDropped (const SourceDetails& dragSourceDetails)
 
         if (targetCol < 0 || targetRow < 0)
         {
-            const auto dropCell = activeGridCellAtLocalPoint (dragSourceDetails.localPosition);
+            const auto dropCell = activeGridCellAtLocalPoint (localPointFromDragDetails (dragSourceDetails));
             targetCol = dropCell.x;
             targetRow = dropCell.y;
         }

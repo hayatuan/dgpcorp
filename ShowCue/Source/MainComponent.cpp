@@ -1498,7 +1498,7 @@ void MainComponent::wireSoundPad (SoundPad* pad)
         applyTrackRenameAtIndex (listIdx, padIdx, newName, true);
     };
 
-    pad->onPadReorderBegin = [this] (SoundPad* p) { beginPadReorder (p); };
+    pad->onPadReorderBegin = [this] (SoundPad* p, juce::Point<int> pos) { beginPadReorder (p, pos); };
     pad->onPadReorderMove = [this] (SoundPad* p, juce::Point<int> pos) { juce::ignoreUnused (p); updatePadReorder (pos); };
     pad->onPadReorderEnd = [this] (SoundPad* p) { juce::ignoreUnused (p); endPadReorder(); };
     pad->onBuildPadDragDescription = [this, pad] () -> juce::var
@@ -5606,6 +5606,8 @@ void MainComponent::dragOperationEnded (const juce::DragAndDropTarget::SourceDet
                 panel->setPadChildrenMousePassthrough (false);
             }
         }
+
+        resetPadReorderVisualState();
     }
 }
 
@@ -6073,7 +6075,7 @@ void MainComponent::autoScrollViewportForPadReorder (juce::Point<int> posInScrol
     viewScroller.setViewPosition (viewScroller.getViewPositionX(), nextY);
 }
 
-void MainComponent::beginPadReorder (SoundPad* source)
+void MainComponent::beginPadReorder (SoundPad* source, juce::Point<int> pointerInPanel)
 {
     crossComponentDragConsumed = false;
 
@@ -6093,8 +6095,8 @@ void MainComponent::beginPadReorder (SoundPad* source)
         return;
 
     padReorderIsGridMode = list->isGrid;
-    padReorderPointerPos = source->getBounds().getCentre();
-    padReorderDragOffset = padReorderPointerPos - source->getBounds().getPosition();
+    padReorderPointerPos = pointerInPanel;
+    padReorderDragOffset = pointerInPanel - source->getBounds().getPosition();
     padReorderLastAutoScrollMs = 0;
     padReorderStackAnimStartMs = juce::Time::getMillisecondCounter();
     padReorderStackAnimActive = selectedPadIndices.size() > 1 && selectedPadIndices.contains (padReorderFromIndex);

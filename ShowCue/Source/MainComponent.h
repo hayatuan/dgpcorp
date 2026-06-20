@@ -467,7 +467,7 @@ private:
         juce::Rectangle<int> cellBounds (int slot) const noexcept;
     };
 
-    void beginPadReorder (SoundPad* source);
+    void beginPadReorder (SoundPad* source, juce::Point<int> pointerInPanel);
     void updatePadReorder (juce::Point<int> posInScrollContent);
     void endPadReorder();
     void cancelPadReorder (bool keepPadGridDragVisual = false);

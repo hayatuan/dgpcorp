@@ -107,6 +107,7 @@ private:
     juce::Rectangle<int> cellBoundsForActiveGrid (int row, int col) const noexcept;
     juce::Point<int> activeGridCellAtLocalPoint (juce::Point<int> local) const noexcept;
     SoundPad* resolveDragSourcePad (const SourceDetails& dragSourceDetails) const noexcept;
+    juce::Point<int> localPointFromDragDetails (const SourceDetails& dragSourceDetails) const noexcept;
     void finalizeLocalDropAndCollapseGrid (MainComponent* mainComp,
                                            const SourceDetails& dragSourceDetails) noexcept;
 

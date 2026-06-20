@@ -392,6 +392,33 @@ inline int dragPayloadItemCount (const juce::var& description) noexcept
     return 1;
 }
 
+/** Quy đổi vị trí chuột màn hình về tọa độ cục bộ của target (PadPanel / lưới). */
+inline juce::Point<int> screenPointToComponentLocal (const juce::Component& target,
+                                                     juce::Point<int> screenPos) noexcept
+{
+    return target.getLocalPoint (nullptr, screenPos);
+}
+
+/** Ưu tiên localPosition JUCE khi target đang nhận drag; fallback screen→local. */
+inline juce::Point<int> dragTargetLocalPoint (const juce::Component& target,
+                                              const juce::DragAndDropTarget::SourceDetails& details,
+                                              bool preferJuceLocalPosition = true) noexcept
+{
+    if (preferJuceLocalPosition)
+        return details.localPosition;
+
+    const auto screenPos = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
+    return screenPointToComponentLocal (target, screenPos);
+}
+
+/** Điểm neo drag image — vị trí mouseDown trong bounds nguồn, khớp JUCE startDragging. */
+inline juce::Point<int> dragImageAnchorFromMouseDown (juce::Point<int> mouseDownInSource,
+                                                      juce::Rectangle<int> imageBounds) noexcept
+{
+    return { juce::jlimit (0, juce::jmax (0, imageBounds.getWidth() - 1), mouseDownInSource.x),
+             juce::jlimit (0, juce::jmax (0, imageBounds.getHeight() - 1), mouseDownInSource.y) };
+}
+
 inline void paintNeonDropTargetGlow (juce::Graphics& g,
                                      juce::Rectangle<float> bounds,
                                      juce::Colour colour) noexcept

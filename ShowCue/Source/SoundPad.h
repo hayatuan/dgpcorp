@@ -215,7 +215,7 @@ public:
     /** BGM: dừng pad khác trong list trước khi phát (Foobar playlist). */
     std::function<void(SoundPad*)> onWillStartPlay;
     std::function<void(SoundPad*)> onContextMenuRequested;
-    std::function<void(SoundPad*)> onPadReorderBegin;
+    std::function<void(SoundPad*, juce::Point<int> pointerInPanel)> onPadReorderBegin;
     std::function<void(SoundPad*, juce::Point<int>)> onPadReorderMove;
     std::function<void(SoundPad*)> onPadReorderEnd;
     /** Grid DnD: mô tả multi-pad cho DragAndDropContainer::startDragging. */
@@ -1641,24 +1641,16 @@ public:
 
             reorderDragActive = true;
 
-            if (onPadReorderBegin)
-                onPadReorderBegin (this);
+            const auto panelPos = pointerInPadPanel (e);
 
-            tryStartJuceCrossDrag();
+            if (onPadReorderBegin)
+                onPadReorderBegin (this, panelPos);
+
+            tryStartJuceCrossDrag (e);
         }
 
         if (onPadReorderMove)
-        {
-            juce::Point<int> pos = e.getPosition();
-
-            if (auto* scrollParent = findParentComponentOfClass<juce::Viewport>())
-            {
-                if (auto* viewed = scrollParent->getViewedComponent())
-                    pos = e.getEventRelativeTo (viewed).getPosition();
-            }
-
-            onPadReorderMove (this, pos);
-        }
+            onPadReorderMove (this, pointerInPadPanel (e));
     }
 
     void mouseUp (const juce::MouseEvent& e) override
@@ -1689,9 +1681,10 @@ public:
             paintGridBadge (g, bounds);
     }
 
-    juce::Image makeFarragoDragSnapshot()
+    juce::Image makeFarragoDragSnapshot (float scaleFactor = 1.0f)
     {
-        auto image = createComponentSnapshot (getLocalBounds(), true, 1.0f);
+        const float scale = juce::jmax (1.0f, scaleFactor);
+        auto image = createComponentSnapshot (getLocalBounds(), true, scale);
 
         if (! image.isValid())
             return image;
@@ -1719,7 +1712,18 @@ public:
         return faded;
     }
 
-    void tryStartJuceCrossDrag()
+    juce::Point<int> pointerInPadPanel (const juce::MouseEvent& e) const noexcept
+    {
+        if (auto* scrollParent = findParentComponentOfClass<juce::Viewport>())
+        {
+            if (auto* viewed = scrollParent->getViewedComponent())
+                return e.getEventRelativeTo (viewed).getPosition();
+        }
+
+        return e.getPosition();
+    }
+
+    void tryStartJuceCrossDrag (const juce::MouseEvent& e)
     {
         if (juceSystemDragStarted)
             return;
@@ -1771,8 +1775,10 @@ public:
 
             juce::Image dragImage;
 
+            const float dragScale = juce::Component::getApproximateScaleFactorForComponent (this);
+
             if (isRenderAsGridMode)
-                dragImage = makeFarragoDragSnapshot();
+                dragImage = makeFarragoDragSnapshot (dragScale);
             else if (onCreateMultiItemDragImage != nullptr)
                 dragImage = onCreateMultiItemDragImage (itemCount);
             else
@@ -1781,12 +1787,15 @@ public:
             if (! dragImage.isValid())
                 return;
 
-            juce::Point<int> imageOffset (dragImage.getWidth() / 2, dragImage.getHeight() / 2);
+            const auto imageBounds = juce::Rectangle<int> (dragImage.getWidth(), dragImage.getHeight());
+            juce::Point<int> imageOffset = showcontrol::crossdrag::dragImageAnchorFromMouseDown (
+                e.getMouseDownPosition(), imageBounds);
 
+            // Kéo nội bộ MainComponent — tránh ghost desktop HiDPI văng lệch góc màn hình (Windows).
             dragContainer->startDragging (description,
                                           this,
-                                          juce::ScaledImage (dragImage),
-                                          true,
+                                          juce::ScaledImage (dragImage, dragScale),
+                                          false,
                                           &imageOffset);
             juceSystemDragStarted = true;
         }
