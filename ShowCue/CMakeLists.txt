@@ -163,9 +163,24 @@ if(SHOWCUE_BUILD_IDE_INDEX)
         COMMENT "Build optional TU + sync compile_commands for clangd")
 endif()
 
-# MSVC: đọc nguồn UTF-8 đúng — u8"..." và chuỗi tiếng Việt không bị mojibake trên Windows.
+# MSVC: UTF-8 nguồn + tối ưu Release (LTCG) — chỉ áp dụng config Release, không ảnh hưởng Debug.
 if(MSVC)
     target_compile_options(ShowCue PRIVATE /utf-8)
+    target_compile_options(ShowCue PRIVATE
+        $<$<CONFIG:Release>:/O2;/Oi;/Ot;/GL>)
+    target_link_options(ShowCue PRIVATE
+        $<$<CONFIG:Release>:/LTCG>)
+
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        target_link_options(ShowCue PRIVATE "/LARGEADDRESSAWARE")
+    else()
+        target_compile_options(ShowCue PRIVATE
+            $<$<CONFIG:Release>:/arch:AVX2>)
+    endif()
+elseif(APPLE)
+    if(NOT CMAKE_OSX_ARCHITECTURES)
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "ShowCue universal binary" FORCE)
+    endif()
 endif()
 
 # Bundle ffmpeg cạnh binary (.app/Contents/MacOS) — ưu tiên ThirdParty tĩnh, rồi ffmpeg hệ thống lúc build.

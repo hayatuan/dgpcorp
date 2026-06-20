@@ -1,6 +1,7 @@
 #include "SystemPermissionsPanel.h"
 #include "ShowLocalization.h"
 #include "ShowAppPreferences.h"
+#include <thread>
 #if JUCE_MAC
 #include "ShowBackupMacNetwork.h"
 #endif
@@ -257,8 +258,9 @@ void PermissionCardComponent::refreshLocalizedText()
 }
 
 //==============================================================================
-SystemPermissionsPanel::SystemPermissionsPanel()
-    : audioCard (PermissionCardComponent::IconKind::mic,
+SystemPermissionsPanel::SystemPermissionsPanel (juce::AudioDeviceManager* sharedDeviceManagerIn)
+    : sharedDeviceManager (sharedDeviceManagerIn),
+      audioCard (PermissionCardComponent::IconKind::mic,
                  "Audio Hardware Access",
                  juce::String::fromUTF8 (
                      u8"Truy cập soundcard / mixer sân khấu để phát CUE & BGM không độ trễ trên FOH.")),
@@ -314,6 +316,8 @@ SystemPermissionsPanel::SystemPermissionsPanel()
     {
         const int port = showcontrol::prefs::loadBackupSyncPort();
         const bool ready = showcontrol::backup::win::ensureWindowsFirewallRules (port);
+        cachedFirewallRulesPresent.store (ready || showcontrol::backup::win::areWindowsFirewallRulesPresent (port),
+                                          std::memory_order_release);
 
         if (! ready)
             showcontrol::backup::win::requestElevatedFirewallSetup (port);
@@ -330,35 +334,36 @@ SystemPermissionsPanel::SystemPermissionsPanel()
     addAndMakeVisible (resetPermissionsButton);
 
     rebuildCardLayout();
-    updatePermissionUi();
 
-    if (isShowing())
-        startTimer (500);
+    juce::Component::SafePointer<SystemPermissionsPanel> safe (this);
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (safe != nullptr)
+            safe->updatePermissionUi();
+    });
 
     setSize (640, 420);
 }
 
 SystemPermissionsPanel::~SystemPermissionsPanel()
 {
-    stopTimer();
+    haltActiveTimers();
     resetPermissionsButton.setLookAndFeel (nullptr);
 }
 
 void SystemPermissionsPanel::haltActiveTimers() noexcept
 {
     stopTimer();
+    permissionProbeInFlight.store (false, std::memory_order_release);
 }
 
 bool SystemPermissionsPanel::checkAudioPermission()
 {
    #if JUCE_WINDOWS
-    juce::AudioDeviceManager probe;
-    const auto err = probe.initialise (0, 2, nullptr, true);
+    if (sharedDeviceManager != nullptr)
+        return sharedDeviceManager->getCurrentAudioDevice() != nullptr;
 
-    if (err.isNotEmpty())
-        return false;
-
-    return probe.getCurrentAudioDevice() != nullptr;
+    return true;
    #else
     return juce::RuntimePermissions::isGranted (juce::RuntimePermissions::recordAudio);
    #endif
@@ -399,8 +404,7 @@ bool SystemPermissionsPanel::checkWindowsAdminConflict()
 bool SystemPermissionsPanel::checkWindowsFirewallPermission()
 {
    #if JUCE_WINDOWS
-    const int port = showcontrol::prefs::loadBackupSyncPort();
-    return showcontrol::backup::win::areWindowsFirewallRulesPresent (port);
+    return cachedFirewallRulesPresent.load (std::memory_order_acquire);
    #else
     return true;
    #endif
@@ -535,6 +539,7 @@ void SystemPermissionsPanel::visibilityChanged()
     {
         updatePermissionUi();
         startTimer (500);
+        timerCallback();
     }
     else
     {
@@ -568,8 +573,33 @@ void SystemPermissionsPanel::rebuildCardLayout()
 
 void SystemPermissionsPanel::timerCallback()
 {
-    if (isVisible())
-        updatePermissionUi();
+    if (! isShowing())
+        return;
+
+    updatePermissionUi();
+
+   #if JUCE_WINDOWS
+    if (permissionProbeInFlight.exchange (true))
+        return;
+
+    const int port = showcontrol::prefs::loadBackupSyncPort();
+    juce::Component::SafePointer<SystemPermissionsPanel> safe (this);
+
+    std::thread ([safe, port]()
+    {
+        const bool present = showcontrol::backup::win::areWindowsFirewallRulesPresent (port);
+
+        juce::MessageManager::callAsync ([safe, present]()
+        {
+            if (safe != nullptr)
+            {
+                safe->cachedFirewallRulesPresent.store (present, std::memory_order_release);
+                safe->permissionProbeInFlight.store (false, std::memory_order_release);
+                safe->updatePermissionUi();
+            }
+        });
+    }).detach();
+   #endif
 }
 
 } // namespace showcontrol::permissions

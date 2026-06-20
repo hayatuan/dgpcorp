@@ -891,22 +891,42 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
 
     PadRealtimeSource* activeSources[kMaxPadSlots];
     int numActiveSources = 0;
+    int numPlayingSources = 0;
 
     for (int i = 0; i < kMaxPadSlots; ++i)
+    {
         if (auto* src = slots[(size_t) i].load (std::memory_order_acquire))
+        {
             activeSources[numActiveSources++] = src;
+
+            if (src->isCurrentlyPlayingForMetering())
+                ++numPlayingSources;
+        }
+    }
 
     // Xóa toàn bộ output channels
     for (int ch = 0; ch < numOutputChannels; ++ch)
         juce::FloatVectorOperations::clear (outputChannelData[ch], numSamples);
 
-    // Decay peak meter từng bus (không alloc, không lock)
+    // Decay peak meter từng bus khi còn nguồn phát; dập tắt ngay khi im lặng.
     constexpr float kDecay = 0.80f;
     constexpr float kBoost = 1.00f; // Peak bus nội bộ.
-    for (auto& bus : buses)
+
+    if (numPlayingSources == 0)
     {
-        bus.peakL.store (bus.peakL.load (std::memory_order_relaxed) * kDecay, std::memory_order_relaxed);
-        bus.peakR.store (bus.peakR.load (std::memory_order_relaxed) * kDecay, std::memory_order_relaxed);
+        for (auto& bus : buses)
+        {
+            bus.peakL.store (0.0f, std::memory_order_relaxed);
+            bus.peakR.store (0.0f, std::memory_order_relaxed);
+        }
+    }
+    else if (numActiveSources > 0)
+    {
+        for (auto& bus : buses)
+        {
+            bus.peakL.store (bus.peakL.load (std::memory_order_relaxed) * kDecay, std::memory_order_relaxed);
+            bus.peakR.store (bus.peakR.load (std::memory_order_relaxed) * kDecay, std::memory_order_relaxed);
+        }
     }
 
     if (tempBuffer.getNumSamples() < numSamples)
@@ -936,9 +956,9 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
             const float* dataL = tempBuffer.getReadPointer (0);
             juce::FloatVectorOperations::addWithMultiply (outputChannelData[ch0], dataL, busGain, numSamples);
 
-            float peakL = 0.0f;
-            for (int s = 0; s < numSamples; ++s) peakL = std::max (peakL, std::abs (dataL[s]));
-            peakL *= busGain * kBoost;
+            const auto rangeL = juce::FloatVectorOperations::findMinAndMax (dataL, numSamples);
+            const float peakL = juce::jmax (std::abs (rangeL.getStart()), std::abs (rangeL.getEnd()))
+                              * busGain * kBoost;
             if (peakL > buses[busIdx].peakL.load (std::memory_order_relaxed))
                 buses[busIdx].peakL.store (peakL, std::memory_order_relaxed);
         }
@@ -949,9 +969,9 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
             const float* dataR = tempBuffer.getReadPointer (srcCh);
             juce::FloatVectorOperations::addWithMultiply (outputChannelData[ch1], dataR, busGain, numSamples);
 
-            float peakR = 0.0f;
-            for (int s = 0; s < numSamples; ++s) peakR = std::max (peakR, std::abs (dataR[s]));
-            peakR *= busGain * kBoost;
+            const auto rangeR = juce::FloatVectorOperations::findMinAndMax (dataR, numSamples);
+            const float peakR = juce::jmax (std::abs (rangeR.getStart()), std::abs (rangeR.getEnd()))
+                              * busGain * kBoost;
             if (peakR > buses[busIdx].peakR.load (std::memory_order_relaxed))
                 buses[busIdx].peakR.store (peakR, std::memory_order_relaxed);
         }
@@ -985,11 +1005,19 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
         const float rmsR = std::sqrt (rmsAccR * invN);
 
         constexpr float kMeterCalib = 0.58f; // hạ độ nhạy để khớp mức nghe thực tế hơn.
-        const float meterL = juce::jlimit (0.0f, 1.4f, (0.42f * peakL + 0.58f * rmsL) * kMeterCalib);
-        const float meterR = juce::jlimit (0.0f, 1.4f, (0.42f * peakR + 0.58f * rmsR) * kMeterCalib);
 
-        masterMeterL.store (meterL, std::memory_order_relaxed);
-        masterMeterR.store (meterR, std::memory_order_relaxed);
+        if (numPlayingSources == 0)
+        {
+            masterMeterL.store (0.0f, std::memory_order_relaxed);
+            masterMeterR.store (0.0f, std::memory_order_relaxed);
+        }
+        else
+        {
+            const float meterL = juce::jlimit (0.0f, 1.4f, (0.42f * peakL + 0.58f * rmsL) * kMeterCalib);
+            const float meterR = juce::jlimit (0.0f, 1.4f, (0.42f * peakR + 0.58f * rmsR) * kMeterCalib);
+            masterMeterL.store (meterL, std::memory_order_relaxed);
+            masterMeterR.store (meterR, std::memory_order_relaxed);
+        }
     }
     else
     {
@@ -1172,6 +1200,8 @@ void MainComponent::shutdownAudioAndPads() noexcept
     timeSliceThread.stopThread (500);
     showcontrol::background::shutdownPool();
     showcontrol::waveform::shutdownSharedCache();
+    showcontrol::preload::shutdownSharedPool();
+    audioEngine.clearPreloadPool();
 }
 
 namespace
@@ -1360,11 +1390,6 @@ void MainComponent::wireSoundPad (SoundPad* pad)
 
             if (auto* p = safePad.getComponent())
             {
-                // Pad fade-out cũ — im lặng hoàn toàn, không kéo con trỏ/UI ngược.
-                if (! shouldAcceptPlaybackUiEventFromPad (p)
-                    && (p->isFadeOutInProgress() || p->isStopping()))
-                    return;
-
                 const int listIdx = findListIndexForPad (allLists, p);
 
                 if (listIdx == activeListIndex && listIdx >= 0)
@@ -1373,9 +1398,17 @@ void MainComponent::wireSoundPad (SoundPad* pad)
                         syncUiToPlayingPad (p, false);
                 }
 
-                masterDeckPanel.refreshTransportLabels();
-                masterDeckPanel.repaint();
-                inspectorPanel.refreshTransportUi();
+                if (p->isPlaying() || p->isPaused())
+                {
+                    masterDeckPanel.refreshTransportLabels();
+                    masterDeckPanel.repaint();
+                    inspectorPanel.refreshTransportUi();
+                }
+                else
+                {
+                    shortCircuitGlobalPlaybackVisuals();
+                }
+
                 refreshSidebarPlayingStatus();
                 updateCuePlaybackIndicators();
             }
@@ -1562,7 +1595,7 @@ void MainComponent::wireSoundPad (SoundPad* pad)
         if (loadedPad != nullptr)
         {
             if (isInitialLoading.load (std::memory_order_relaxed))
-                reloadPadWaveformFromConfig (loadedPad);
+                loadedPad->requestWaveformThumbnailLoad();
 
             const int listIdx = findListIndexForPad (allLists, loadedPad);
             if (listIdx >= 0)
@@ -1781,7 +1814,7 @@ StageMonitorSnapshot MainComponent::buildStageMonitorSnapshot (SoundPad* pad) co
 {
     StageMonitorSnapshot snapshot;
 
-    if (pad == nullptr || ! pad->hasAudioFile() || ! pad->isTransportActive())
+    if (pad == nullptr || ! pad->hasAudioFile() || ! pad->isPlaybackPositionLive())
         return snapshot;
 
     snapshot.isPlaying = true;
@@ -1943,7 +1976,7 @@ SoundPad* MainComponent::findPlayingPadInActiveBgmList() const
 
     for (auto* pad : list->pads)
     {
-        if (pad != nullptr && pad->isTransportActive())
+        if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
             return pad;
     }
 
@@ -2010,7 +2043,7 @@ SoundPad* MainComponent::getAllActivePlayingPadTrackGlobal() const noexcept
 
         for (auto* pad : list->pads)
         {
-            if (pad != nullptr && pad->isTransportActive())
+            if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
                 return pad;
         }
     }
@@ -2027,7 +2060,7 @@ SoundPad* MainComponent::getAllActivePlayingCueTrackGlobal() const noexcept
 
         for (auto* pad : list->pads)
         {
-            if (pad != nullptr && pad->isTransportActive())
+            if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
                 return pad;
         }
     }
@@ -2044,7 +2077,7 @@ SoundPad* MainComponent::getAllActivePlayingBGMTrackGlobal() const noexcept
 
         for (auto* pad : list->pads)
         {
-            if (pad != nullptr && pad->isTransportActive())
+            if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
                 return pad;
         }
     }
@@ -2231,7 +2264,7 @@ void MainComponent::triggerBgmPlayPause()
         forwardUiSelectionToPad (targetPad, true);
 
         if (! playing->isFadeOutInProgress())
-            playing->startFadeOut();
+            playing->triggerStopImmediate();
 
         broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
         targetPad->triggerPlay();
@@ -2250,7 +2283,8 @@ void MainComponent::triggerBgmPlayPause()
         if (playing->isFadeOutInProgress())
             return;
 
-        playing->startFadeOut();
+        playing->triggerStopImmediate();
+        shortCircuitGlobalPlaybackVisuals();
         broadcastSyncIfPrimary ([this, targetIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
         {
             b.sendStopCue (activeListIndex, targetIndex);
@@ -3924,6 +3958,143 @@ void MainComponent::applyTagColourWithUndo (int listIdx, int index, juce::Colour
                              });
 }
 
+juce::Colour MainComponent::getTagColourAtListIndex (const ListData& list, int index) const
+{
+    if (juce::isPositiveAndBelow (index, list.cueMeta.size()))
+        return list.cueMeta.getReference (index).tagColour;
+
+    if (auto* pad = list.pads[index])
+        return pad->getTagColour();
+
+    return showcontrol::colours::defaultTagColour();
+}
+
+void MainComponent::applyTagColourBatchInternal (int listIdx, const juce::Array<juce::Colour>& colours)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr)
+        return;
+
+    const int count = juce::jmin (list->pads.size(), colours.size());
+    const bool prevSync = syncApplying.exchange (true);
+
+    for (int i = 0; i < count; ++i)
+    {
+        const auto snapped = showcontrol::colours::snapToPalette (colours.getReference (i));
+
+        if (auto* pad = list->pads[i])
+            pad->setPadThemeColour (snapped);
+
+        if (i < list->cueMeta.size())
+            list->cueMeta.getReference (i).tagColour = snapped;
+    }
+
+    syncApplying.store (prevSync);
+    refreshTagColourLiveUi (*list, 0);
+
+    if (inspectorPanel.getCurrentPad() != nullptr)
+        inspectorPanel.refreshTagColourUi();
+
+    triggerSave();
+
+    if (! syncApplying.load (std::memory_order_acquire))
+    {
+        for (int i = 0; i < count; ++i)
+            schedulePadPatchBroadcast (listIdx, i, showcontrol::backup::padpatch::kColour);
+    }
+}
+
+void MainComponent::applyTagColourBatchWithUndo (int listIdx,
+                                                 const juce::Array<juce::Colour>& colours,
+                                                 const juce::String& undoLabel)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->pads.isEmpty())
+        return;
+
+    juce::Array<juce::Colour> oldColours;
+    oldColours.ensureStorageAllocated (list->pads.size());
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        oldColours.add (getTagColourAtListIndex (*list, i));
+
+    juce::Array<juce::Colour> newColours;
+    newColours.ensureStorageAllocated (list->pads.size());
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        newColours.add (i < colours.size()
+                            ? showcontrol::colours::snapToPalette (colours.getReference (i))
+                            : getTagColourAtListIndex (*list, i));
+
+    bool anyChange = false;
+
+    for (int i = 0; i < oldColours.size(); ++i)
+    {
+        if (oldColours.getReference (i) != newColours.getReference (i))
+        {
+            anyChange = true;
+            break;
+        }
+    }
+
+    if (! anyChange)
+        return;
+
+    performUndoableMutation (undoLabel,
+                             [this, listIdx, newColours]()
+                             {
+                                 applyTagColourBatchInternal (listIdx, newColours);
+                             },
+                             [this, listIdx, oldColours]()
+                             {
+                                 applyTagColourBatchInternal (listIdx, oldColours);
+                             });
+}
+
+void MainComponent::applyAutoTagColoursToListWithUndo (int listIdx)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->pads.isEmpty())
+        return;
+
+    juce::Array<juce::Colour> colours;
+    colours.ensureStorageAllocated (list->pads.size());
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        colours.add (showcontrol::colours::autoAssignTagColourForItem (i));
+
+    applyTagColourBatchWithUndo (listIdx, colours,
+                                 juce::String::fromUTF8 (u8"Tô màu tự động toàn danh sách"));
+}
+
+void MainComponent::resetAllTagColoursInListWithUndo (int listIdx)
+{
+    if (! juce::isPositiveAndBelow (listIdx, allLists.size()))
+        return;
+
+    auto* list = allLists[listIdx];
+    if (list == nullptr || list->pads.isEmpty())
+        return;
+
+    juce::Array<juce::Colour> colours;
+    colours.ensureStorageAllocated (list->pads.size());
+
+    for (int i = 0; i < list->pads.size(); ++i)
+        colours.add (showcontrol::colours::defaultTagColour());
+
+    applyTagColourBatchWithUndo (listIdx, colours,
+                                 juce::String::fromUTF8 (u8"Reset màu toàn danh sách"));
+}
+
 void MainComponent::restorePlaylistSnapshot (const PlaylistSnapshotUndoState& state)
 {
     const int idx = juce::jlimit (0, allLists.size(), state.listIdx);
@@ -5414,6 +5585,30 @@ void MainComponent::itemDropped (const juce::DragAndDropTarget::SourceDetails& d
     handleCrossCopyDropOnPadGrid (dragSourceDetails);
 }
 
+void MainComponent::dragOperationEnded (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails)
+{
+    const auto desc = dragSourceDetails.description;
+
+    if (showcontrol::crossdrag::isLocalPadMoveDrag (desc)
+        || showcontrol::crossdrag::isLocalRowReorderDrag (desc))
+    {
+        if (padReorderActive && ! crossComponentDragConsumed)
+            cancelPadReorder();
+    }
+
+    if (showcontrol::crossdrag::isLocalPadMoveDrag (desc))
+    {
+        if (auto* panel = getPadPanel())
+        {
+            if (panel->getDraggingActive())
+            {
+                panel->setDraggingActive (false);
+                panel->setPadChildrenMousePassthrough (false);
+            }
+        }
+    }
+}
+
 void MainComponent::appendPadsFromGridToList (int targetListIdx,
                                               const juce::Array<int>& padIndices)
 {
@@ -5753,14 +5948,37 @@ void MainComponent::layoutActiveListPads()
             const bool inPrefetchRange = (padCellBounds.getBottom() >= scrollY - kPrefetchMarginPx)
                                            && (padCellBounds.getY() <= scrollY + viewH + kPrefetchMarginPx);
             const bool selectedOrActive = isPadSelectedInActiveList (i)
-                                              || (p->isPlaying() || p->isTransportActive());
+                                              || p->isPlaybackPositionLive();
             const bool allowThumb = selectedOrActive || inPrefetchRange;
-            p->setThumbnailLoadAllowed (allowThumb);
-            p->setNormalizationLoadAllowed (allowThumb);
+            p->setThumbnailLoadAllowed (allowThumb, selectedOrActive);
+            p->setNormalizationLoadAllowed (allowThumb, selectedOrActive);
 
             if (allowThumb && p->getFilePath().isNotEmpty())
-                p->reloadWaveformThumbnail();
+                p->requestWaveformThumbnailLoad();
         }
+
+        juce::Array<SoundPad*> deferredWaveformPads;
+        deferredWaveformPads.ensureStorageAllocated (current->pads.size());
+
+        for (int i = 0; i < current->pads.size(); ++i)
+        {
+            auto* p = current->pads[i];
+            if (p == nullptr || p->getFilePath().isEmpty() || p->isThumbnailLoaded())
+                continue;
+
+            const auto padCellBounds = showcontrol::padgrid::boundedCellBounds (gridLayout.cellW,
+                                                                                  gridLayout.cellH,
+                                                                                  p->getGridRow(),
+                                                                                  p->getGridCol());
+            const bool inPrefetchRange = (padCellBounds.getBottom() >= scrollY - kPrefetchMarginPx)
+                                           && (padCellBounds.getY() <= scrollY + viewH + kPrefetchMarginPx);
+
+            if (inPrefetchRange && ! isPadSelectedInActiveList (i))
+                deferredWaveformPads.add (p);
+        }
+
+        if (deferredWaveformPads.size() > 1)
+            staggerWaveformLoadsForPads (deferredWaveformPads, 12, 4);
 
         return;
     }
@@ -5806,11 +6024,11 @@ void MainComponent::layoutActiveListPads()
             const bool inPrefetchRange = (padBottom >= scrollY - kPrefetchMarginPx)
                                            && (padTop <= scrollY + viewH + kPrefetchMarginPx);
             const bool selectedOrPrefetch = isPadSelectedInActiveList (i) || inPrefetchRange;
-            p->setThumbnailLoadAllowed (selectedOrPrefetch);
-            p->setNormalizationLoadAllowed (selectedOrPrefetch);
+            p->setThumbnailLoadAllowed (selectedOrPrefetch, isPadSelectedInActiveList (i));
+            p->setNormalizationLoadAllowed (selectedOrPrefetch, isPadSelectedInActiveList (i));
 
             if (selectedOrPrefetch && p->getFilePath().isNotEmpty())
-                p->reloadWaveformThumbnail();
+                p->requestWaveformThumbnailLoad();
 
             y += rowHeight;
             totalHeightOfContent = y;
@@ -5981,7 +6199,10 @@ void MainComponent::endPadReorder()
     const bool gridMode = padReorderIsGridMode;
 
     if (gridMode && draggedPad != nullptr && draggedPad->hasActiveJuceSystemDrag())
+    {
+        cancelPadReorder();
         return;
+    }
 
     if (gridMode && draggedPad != nullptr && listIdx >= 0 && listIdx < allLists.size())
     {
@@ -6065,6 +6286,8 @@ void MainComponent::cancelPadReorder (bool keepPadGridDragVisual)
     {
         if (! keepPadGridDragVisual)
             panel->setDraggingActive (false);
+        else
+            panel->setPadChildrenMousePassthrough (false);
 
         panel->repaint();
     }
@@ -6892,7 +7115,7 @@ void MainComponent::crossfadeOtherPadsOnSameBus (SoundPad* starter, int listInde
             continue;
 
         if (p->getOutputBus() == bus && (p->isTransportActive() || p->isFading()))
-            p->startFadeOut();
+            p->triggerStopImmediate();
     }
 }
 
@@ -7059,7 +7282,10 @@ namespace
         deleteItem   = 5,
         resetFade    = 6,
         renameTrack  = 7,
-        sortAscending = 8
+        sortAscending = 8,
+        autoColorList = 9,
+        resetItemColour = 10,
+        resetAllColours = 11
     };
 }
 
@@ -7076,6 +7302,9 @@ void MainComponent::showBgmListBackgroundSortMenu (const juce::MouseEvent& e)
 
     juce::PopupMenu menu;
     menu.addItem (1, juce::String::fromUTF8 (u8"Sắp xếp danh sách tự động tăng dần (A-Z) 🔤"));
+    menu.addSeparator();
+    menu.addItem (2, juce::String::fromUTF8 (u8"Tô màu tự động toàn danh sách"));
+    menu.addItem (3, juce::String::fromUTF8 (u8"Reset màu toàn danh sách"));
 
     const int listIdx = activeListIndex;
     juce::Component::SafePointer<MainComponent> safeThis (this);
@@ -7083,10 +7312,23 @@ void MainComponent::showBgmListBackgroundSortMenu (const juce::MouseEvent& e)
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (scrollContent.get()).withMousePosition(),
                         [safeThis, listIdx] (int result)
                         {
-                            if (safeThis == nullptr || result != 1)
+                            if (safeThis == nullptr || result == 0)
                                 return;
 
-                            safeThis->sortListTracksAscending (listIdx);
+                            if (result == 1)
+                            {
+                                safeThis->sortListTracksAscending (listIdx);
+                                return;
+                            }
+
+                            if (result == 2)
+                            {
+                                safeThis->applyAutoTagColoursToListWithUndo (listIdx);
+                                return;
+                            }
+
+                            if (result == 3)
+                                safeThis->resetAllTagColoursInListWithUndo (listIdx);
                         });
 }
 
@@ -7158,6 +7400,18 @@ void MainComponent::showTrackContextMenu (SoundPad* pad)
                             }),
                         nullptr,
                         juce::String::fromUTF8 (u8" "));
+
+    menu.addSeparator();
+    menu.addItem ((int) TrackMenuId::autoColorList,
+                  juce::String::fromUTF8 (u8"Tô màu tự động toàn danh sách"),
+                  totalTracks > 0);
+    menu.addItem ((int) TrackMenuId::resetItemColour,
+                  juce::String::fromUTF8 (u8"Reset màu mục này về mặc định"));
+    if (totalTracks > 1)
+        menu.addItem ((int) TrackMenuId::resetAllColours,
+                      juce::String::fromUTF8 (u8"Reset màu toàn danh sách"));
+
+    menu.addSeparator();
 
     if (canSort)
     {
@@ -7241,6 +7495,18 @@ void MainComponent::handleTrackMenuResult (SoundPad* pad, int result)
 
         case TrackMenuId::resetFade:
             resetFadeForSelectedPads();
+            break;
+
+        case TrackMenuId::autoColorList:
+            applyAutoTagColoursToListWithUndo (listIdx);
+            break;
+
+        case TrackMenuId::resetItemColour:
+            applyTagColourWithUndo (listIdx, padIdx, showcontrol::colours::defaultTagColour());
+            break;
+
+        case TrackMenuId::resetAllColours:
+            resetAllTagColoursInListWithUndo (listIdx);
             break;
 
         case TrackMenuId::deleteItem:
@@ -8054,6 +8320,9 @@ MainComponent::MainComponent()
     };
     container->onBackgroundMouseUp = [this] (const juce::MouseEvent&)
     {
+        if (padReorderActive)
+            cancelPadReorder();
+
         endMarqueeSelection();
     };
     container->onPadDroppedAtCell = [this] (SoundPad* pad, int row, int col)
@@ -8314,6 +8583,18 @@ MainComponent::MainComponent()
         applyTagColourWithUndo (activeListIndex, cueIndex, colour);
     };
 
+    cueListPanel->onAutoTagColoursRequested = [this]
+    {
+        if (activeListIndex >= 0)
+            applyAutoTagColoursToListWithUndo (activeListIndex);
+    };
+
+    cueListPanel->onResetAllTagColoursRequested = [this]
+    {
+        if (activeListIndex >= 0)
+            resetAllTagColoursInListWithUndo (activeListIndex);
+    };
+
     cueListPanel->onTrackRenamed = [this] (int cueIndex, const juce::String& newName, const juce::String& oldName)
     {
         if (isOperatingState())
@@ -8419,6 +8700,21 @@ MainComponent::MainComponent()
         updateListThemeColour (idx, colour);
     };
 
+    sidebarPanel.onAutoTagItemsInList = [this] (int idx)
+    {
+        applyAutoTagColoursToListWithUndo (idx);
+    };
+
+    sidebarPanel.onResetAllTagItemsInList = [this] (int idx)
+    {
+        resetAllTagColoursInListWithUndo (idx);
+    };
+
+    sidebarPanel.onResetListThemeColour = [this] (int idx)
+    {
+        updateListThemeColour (idx, showcontrol::colours::defaultTagColour());
+    };
+
     // BGM: isLooping = lặp lại cả danh sách (playlist wrap). CUE: loop từng pad.
     sidebarPanel.onLoopListToggled = [this] (int idx, bool isLooping)
     {
@@ -8483,27 +8779,12 @@ MainComponent::MainComponent()
 
     inspectorPanel.onPlayPadRequested = [this] (SoundPad* pad)
     {
-        if (pad == nullptr)
-            return;
-
-        const int listIdx = findListIndexForPad (allLists, pad);
-        if (listIdx >= 0 && listIdx < allLists.size() && listIdx != activeListIndex)
-        {
-            auto* list = allLists[listIdx];
-            if (list != nullptr)
-            {
-                sidebarPanel.setSelectedIndex (listIdx);
-                loadList (listIdx, sidebarPanel.getListTrackCount (listIdx), list->isGrid);
-            }
-        }
-
-        syncUiToPlayingPad (pad, true);
+        triggerInspectorPlayPause (pad);
     };
 
     inspectorPanel.onFadePadRequested = [this] (SoundPad* pad)
     {
-        if (pad != nullptr)
-            syncUiToPlayingPad (pad, false);
+        triggerInspectorFadeStop (pad);
     };
 
     inspectorPanel.onProjectEdited = [this]
@@ -8664,7 +8945,8 @@ void MainComponent::finishDeferredStartup()
         return;
 
     timeSliceThread.startThread (juce::Thread::Priority::high);
-    showcontrol::waveform::waveformCacheDirectory().createDirectory();
+    showcontrol::waveform::prepareSharedCache();
+    showcontrol::preload::prepareSharedPool();
 
     deviceManager.initialiseWithDefaultDevices (0, 2);
     {
@@ -8673,9 +8955,11 @@ void MainComponent::finishDeferredStartup()
 
         bool changed = false;
 
-        if (setup.bufferSize > 256)
+        constexpr int kPreferredBufferSize = 128;
+
+        if (setup.bufferSize > kPreferredBufferSize)
         {
-            setup.bufferSize = 256;
+            setup.bufferSize = kPreferredBufferSize;
             changed = true;
         }
 
@@ -9964,8 +10248,6 @@ void MainComponent::triggerGlobalPanicFadeAll()
 
 void MainComponent::executePanicFadeAllLocked()
 {
-    static constexpr double kPanicFadeMs = 1500.0;
-
     if (! syncApplying.load (std::memory_order_acquire))
     {
         broadcastSyncIfPrimary ([] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
@@ -9985,8 +10267,8 @@ void MainComponent::executePanicFadeAllLocked()
         return;
     }
 
-    juce::Array<juce::Component::SafePointer<SoundPad>> fadeTargets;
-    fadeTargets.ensureStorageAllocated (32);
+    juce::Array<juce::Component::SafePointer<SoundPad>> stopTargets;
+    stopTargets.ensureStorageAllocated (32);
 
     {
         const juce::ScopedLock audioDeviceLock (deviceManager.getAudioCallbackLock());
@@ -10004,30 +10286,29 @@ void MainComponent::executePanicFadeAllLocked()
                 if (! pad->isTransportActive())
                     continue;
 
-                if (pad->isFadeOutInProgress())
-                    continue;
-
-                fadeTargets.add (pad);
+                stopTargets.add (pad);
             }
         }
     }
 
-    int fadedCount = 0;
+    int stoppedCount = 0;
 
-    for (auto& safePad : fadeTargets)
+    for (auto& safePad : stopTargets)
     {
         if (auto* pad = safePad.getComponent())
         {
-            pad->startFadeOut (kPanicFadeMs, true);
-            ++fadedCount;
+            pad->triggerStopImmediate();
+            ++stoppedCount;
         }
     }
 
+    shortCircuitGlobalPlaybackVisuals();
+
     juce::Component::SafePointer<MainComponent> safeThis (this);
-    juce::MessageManager::callAsync ([safeThis, fadedCount]
+    juce::MessageManager::callAsync ([safeThis, stoppedCount]
     {
         if (safeThis != nullptr)
-            safeThis->applyPanicFadeUiAftermath (fadedCount);
+            safeThis->applyPanicFadeUiAftermath (stoppedCount);
     });
 }
 
@@ -10062,9 +10343,60 @@ void MainComponent::reloadPadWaveformFromConfig (SoundPad* pad)
     if (! trackFile.existsAsFile())
         return;
 
-    pad->setThumbnailLoadAllowed (true);
-    pad->reloadWaveformThumbnail();
+    pad->setThumbnailLoadAllowed (true, true);
+    pad->requestWaveformThumbnailLoad();
     pad->repaint();
+}
+
+void MainComponent::staggerWaveformLoadsForPads (const juce::Array<SoundPad*>& pads,
+                                                 int batchSize,
+                                                 int batchDelayMs)
+{
+    if (pads.isEmpty())
+        return;
+
+    batchSize      = juce::jmax (1, batchSize);
+    batchDelayMs   = juce::jmax (0, batchDelayMs);
+
+    struct BatchState
+    {
+        juce::Component::SafePointer<MainComponent> owner;
+        juce::Array<SoundPad*> pads;
+        int nextIndex = 0;
+        int batchSize = 16;
+        int batchDelayMs = 4;
+    };
+
+    auto state = std::make_shared<BatchState>();
+    state->owner = this;
+    state->pads = pads;
+    state->batchSize = batchSize;
+    state->batchDelayMs = batchDelayMs;
+
+    std::function<void()> processBatch;
+    processBatch = [state, processBatch]()
+    {
+        if (state->owner == nullptr)
+            return;
+
+        const int end = juce::jmin (state->nextIndex + state->batchSize, state->pads.size());
+
+        for (int i = state->nextIndex; i < end; ++i)
+        {
+            if (auto* pad = state->pads.getReference (i))
+            {
+                pad->setThumbnailLoadAllowed (true, false);
+                pad->requestWaveformThumbnailLoad();
+            }
+        }
+
+        state->nextIndex = end;
+
+        if (state->nextIndex < state->pads.size())
+            juce::Timer::callAfterDelay (state->batchDelayMs, processBatch);
+    };
+
+    processBatch();
 }
 
 void MainComponent::reloadAllPadWaveformsFromConfig()
@@ -10090,49 +10422,13 @@ void MainComponent::reloadAllPadWaveformsStaggered (int batchSize, int batchDela
             continue;
 
         for (auto* pad : list->pads)
-            if (pad != nullptr)
+        {
+            if (pad != nullptr && pad->getFilePath().isNotEmpty() && ! pad->isThumbnailLoaded())
                 pads.add (pad);
+        }
     }
 
-    if (pads.isEmpty())
-        return;
-
-    batchSize  = juce::jmax (1, batchSize);
-    batchDelayMs = juce::jmax (0, batchDelayMs);
-
-    struct BatchState
-    {
-        juce::Component::SafePointer<MainComponent> owner;
-        juce::Array<SoundPad*> pads;
-        int nextIndex = 0;
-        int batchSize = 6;
-        int batchDelayMs = 16;
-    };
-
-    auto state = std::make_shared<BatchState>();
-    state->owner = this;
-    state->pads = std::move (pads);
-    state->batchSize = batchSize;
-    state->batchDelayMs = batchDelayMs;
-
-    std::function<void()> processBatch;
-    processBatch = [state, processBatch]()
-    {
-        if (state->owner == nullptr)
-            return;
-
-        const int end = juce::jmin (state->nextIndex + state->batchSize, state->pads.size());
-
-        for (int i = state->nextIndex; i < end; ++i)
-            state->owner->reloadPadWaveformFromConfig (state->pads.getReference (i));
-
-        state->nextIndex = end;
-
-        if (state->nextIndex < state->pads.size())
-            juce::Timer::callAfterDelay (state->batchDelayMs, processBatch);
-    };
-
-    processBatch();
+    staggerWaveformLoadsForPads (pads, batchSize, batchDelayMs);
 }
 
 void MainComponent::refreshStartupPlaylistDisplay()
@@ -10163,6 +10459,51 @@ void MainComponent::refreshStartupPlaylistDisplay()
     repaint();
 }
 
+void MainComponent::warmAudioPreloadPoolForProject()
+{
+    juce::Array<juce::File> uniqueFiles;
+    uniqueFiles.ensureStorageAllocated (128);
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad == nullptr)
+                continue;
+
+            const auto path = pad->getConfiguredFilePath();
+
+            if (path.isEmpty())
+                continue;
+
+            const juce::File file (path);
+
+            if (! file.existsAsFile())
+                continue;
+
+            bool alreadyQueued = false;
+
+            for (const auto& existing : uniqueFiles)
+            {
+                if (existing == file)
+                {
+                    alreadyQueued = true;
+                    break;
+                }
+            }
+
+            if (! alreadyQueued)
+                uniqueFiles.add (file);
+        }
+    }
+
+    for (const auto& file : uniqueFiles)
+        audioEngine.requestTrackPreload (file);
+}
+
 void MainComponent::finalizeStartupPlaylistUi()
 {
     if (activeListIndex >= 0 && activeListIndex < allLists.size())
@@ -10176,8 +10517,9 @@ void MainComponent::finalizeStartupPlaylistUi()
         loadList (-1, 0, true);
     }
 
-    reloadAllPadWaveformsStaggered();
     layoutActiveListPads();
+    reloadAllPadWaveformsStaggered (16, 4);
+    warmAudioPreloadPoolForProject();
     refreshSidebarPlayingStatus();
     updateCuePlaybackIndicators();
 
@@ -11048,7 +11390,6 @@ void MainComponent::updateCuePlaybackIndicators()
 
     int playingIdx = -1;
     int armedIdx   = -1;
-    int activeCount = 0;
 
     for (int i = 0; i < list->pads.size(); ++i)
     {
@@ -11057,13 +11398,12 @@ void MainComponent::updateCuePlaybackIndicators()
         if (pad == nullptr)
             continue;
 
-        if (pad->isTransportActive())
+        if (pad->isPlaying() || pad->isPaused())
         {
             if (uiPlaybackFocusPad != nullptr && pad != uiPlaybackFocusPad && pad->isFadeOutInProgress())
                 continue;
 
             playingIdx = i;
-            ++activeCount;
         }
 
         if (pad->isArmed())
@@ -11076,29 +11416,6 @@ void MainComponent::updateCuePlaybackIndicators()
 
         if (uiPlaybackFocusPad->isPlaying() || uiPlaybackFocusPad->isPaused())
             playingIdx = focusIdx;
-        else if (playingIdx < 0 && juce::isPositiveAndBelow (focusIdx, list->pads.size()))
-            playingIdx = focusIdx;
-    }
-    else if (activeCount != 1)
-    {
-        playingIdx = -1;
-
-        for (int i = 0; i < list->pads.size(); ++i)
-        {
-            auto* pad = list->pads[i];
-
-            if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
-            {
-                if (uiPlaybackFocusPad != nullptr && pad != uiPlaybackFocusPad && pad->isFadeOutInProgress())
-                    continue;
-
-                playingIdx = i;
-                break;
-            }
-        }
-
-        if (playingIdx < 0 && juce::isPositiveAndBelow (selectedBgmIndex, list->pads.size()))
-            playingIdx = selectedBgmIndex;
     }
 
     if (playingIdx == lastCuePlaybackPlayingIdx
@@ -11289,6 +11606,9 @@ bool MainComponent::triggerCueListStop (int padIndex)
     refreshSidebarPlayingStatus();
 
     if (ok)
+        shortCircuitGlobalPlaybackVisuals();
+
+    if (ok)
     {
         broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
         {
@@ -11297,6 +11617,171 @@ bool MainComponent::triggerCueListStop (int padIndex)
     }
 
     return ok;
+}
+
+bool MainComponent::triggerInspectorPlayPause (SoundPad* pad)
+{
+    if (pad == nullptr || isPlaybackCommandBlocked())
+        return false;
+
+    if (shouldBlockLocalPlaybackCommand())
+        return false;
+
+    const int listIdx = findListIndexForPad (allLists, pad);
+
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return false;
+
+    auto* list = allLists[listIdx];
+
+    if (list == nullptr || ! pad->hasAudioFile())
+        return false;
+
+    const int padIndex = list->pads.indexOf (pad);
+
+    if (padIndex < 0)
+        return false;
+
+    if (listIdx != activeListIndex)
+    {
+        sidebarPanel.setSelectedIndex (listIdx);
+        loadList (listIdx, sidebarPanel.getListTrackCount (listIdx), list->isGrid);
+    }
+
+    syncUiToPlayingPad (pad, true);
+
+    if (! list->isGrid)
+    {
+        pad->prepareForInstantPlay();
+
+        SoundPad* playing = findPlayingPadInActiveBgmList();
+        const int playingIndex = (playing != nullptr) ? list->pads.indexOf (playing) : -1;
+
+        if (playing != nullptr && playingIndex != padIndex)
+        {
+            if (! allowTransportCommand (TransportCommandKind::play,
+                                         lastBgmTransportKind,
+                                         lastBgmTransportCommandMs))
+                return false;
+
+            if (! playing->isFadeOutInProgress())
+                playing->triggerStopImmediate();
+
+            broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
+            pad->triggerPlay();
+            syncUiToPlayingPad (pad, false);
+            refreshMasterDeckBgmTransportState();
+            return true;
+        }
+
+        if (playing != nullptr && playingIndex == padIndex)
+        {
+            if (! allowTransportCommand (TransportCommandKind::stop,
+                                         lastBgmTransportKind,
+                                         lastBgmTransportCommandMs))
+                return false;
+
+            if (playing->isFadeOutInProgress())
+                return false;
+
+            playing->triggerStopImmediate();
+            shortCircuitGlobalPlaybackVisuals();
+            broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+            {
+                b.sendStopCue (activeListIndex, padIndex);
+            });
+            refreshMasterDeckBgmTransportState();
+            return true;
+        }
+
+        if (! allowTransportCommand (TransportCommandKind::play,
+                                     lastBgmTransportKind,
+                                     lastBgmTransportCommandMs))
+            return false;
+
+        for (auto* other : list->pads)
+            if (other != nullptr && other != pad)
+                other->triggerStop();
+
+        broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
+        pad->triggerPlay();
+        syncUiToPlayingPad (pad, true);
+        refreshMasterDeckBgmTransportState();
+        return true;
+    }
+
+    if (list->useCueListPanel)
+    {
+        if (pad->isPlaying() || pad->isFading())
+            return triggerCueListPause (padIndex);
+
+        return triggerCueListPlay (padIndex);
+    }
+
+    return triggerCueGo (padIndex);
+}
+
+bool MainComponent::triggerInspectorFadeStop (SoundPad* pad)
+{
+    if (pad == nullptr || isPlaybackCommandBlocked())
+        return false;
+
+    if (shouldBlockLocalPlaybackCommand())
+        return false;
+
+    const int listIdx = findListIndexForPad (allLists, pad);
+
+    if (listIdx < 0 || listIdx >= allLists.size())
+        return false;
+
+    auto* list = allLists[listIdx];
+
+    if (list == nullptr)
+        return false;
+
+    const int padIndex = list->pads.indexOf (pad);
+
+    if (padIndex < 0)
+        return false;
+
+    if (listIdx != activeListIndex)
+    {
+        sidebarPanel.setSelectedIndex (listIdx);
+        loadList (listIdx, sidebarPanel.getListTrackCount (listIdx), list->isGrid);
+    }
+
+    syncUiToPlayingPad (pad, false);
+
+    if (! list->isGrid)
+    {
+        if (! pad->isPlaying() && ! pad->isFading())
+            return false;
+
+        if (! allowTransportCommand (TransportCommandKind::stop,
+                                     lastBgmTransportKind,
+                                     lastBgmTransportCommandMs))
+            return false;
+
+        if (pad->isFadeOutInProgress())
+            return false;
+
+        pad->triggerStopImmediate();
+        shortCircuitGlobalPlaybackVisuals();
+        broadcastSyncIfPrimary ([this, padIndex] (showcontrol::backup::ShowBackupSyncBroadcaster& b)
+        {
+            b.sendStopCue (activeListIndex, padIndex);
+        });
+        refreshMasterDeckBgmTransportState();
+        return true;
+    }
+
+    if (list->useCueListPanel)
+        return triggerCueListStop (padIndex);
+
+    if (pad->isPlaying() || pad->isFading())
+        return triggerCueGo (padIndex);
+
+    return false;
 }
 
 bool MainComponent::triggerCueGo (int padIndex, bool fromSync, int listIndexOverride)
@@ -11364,16 +11849,8 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync, int listIndexOver
         }
         else if (goPad->isPlaying() || goPad->isFading() || goPad->isStopping())
         {
-            // Đang phát / fade-out stop → chỉ dừng (fade), không triggerPlay ngay sau.
-            if (goPad->isStopping() || goPad->isFading() || goPad->isFadeOutArmed())
-            {
-                updateCuePlaybackIndicators();
-                refreshSidebarPlayingStatus();
-                return;
-            }
-
-            goPad->stopTransportWithConfiguredFade();
-
+            goPad->triggerStopImmediate();
+            shortCircuitGlobalPlaybackVisuals();
             updateCuePlaybackIndicators();
             refreshSidebarPlayingStatus();
             return;
@@ -11724,8 +12201,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
     if (auto* dw = opts.launchAsync())
     {
         GlobalPreferencesDialog::configureDialogWindow (*dw);
-        dw->grabKeyboardFocus();
-        dialog->grabKeyboardFocus();
+        dw->toFront (true);
 
        #if JUCE_MAC
         showcontrol::mac::applyFarragoFullSizeContentView (*dw);
@@ -12069,6 +12545,60 @@ void MainComponent::applyThemePreference (int themeId)
     repaint();
 }
 
+void MainComponent::forceRepaintAllListPads() noexcept
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+            if (pad != nullptr)
+                pad->repaint();
+    }
+
+    if (scrollContent != nullptr)
+        scrollContent->repaint();
+}
+
+void MainComponent::shortCircuitGlobalPlaybackVisuals()
+{
+    multiOutputCallback.snapAllMetersToSilence();
+    masterDeckPanel.shortCircuitTransportVisuals();
+    inspectorPanel.shortCircuitTransportVisuals();
+
+    if (cueListPanel != nullptr)
+        cueListPanel->shortCircuitLiveRowVisuals();
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad != nullptr)
+            {
+                pad->getRealtimeSource().clearVisualFadeFlagsOnMessageThread();
+                if (! pad->isPlaybackPositionLive())
+                    pad->shortCircuitPlaybackVisuals();
+            }
+        }
+    }
+
+    refreshSidebarPlayingStatus();
+    updateCuePlaybackIndicators();
+    forceRepaintAllListPads();
+
+    if (findGloballyPrioritizedPlayingPad() == nullptr)
+        showNoTrackPlayingState();
+    else
+        updateMainDeskDisplay();
+
+    pushStageMonitorUpdate();
+    repaint();
+}
+
 void MainComponent::refreshSidebarPlayingStatus()
 {
     if (cachedSidebarListPlayingActive.size() != allLists.size())
@@ -12083,7 +12613,7 @@ void MainComponent::refreshSidebarPlayingStatus()
         {
             for (auto* pad : list->pads)
             {
-                if (pad != nullptr && pad->isTransportActive())
+                if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
                 {
                     listActive = true;
                     break;
@@ -12555,6 +13085,8 @@ void MainComponent::loadApplicationState()
     startupReassertTimer.reset();
     startupGuardTimer.reset();
 
+    showcontrol::waveform::prepareSharedCache();
+    showcontrol::preload::prepareSharedPool();
     showcontrol::state::ensureDefaultConfigExists();
 
     std::unique_ptr<juce::XmlElement> xml;
@@ -12943,14 +13475,20 @@ std::unique_ptr<juce::XmlElement> MainComponent::buildProjectXml()
             auto* padElem = listElem->createNewChildElement ("Pad");
             padElem->setAttribute ("index", pi);
 
-            if (pad->hasAudioFile())
+            const auto configuredPath = pad->getConfiguredFilePath();
+
+            if (configuredPath.isNotEmpty() || pad->hasAudioFile())
             {
-                padElem->setAttribute ("file", pad->getFilePath());
+                if (configuredPath.isNotEmpty())
+                    padElem->setAttribute ("file", configuredPath);
+                else
+                    padElem->setAttribute ("file", pad->getFilePath());
 
                 if (! list->isGrid && pad->isLooping())
                     padElem->setAttribute ("loopTrack", true);
 
-                writePadProjectState (*padElem, *pad);
+                if (pad->hasAudioFile())
+                    writePadProjectState (*padElem, *pad);
 
                 if (list->isGrid && pi < list->cueMeta.size())
                     writeCueMetaToPadElem (*padElem, list->cueMeta.getReference (pi));
@@ -14167,7 +14705,7 @@ void MainComponent::updateBackupConnectionUi()
         {
             quality = showcontrol::backup::LinkQuality::degraded;
             detail  = juce::String (onlineCount) + "/" + juce::String (peers.size()) + " "
-                    + showcontrol::localization::tr (u8"online");
+                    + showcontrol::localization::tr (u8"máy phụ đang kết nối");
         }
         else
         {
@@ -14183,9 +14721,10 @@ void MainComponent::updateBackupConnectionUi()
         return;
     }
 
-    juce::String title = backupTakeoverActive
-                       ? showcontrol::localization::tr (u8"Máy phụ — TAKEOVER")
-                       : showcontrol::localization::tr (u8"Máy phụ — Follower");
+    juce::String title = showcontrol::localization::tr (u8"Máy phụ");
+
+    if (backupTakeoverActive)
+        title = showcontrol::localization::tr (u8"Máy phụ (điều khiển)");
 
     const auto now = juce::Time::getMillisecondCounter();
     auto quality   = showcontrol::backup::LinkQuality::unknown;
@@ -14194,28 +14733,28 @@ void MainComponent::updateBackupConnectionUi()
     if (lastPrimaryHeartbeatRxMs == 0)
     {
         quality = showcontrol::backup::LinkQuality::offline;
-        detail  = showcontrol::localization::tr (u8"Chưa kết nối Primary");
+        detail  = showcontrol::localization::tr (u8"Chưa kết nối máy chính");
     }
     else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
     {
         quality = showcontrol::backup::LinkQuality::offline;
-        detail  = showcontrol::localization::tr (u8"Mất kết nối Primary");
+        detail  = showcontrol::localization::tr (u8"Mất liên kết máy chính");
     }
     else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
     {
         quality = showcontrol::backup::LinkQuality::degraded;
-        detail  = showcontrol::localization::tr (u8"Kết nối chập chờn");
+        detail  = showcontrol::localization::tr (u8"Kết nối không ổn định");
     }
     else
     {
         quality = showcontrol::backup::LinkQuality::good;
-        detail  = showcontrol::localization::tr (u8"Đồng bộ Primary");
+        detail  = showcontrol::localization::tr (u8"Đã đồng bộ máy chính");
 
         for (const auto& status : backupPeerStatuses)
         {
             if (status.latencyMs > 0)
             {
-                detail += " · " + juce::String (status.latencyMs) + " ms";
+                detail += " (" + juce::String (status.latencyMs) + " ms)";
                 break;
             }
         }

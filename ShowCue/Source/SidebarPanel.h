@@ -101,7 +101,10 @@ public:
         switchView     = 4,
         toggleListLoop = 5,
         deleteItem     = 6,
-        changeListColour = 100
+        changeListColour = 100,
+        autoTagItems   = 101,
+        resetAllItemColours = 102,
+        resetListColour = 103
     };
 
     SidebarPanel()
@@ -167,6 +170,9 @@ public:
     std::function<void (int)> onMorphSetStructure;
     /** Đổi màu nhãn danh sách BGM/CUE — MainComponent lưu JSON. */
     std::function<void (int, juce::Colour)> onListThemeColourChanged;
+    std::function<void (int)> onAutoTagItemsInList;
+    std::function<void (int)> onResetAllTagItemsInList;
+    std::function<void (int)> onResetListThemeColour;
     /** Smart Import: thả thư mục nhạc — tạo list mới theo tên folder (targetIsBgm: true = BGM, false = CUE). */
     std::function<void (const juce::StringArray& folderPaths, bool targetIsBgm)> onFoldersSmartImport;
     /** Sao chép xuyên phân khu — nạp track vào playlist mục tiêu mà không đổi view trung tâm. */
@@ -550,7 +556,25 @@ public:
         {
             if (auto row = getRowBoundsForListIndex (renamingListIndex))
             {
-                const auto regions = layoutSidebarRowRegions (*row);
+                const auto& renamingSet = sets.getReference (renamingListIndex);
+                int displayCount = 1;
+                for (int i = 0; i < sets.size(); ++i)
+                {
+                    if (sets[i].isGridMode != renamingSet.isGridMode)
+                        continue;
+
+                    const bool sectionExpanded = renamingSet.isGridMode ? cueExpanded : bgmExpanded;
+
+                    if (! sectionExpanded || ! sets[i].matchesSearch)
+                        continue;
+
+                    if (i == renamingListIndex)
+                        break;
+
+                    ++displayCount;
+                }
+
+                const auto regions = layoutSidebarRowForSet (*row, renamingSet, displayCount);
                 const auto scroll = sidebarViewport.getViewPosition();
                 const auto vpBounds = sidebarViewport.getBounds();
                 listNameEditor.setBounds (vpBounds.getX() + regions.nameArea.getX(),
@@ -820,32 +844,48 @@ private:
         juce::Rectangle<int> hotkeyArea;
     };
 
-    static constexpr int kRowRightPadding   = 12;
-   #if JUCE_WINDOWS
-    static constexpr int kRowHotkeyWidth    = 78;
-   #else
-    static constexpr int kRowHotkeyWidth    = 28;
-   #endif
-    static constexpr int kRowIconSlotWidth  = 18;
-    static constexpr int kRowIconGap        = 6;
-    static constexpr int kRowLeftPadding    = 14;
+    static constexpr int kRowRightPadding        = 12;
+    static constexpr int kRowHotkeyMinWidth      = 28;
+    static constexpr int kRowHotkeyExtraPad      = 4;
+    static constexpr int kRowIconSlotWidth       = 18;
+    static constexpr int kRowIconGap               = 4;
+    static constexpr int kRowIconClusterHotkeyGap  = 4;
+    static constexpr int kRowLeftPadding         = 14;
 
-    /** Cắt lát ngang dòng list — icon cố định lề phải, tên chiếm phần còn lại bên trái. */
-    static SidebarRowLayout layoutSidebarRowRegions (juce::Rectangle<int> rowArea) noexcept
+    static int measureSidebarHotkeyWidth (const juce::String& shortcutText) noexcept
+    {
+        const int measured = juce::GlyphArrangement::getStringWidthInt (sidebarListRowHotkeyFont(), shortcutText)
+                           + kRowHotkeyExtraPad;
+        return juce::jmax (kRowHotkeyMinWidth, measured);
+    }
+
+    /** Cắt lát ngang dòng list — icon cụm sát hotkey (đo rộng thực), tên chiếm phần còn lại. */
+    static SidebarRowLayout layoutSidebarRowRegions (juce::Rectangle<int> rowArea,
+                                                     int hotkeyWidth,
+                                                     bool reserveSpeakerIcon = false,
+                                                     bool reserveLoopIcon = false) noexcept
     {
         SidebarRowLayout layout;
         auto area = rowArea;
 
         area.removeFromRight (kRowRightPadding);
 
-        layout.hotkeyArea = area.removeFromRight (kRowHotkeyWidth);
-        area.removeFromRight (kRowIconGap);
+        layout.hotkeyArea = area.removeFromRight (juce::jmax (kRowHotkeyMinWidth, hotkeyWidth));
 
-        layout.speakerIconArea = area.removeFromRight (kRowIconSlotWidth);
-        area.removeFromRight (kRowIconGap);
+        const bool hasIconCluster = reserveSpeakerIcon || reserveLoopIcon;
+        if (hasIconCluster)
+            area.removeFromRight (kRowIconClusterHotkeyGap);
 
-        layout.loopIconArea = area.removeFromRight (kRowIconSlotWidth);
-        area.removeFromRight (kRowIconGap);
+        if (reserveSpeakerIcon)
+        {
+            layout.speakerIconArea = area.removeFromRight (kRowIconSlotWidth);
+
+            if (reserveLoopIcon)
+                area.removeFromRight (kRowIconGap);
+        }
+
+        if (reserveLoopIcon)
+            layout.loopIconArea = area.removeFromRight (kRowIconSlotWidth);
 
         area.removeFromLeft (kRowLeftPadding);
         layout.nameArea = area;
@@ -861,10 +901,17 @@ private:
                  sz, sz };
     }
 
-    /** Vùng tên — đồng bộ nhãn paint() và TextEditor inline (resized). */
-    static juce::Rectangle<int> layoutListNameArea (juce::Rectangle<int> rowArea) noexcept
+    static SidebarRowLayout layoutSidebarRowForSet (juce::Rectangle<int> rowArea,
+                                                    const SetInfo& setInfo,
+                                                    int displayCount) noexcept
     {
-        return layoutSidebarRowRegions (rowArea).nameArea;
+        const auto hotkeyChar = showcontrol::keyboard::getHotkeyCharForIndex (displayCount - 1);
+        const juce::String shortcutText = showcontrol::keyboard::formatPlaylistShortcut (
+            setInfo.isGridMode, hotkeyChar);
+        return layoutSidebarRowRegions (rowArea,
+                                        measureSidebarHotkeyWidth (shortcutText),
+                                        setInfo.isPlaying,
+                                        setInfo.isLooping);
     }
 
     juce::Optional<juce::Rectangle<int>> getRowBoundsForListIndex (int listIndex) const
@@ -1106,7 +1153,9 @@ private:
             g.drawRoundedRectangle (rowBounds, 4.0f, 1.5f);
         }
 
-        const auto rowLayout = layoutSidebarRowRegions ({ 10, y, width - 20, kListRowVisualHeight });
+        const auto rowLayout = layoutSidebarRowForSet ({ 10, y, width - 20, kListRowVisualHeight },
+                                                       sets[index],
+                                                       displayCount);
 
         const auto listTheme = sets[index].themeColour;
         const bool hasListTheme = ! showcontrol::colours::isDefaultTagColour (listTheme);
@@ -1212,6 +1261,13 @@ private:
                             nullptr,
                             showcontrol::localization::tr (u8"Đổi màu danh sách"));
 
+        menu.addItem ((int) SidebarMenuId::autoTagItems,
+                      juce::String::fromUTF8 (u8"Tô màu tự động các bài trong danh sách"));
+        menu.addItem ((int) SidebarMenuId::resetAllItemColours,
+                      juce::String::fromUTF8 (u8"Reset màu các bài về mặc định"));
+        menu.addItem ((int) SidebarMenuId::resetListColour,
+                      juce::String::fromUTF8 (u8"Reset màu danh sách về mặc định"));
+
         menu.addSeparator();
         menu.addItem ((int) SidebarMenuId::deleteItem, showcontrol::localization::tr (u8"Xóa"));
 
@@ -1251,6 +1307,21 @@ private:
             case SidebarMenuId::toggleListLoop:
                 if (onLoopListToggled)
                     onLoopListToggled (targetItemIndex, ! sets[targetItemIndex].isLooping);
+                break;
+
+            case SidebarMenuId::autoTagItems:
+                if (onAutoTagItemsInList)
+                    onAutoTagItemsInList (targetItemIndex);
+                break;
+
+            case SidebarMenuId::resetAllItemColours:
+                if (onResetAllTagItemsInList)
+                    onResetAllTagItemsInList (targetItemIndex);
+                break;
+
+            case SidebarMenuId::resetListColour:
+                if (onResetListThemeColour)
+                    onResetListThemeColour (targetItemIndex);
                 break;
 
             case SidebarMenuId::deleteItem:

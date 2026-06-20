@@ -1,5 +1,6 @@
 #pragma once
 #include "SoundPad.h"
+#include "ShowAudioPreloadCache.h"
 
 //==============================================================================
 /**
@@ -7,6 +8,7 @@
  *
  * Mixer thực tế: MultiOutputAudioCallback (mỗi SoundPad = một PadRealtimeSource).
  * Lớp này chỉ định nghĩa chính sách message-thread: play không cắt pad khác.
+ * Slice preload pool (QLab/Farrago-style) giảm latency GO và tăng tốc mở app.
  */
 class AudioEngine
 {
@@ -33,6 +35,17 @@ public:
 
     /** Có ít nhất một pad trong danh sách đang transport-active. */
     static bool anyCueActive (const juce::OwnedArray<SoundPad>& pads) noexcept;
+
+    /** Queue slice preload trên background thread — không chặn UI. */
+    void requestTrackPreload (const juce::File& file) noexcept;
+
+    /** Gỡ cache preload cho một file (khi xóa/replace track). */
+    void releaseTrackPreload (const juce::File& file) noexcept;
+
+    /** Xóa toàn bộ pool preload (shutdown). */
+    void clearPreloadPool() noexcept;
+
+    size_t getPreloadPoolUsedBytes() const noexcept;
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)

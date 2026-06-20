@@ -107,6 +107,14 @@ inline juce::Colour snapToPalette (juce::Colour c) noexcept
     return tagColourAt (indexOfTagColour (c));
 }
 
+/** Số màu dùng khi tô tự động (bỏ ô mặc định xám ở cuối palette). */
+inline constexpr int kAutoAssignTagColourCount = kTagPaletteSize - 1;
+
+inline juce::Colour autoAssignTagColourForItem (int itemIndex) noexcept
+{
+    return tagColourAt (juce::jmax (0, itemIndex) % kAutoAssignTagColourCount);
+}
+
 //==============================================================================
 /** Cột 9 ô màu dọc — popup Inspector, không chữ (image_f9bb28). */
 class ColorColumnMenuComponent final : public juce::PopupMenu::CustomComponent

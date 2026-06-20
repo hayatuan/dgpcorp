@@ -78,6 +78,15 @@ public:
         repaint();
     }
 
+    /** Dập tắt LED ngay khi stop — không decay 2 giây. */
+    void snapToSilence() noexcept
+    {
+        currentLeft = currentRight = 0.0f;
+        peakHoldLeft = peakHoldRight = 0.0f;
+        clipFramesLeft = clipFramesRight = 0;
+        repaint();
+    }
+
     void timerCallback() override
     {
         if (clipFramesLeft > 0)
@@ -652,11 +661,18 @@ public:
         if (activePad == nullptr || ! activePad->hasAudioFile())
             return;
 
+        const bool transportLive = activePad->isPlaying() || activePad->isPaused();
         const double total = activePad->getEffectiveLength();
-        const double remaining = activePad->getRemainingSeconds();
+        const double remaining = transportLive ? activePad->getRemainingSeconds() : total;
 
         remainingTimeLabel.setText (activePad->formatTimeString (remaining), juce::dontSendNotification);
         totalTimeLabel.setText (activePad->formatTimeString (total), juce::dontSendNotification);
+
+        if (! transportLive)
+        {
+            positionSlider.setValue (0.0, juce::dontSendNotification);
+            return;
+        }
 
         if (total > 0.0 && ! positionSlider.isMouseButtonDown())
         {
@@ -664,6 +680,14 @@ public:
             const double pct = juce::jlimit (0.0, 1.0, elapsed / total);
             positionSlider.setValue (pct, juce::dontSendNotification);
         }
+    }
+
+    void shortCircuitTransportVisuals() noexcept
+    {
+        horizontalPeakMeter.snapToSilence();
+        positionSlider.setValue (0.0, juce::dontSendNotification);
+        refreshTransportLabels();
+        repaint();
     }
 
     void refreshTypography()
@@ -789,16 +813,15 @@ public:
 
         if (resolveLiveTransportPad != nullptr)
         {
-            if (auto* livePad = resolveLiveTransportPad())
-            {
-                if (livePad != activePad)
-                    setActivePad (livePad);
-            }
+            auto* livePad = resolveLiveTransportPad();
+
+            if (livePad != activePad)
+                setActivePad (livePad);
         }
 
         const bool transportActive = activePad != nullptr
                                          && activePad->hasAudioFile()
-                                         && activePad->isTransportActive();
+                                         && (activePad->isPlaying() || activePad->isPaused());
 
         if (activePad != nullptr && activePad->hasAudioFile())
         {
@@ -834,23 +857,18 @@ public:
             repaint (getLeftColumnBounds());
         }
         else if (wasTransportAnimatingLastTick && ! transportActive)
-        {
-            repaint (getWaveformComponentBounds());
-            repaint (getLeftColumnBounds());
-        }
+            shortCircuitTransportVisuals();
 
         wasTransportAnimatingLastTick = transportActive;
 
-        if (getMasterLevelLeft && getMasterLevelRight)
+        if (transportActive && getMasterLevelLeft && getMasterLevelRight)
         {
             const float levelL = juce::jlimit (0.0f, 1.0f, getMasterLevelLeft());
             const float levelR = juce::jlimit (0.0f, 1.0f, getMasterLevelRight());
             horizontalPeakMeter.setLevels (levelL, levelR);
         }
-        else
-        {
-            horizontalPeakMeter.setLevels (0.0f, 0.0f);
-        }
+        else if (! transportActive)
+            horizontalPeakMeter.snapToSilence();
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -928,37 +946,84 @@ public:
         if (networkStatusTitle.isEmpty())
             return;
 
-        auto statusArea = getNetworkStatusRowBounds();
+        const auto statusArea = getNetworkStatusRowBounds();
+        const auto linkCol  = networkLinkColour (networkLinkQuality);
+        const auto mutedCol = findColour (MasterDeckComponent::standbyTextColourId).withAlpha (0.82f);
+        const auto pillBg   = findColour (MasterDeckComponent::panelBgColourId).brighter (0.10f);
 
-        juce::String line = networkStatusTitle;
+        constexpr float roleFontH   = 10.0f;
+        constexpr float statusFontH = 10.0f;
+        constexpr float dotSize     = 7.0f;
+        constexpr float hPad        = 7.0f;
+        constexpr float vPad        = 3.0f;
+        constexpr float dotGap      = 6.0f;
+        constexpr float dividerGap  = 8.0f;
+        constexpr float dividerW    = 1.0f;
+
+        g.setFont (ShowTheme::fontBold (roleFontH));
+        const int roleW = juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), networkStatusTitle);
+
+        int statusW = 0;
 
         if (networkStatusDetail.isNotEmpty())
-            line += " · " + networkStatusDetail;
+        {
+            g.setFont (ShowTheme::font (statusFontH));
+            statusW = juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), networkStatusDetail);
+        }
 
-        g.setFont (ShowTheme::fontBold (10.5f));
-        const auto statusFont = g.getCurrentFont();
-        const int textW = juce::GlyphArrangement::getStringWidthInt (statusFont, line) + 2;
-        const int dotSize = 8;
-        const int dotGap  = 5;
-        const int blockW  = dotSize + dotGap + textW;
-        const int blockX  = statusArea.getRight() - blockW;
+        const int contentW = (int) (dotSize + dotGap + (float) roleW
+                          + (statusW > 0 ? dividerGap + dividerW + 7.0f + (float) statusW : 0.0f)
+                          + hPad * 2.0f);
+        const int pillW = juce::jmin (statusArea.getWidth(), contentW);
+        const int pillH = statusArea.getHeight();
 
-        const float dotY = (float) statusArea.getCentreY() - (float) dotSize * 0.5f;
-        g.setColour (networkLinkColour (networkLinkQuality));
-        g.fillEllipse ((float) blockX, dotY, (float) dotSize, (float) dotSize);
+        auto pill = juce::Rectangle<float> ((float) (statusArea.getRight() - pillW),
+                                            (float) statusArea.getY(),
+                                            (float) pillW,
+                                            (float) pillH);
 
-        g.setColour (findColour (MasterDeckComponent::accentTextColourId).withAlpha (0.88f));
-        g.drawText (line,
-                    blockX + dotSize + dotGap, statusArea.getY(),
-                    textW, statusArea.getHeight(),
+        g.setColour (pillBg);
+        g.fillRoundedRectangle (pill, 5.0f);
+        g.setColour (linkCol.withAlpha (0.28f));
+        g.drawRoundedRectangle (pill.reduced (0.5f), 5.0f, 1.0f);
+
+        auto inner = pill.reduced (hPad, vPad);
+        const float dotY = inner.getCentreY() - dotSize * 0.5f;
+
+        g.setColour (linkCol);
+        g.fillEllipse (inner.getX(), dotY, dotSize, dotSize);
+
+        float textX = inner.getX() + dotSize + dotGap;
+
+        g.setFont (ShowTheme::fontBold (roleFontH));
+        g.setColour (mutedCol);
+        g.drawText (networkStatusTitle,
+                    (int) textX, (int) inner.getY(),
+                    roleW + 2, (int) inner.getHeight(),
+                    juce::Justification::centredLeft, true);
+
+        if (networkStatusDetail.isEmpty())
+            return;
+
+        textX += (float) roleW + dividerGap;
+
+        g.setColour (mutedCol.withAlpha (0.30f));
+        g.fillRect (textX, inner.getY() + 2.0f, dividerW, inner.getHeight() - 4.0f);
+
+        g.setFont (ShowTheme::font (statusFontH));
+        g.setColour (linkCol.withAlpha (networkLinkQuality == showcontrol::backup::LinkQuality::offline
+                                            ? 1.0f : 0.92f));
+        g.drawText (networkStatusDetail,
+                    (int) (textX + dividerW + 7.0f), (int) inner.getY(),
+                    statusW + 4, (int) inner.getHeight(),
                     juce::Justification::centredLeft, true);
     }
 
     juce::Rectangle<int> getNetworkStatusRowBounds() const
     {
         const auto leftCol = getLeftColumnBounds();
-        constexpr int rowH = 18;
-        auto row = juce::Rectangle<int> (leftCol.getX() + 6, leftCol.getBottom() - rowH - 5,
+        constexpr int rowH = 20;
+        auto row = juce::Rectangle<int> (leftCol.getX() + 6, leftCol.getBottom() - rowH - 4,
                                          leftCol.getWidth() - 12, rowH);
 
         if (networkShowReconnect)
@@ -983,7 +1048,8 @@ public:
         const auto pal = ShowTheme::get (resolveActiveDarkMode());
         const auto leftCol = getLeftColumnBounds();
 
-        if (activePad != nullptr && activePad->hasAudioFile())
+        if (activePad != nullptr && activePad->hasAudioFile()
+            && (activePad->isPlaying() || activePad->isPaused()))
         {
             auto& thumb = activePad->getThumbnail();
 
@@ -996,9 +1062,11 @@ public:
                 return;
             }
 
-            const double currentPos = activePad->getPlaybackPosition();
             double tStart = 0.0, tEnd = 0.0;
             activePad->getTrimmedDisplayRange (tStart, tEnd);
+            const double currentPos = (activePad->isPlaying() || activePad->isPaused())
+                                          ? activePad->getPlaybackPosition()
+                                          : tStart;
             const double effectiveLen = juce::jmax (0.0, tEnd - tStart);
 
             juce::Colour waveInk = pal.waveformFill.withAlpha (0.62f);

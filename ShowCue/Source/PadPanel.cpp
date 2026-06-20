@@ -249,7 +249,10 @@ void PadPanel::setDraggingActive (bool active)
     if (active)
         resetDragGridToStaticBase();
     else
+    {
         clearDragPreview();
+        setPadChildrenMousePassthrough (false);
+    }
 
     resyncAndLayout();
     repaint();
@@ -952,7 +955,7 @@ SoundPad* PadPanel::getCurrentlyPlayingPadTrack() const noexcept
 
     for (auto* pad : *pads)
     {
-        if (pad != nullptr && pad->isTransportActive())
+        if (pad != nullptr && (pad->isPlaying() || pad->isPaused()))
             return pad;
     }
 

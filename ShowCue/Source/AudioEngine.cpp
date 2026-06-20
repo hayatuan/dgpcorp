@@ -61,20 +61,7 @@ bool AudioEngine::stopCue (SoundPad* pad) noexcept
     if (! pad->isTransportActive())
         return false;
 
-    if (pad->getFadeOutMs() < 5.0)
-    {
-        pad->triggerStopImmediate();
-    }
-    else if (pad->isPlaying() || pad->isPaused())
-    {
-        pad->startFadeOut();
-    }
-    else
-    {
-        // Đang fade-out dở — ép dừng theo cấu hình (0ms = hard stop).
-        pad->stopTransportWithConfiguredFade();
-    }
-
+    pad->triggerStopImmediate();
     return true;
 }
 
@@ -85,4 +72,24 @@ bool AudioEngine::anyCueActive (const juce::OwnedArray<SoundPad>& pads) noexcept
             return true;
 
     return false;
+}
+
+void AudioEngine::requestTrackPreload (const juce::File& file) noexcept
+{
+    showcontrol::preload::sharedPool().requestPreload (file);
+}
+
+void AudioEngine::releaseTrackPreload (const juce::File& file) noexcept
+{
+    showcontrol::preload::sharedPool().releaseFile (file);
+}
+
+void AudioEngine::clearPreloadPool() noexcept
+{
+    showcontrol::preload::sharedPool().clear();
+}
+
+size_t AudioEngine::getPreloadPoolUsedBytes() const noexcept
+{
+    return showcontrol::preload::sharedPool().getUsedBytes();
 }

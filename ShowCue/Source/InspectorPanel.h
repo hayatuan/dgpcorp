@@ -173,6 +173,18 @@ public:
         repaint(); 
     }
 
+    void resetPlaybackProgress() noexcept
+    {
+        currentPos = viewStart;
+        repaint();
+    }
+
+    void hardKillPlaybackVisual() noexcept
+    {
+        currentPos = viewStart;
+        repaint();
+    }
+
     std::function<void(double)> onTrimStartChanged;
     std::function<void(double)> onTrimEndChanged;
     std::function<void()> onTrimGestureFinished;
@@ -1405,9 +1417,15 @@ public:
             if (currentPad != nullptr)
             {
                 if (onPlayPadRequested)
+                {
                     onPlayPadRequested (currentPad);
-                currentPad->triggerPlay();
-                refreshTransportUi();
+                    refreshTransportUi();
+                }
+                else
+                {
+                    currentPad->triggerPlay();
+                    refreshTransportUi();
+                }
             }
         };
         fadeOutBtn.setComponentID ("sc_inspector_fade_out");
@@ -1421,8 +1439,15 @@ public:
             if (currentPad && currentPad->isPlaying())
             {
                 if (onFadePadRequested)
+                {
                     onFadePadRequested (currentPad);
-                currentPad->stopTransportWithConfiguredFade();
+                    refreshTransportUi();
+                }
+                else
+                {
+                    currentPad->stopTransportWithConfiguredFade();
+                    refreshTransportUi();
+                }
             }
         };
 
@@ -2210,11 +2235,19 @@ public:
         if (currentPad == nullptr)
             return;
 
-        const double pos = currentPad->getPlaybackPosition();
+        const bool transportLive = currentPad->isPlaying() || currentPad->isPaused();
         const double fileLen = currentPad->getPlaybackLength();
+        const double pos = transportLive ? currentPad->getPlaybackPosition() : currentPad->getTrimStart();
 
-        timeLabel.setText (currentPad->getTimeRemainingString(), juce::dontSendNotification);
-        waveformDisplay.setProgress (pos, fileLen);
+        timeLabel.setText (transportLive ? currentPad->getTimeRemainingString()
+                                        : currentPad->formatTimeString (fileLen),
+                         juce::dontSendNotification);
+
+        if (transportLive)
+            waveformDisplay.setProgress (pos, fileLen);
+        else
+            waveformDisplay.hardKillPlaybackVisual();
+
         const bool isLive = currentPad->isPlaying() || currentPad->isFading();
         if (currentPad->usesCuePauseResume())
             playBtn.setComponentID (isLive ? "sc_inspector_icon_pause" : "sc_inspector_icon_play");
@@ -2225,18 +2258,40 @@ public:
         refreshLoudnessLabel();
     }
 
+    void shortCircuitTransportVisuals() noexcept
+    {
+        if (currentPad != nullptr)
+        {
+            currentPad->getRealtimeSource().snapPublishedUiToTrimOnMessageThread();
+            waveformDisplay.hardKillPlaybackVisual();
+            refreshTransportUi();
+        }
+        else
+        {
+            waveformDisplay.hardKillPlaybackVisual();
+        }
+
+        waveformDisplay.repaint();
+    }
+
     void timerCallback() override
     {
         if (currentPad != nullptr) {
             loopToggle.setButtonText (getLoopToggleLabel());
-            refreshTransportUi();
 
-            if (currentPad->isTransportActive())
+            if (currentPad->isPlaybackPositionLive())
+            {
+                refreshTransportUi();
                 waveformDisplay.setProgress (currentPad->getPlaybackPosition(),
                                              currentPad->getPlaybackLength());
 
-            if (currentPad->getAutoNormalize())
-                refreshLoudnessLabel();
+                if (currentPad->getAutoNormalize())
+                    refreshLoudnessLabel();
+            }
+            else
+            {
+                shortCircuitTransportVisuals();
+            }
         }
     }
 

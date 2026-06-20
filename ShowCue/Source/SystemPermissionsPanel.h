@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <atomic>
 #include <JuceHeader.h>
 #include "ShowTheme.h"
 #include "ShowControlLookAndFeel.h"
@@ -64,7 +65,7 @@ class SystemPermissionsPanel final : public juce::Component,
                                    private juce::Timer
 {
 public:
-    SystemPermissionsPanel();
+    explicit SystemPermissionsPanel (juce::AudioDeviceManager* sharedDeviceManagerIn = nullptr);
     ~SystemPermissionsPanel() override;
 
     void haltActiveTimers() noexcept;
@@ -99,6 +100,9 @@ private:
    #endif
 
     juce::Rectangle<int> leftHeroArea;
+    juce::AudioDeviceManager* sharedDeviceManager = nullptr;
+    std::atomic<bool> permissionProbeInFlight { false };
+    std::atomic<bool> cachedFirewallRulesPresent { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SystemPermissionsPanel)
 };

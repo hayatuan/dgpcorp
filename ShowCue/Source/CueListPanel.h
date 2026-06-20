@@ -68,6 +68,8 @@ public:
     std::function<bool()>                            canSortRows;
     std::function<void(const juce::Array<int>&, int)> onCuesBlockReordered;
     std::function<void(int, juce::Colour)>           onCueColorChanged;
+    std::function<void()>                            onAutoTagColoursRequested;
+    std::function<void()>                            onResetAllTagColoursRequested;
     std::function<void(int, int)>                    onTrackMenuResult;
     std::function<void()>                            onDeleteKeyPressed;
     std::function<void(int)>                         onCueRightClick;
@@ -87,7 +89,10 @@ public:
         deleteItem   = 5,
         resetFade    = 6,
         renameTrack  = 7,
-        sortAscending = 8
+        sortAscending = 8,
+        autoColorList = 9,
+        resetItemColour = 10,
+        resetAllColours = 11
     };
 
     void lookAndFeelChanged() override;
@@ -106,6 +111,8 @@ public:
 
     void setPadAccessor (std::function<SoundPad* (int index)> accessor);
     void notifyPlaybackActivity();
+    /** Ép timer/text/highlight về trạng thái idle ngay khi stop. */
+    void shortCircuitLiveRowVisuals();
 
     bool handleTransportKey (const juce::KeyPress& key);
 

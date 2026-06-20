@@ -756,28 +756,15 @@ void CueListPanel::syncRowLiveTextCaches()
     {
         auto* pad = padAccessor (i);
 
-        if (pad == nullptr || ! pad->isTransportActive())
+        if (pad == nullptr || ! pad->isPlaybackPositionLive())
         {
             rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
             rowElapsedText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
             continue;
         }
 
-        if (pad->isPlaying())
-        {
-            rowRemainingText.set (i, formatCueTimeString (pad->getRemainingSeconds()));
-            rowElapsedText.set (i, formatCueTimeString (pad->getElapsedSeconds()));
-        }
-        else if (pad->isPaused())
-        {
-            rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
-            rowElapsedText.set (i, formatCueTimeString (pad->getElapsedSeconds()));
-        }
-        else
-        {
-            rowRemainingText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
-            rowElapsedText.set (i, juce::String::fromUTF8 (u8"00:00.0"));
-        }
+        rowRemainingText.set (i, formatCueTimeString (pad->getRemainingSeconds()));
+        rowElapsedText.set (i, formatCueTimeString (pad->getElapsedSeconds()));
     }
 }
 
@@ -1012,6 +999,21 @@ void CueListPanel::setPadAccessor (std::function<SoundPad* (int index)> accessor
     padAccessor = std::move (accessor);
     updateListBoxContentIfLaidOut();
     syncHeaderToListScrollbar();
+}
+
+void CueListPanel::shortCircuitLiveRowVisuals()
+{
+    const int prevPlaying = playingIndex;
+    playingIndex = -1;
+
+    syncRowLiveTextCaches();
+    stopTimer();
+
+    if (prevPlaying >= 0)
+        listBox.repaintRow (prevPlaying);
+
+    listBox.repaint();
+    repaint();
 }
 
 void CueListPanel::notifyPlaybackActivity()
@@ -1283,16 +1285,20 @@ void CueListPanel::timerCallback()
     }
 
     bool anyActive = false;
+    bool needsRepaint = false;
 
     for (int i = 0; i < cues.size(); ++i)
     {
-        if (auto* pad = padAccessor (i); pad != nullptr && pad->isTransportActive())
+        if (auto* pad = padAccessor (i); pad != nullptr && (pad->isPlaying() || pad->isPaused()))
             anyActive = true;
     }
 
     if (! anyActive)
     {
         stopTimer();
+        syncRowLiveTextCaches();
+        listBox.repaint();
+        repaint();
         return;
     }
 
@@ -1300,9 +1306,20 @@ void CueListPanel::timerCallback()
 
     for (int i = 0; i < cues.size(); ++i)
     {
-        if (auto* pad = padAccessor (i); pad != nullptr && pad->isTransportActive())
+        auto* pad = padAccessor (i);
+
+        if (pad == nullptr)
+            continue;
+
+        if (pad->isPlaybackPositionLive())
+        {
             listBox.repaintRow (i);
+            needsRepaint = true;
+        }
     }
+
+    if (needsRepaint)
+        repaint();
 }
 
 void CueListPanel::syncLiveTimer()
@@ -1314,7 +1331,7 @@ void CueListPanel::syncLiveTimer()
     }
 
     if (anyRowTransportActive())
-        startTimerHz (20);
+        startTimerHz (60);
     else
         stopTimer();
 }
@@ -1325,7 +1342,7 @@ bool CueListPanel::anyRowTransportActive() const
         return false;
 
     for (int i = 0; i < cues.size(); ++i)
-        if (auto* pad = padAccessor (i); pad != nullptr && pad->isTransportActive())
+        if (auto* pad = padAccessor (i); pad != nullptr && pad->isPlaybackPositionLive())
             return true;
 
     return false;
@@ -1379,6 +1396,18 @@ void CueListPanel::showTrackContextMenu (int cueIndex)
                         nullptr,
                         juce::String::fromUTF8 (u8" "));
 
+    menu.addSeparator();
+    menu.addItem ((int) TrackMenuId::autoColorList,
+                  juce::String::fromUTF8 (u8"Tô màu tự động toàn danh sách"),
+                  cues.size() > 0);
+    menu.addItem ((int) TrackMenuId::resetItemColour,
+                  juce::String::fromUTF8 (u8"Reset màu mục này về mặc định"));
+    if (cues.size() > 1)
+        menu.addItem ((int) TrackMenuId::resetAllColours,
+                      juce::String::fromUTF8 (u8"Reset màu toàn danh sách"));
+
+    menu.addSeparator();
+
     if (canSort)
     {
         menu.addItem ((int) TrackMenuId::sortAscending,
@@ -1410,6 +1439,27 @@ void CueListPanel::showTrackContextMenu (int cueIndex)
                                 return;
                             }
 
+                            if (result == (int) TrackMenuId::autoColorList)
+                            {
+                                if (onAutoTagColoursRequested)
+                                    onAutoTagColoursRequested();
+                                return;
+                            }
+
+                            if (result == (int) TrackMenuId::resetItemColour)
+                            {
+                                if (onCueColorChanged)
+                                    onCueColorChanged (cueIndex, showcontrol::colours::defaultTagColour());
+                                return;
+                            }
+
+                            if (result == (int) TrackMenuId::resetAllColours)
+                            {
+                                if (onResetAllTagColoursRequested)
+                                    onResetAllTagColoursRequested();
+                                return;
+                            }
+
                             if (onTrackMenuResult)
                                 onTrackMenuResult (cueIndex, result);
                         });
@@ -1424,16 +1474,33 @@ void CueListPanel::showListBackgroundSortMenu (const juce::MouseEvent& e)
 
     juce::PopupMenu menu;
     menu.addItem (1, juce::String::fromUTF8 (u8"Sắp xếp hàng kịch bản tăng dần (A-Z) 🔤"));
+    menu.addSeparator();
+    menu.addItem (2, juce::String::fromUTF8 (u8"Tô màu tự động toàn danh sách"));
+    menu.addItem (3, juce::String::fromUTF8 (u8"Reset màu toàn danh sách"));
 
     juce::Component::SafePointer<CueListPanel> safeThis (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&listBox).withMousePosition(),
                         [safeThis] (int result)
                         {
-                            if (safeThis == nullptr || result != 1)
+                            if (safeThis == nullptr || result == 0)
                                 return;
 
-                            safeThis->sortCueRowsAscending();
+                            if (result == 1)
+                            {
+                                safeThis->sortCueRowsAscending();
+                                return;
+                            }
+
+                            if (result == 2)
+                            {
+                                if (safeThis->onAutoTagColoursRequested)
+                                    safeThis->onAutoTagColoursRequested();
+                                return;
+                            }
+
+                            if (result == 3 && safeThis->onResetAllTagColoursRequested)
+                                safeThis->onResetAllTagColoursRequested();
                         });
 }
 

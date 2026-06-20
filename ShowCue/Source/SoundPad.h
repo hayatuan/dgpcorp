@@ -17,6 +17,7 @@
 #include "ShowControlLookAndFeel.h"
 #include "ShowLocalization.h"
 #include "ShowWaveformCache.h"
+#include "ShowAudioPreloadCache.h"
 #include "VideoAudioExtractor.h"
 #include "ShowLoudnessNormalize.h"
 
@@ -135,17 +136,24 @@ public:
     {
         juce::File file;
         std::unique_ptr<juce::AudioFormatReader> reader;
+        std::unique_ptr<juce::MemoryMappedFile> mappedFile;
+        juce::AudioBuffer<float> slicePreloadBuffer;
+        juce::AudioBuffer<float> fullRamBuffer;
         double sampleRate = 44100.0;
         juce::String displayName;
         AudioMetadata meta;
+        bool usesFullRam = false;
     };
 
-    /** ~0.74s @ 44.1kHz — đọc đĩa trên TimeSliceThread, không trong audio callback. */
-    static constexpr int kReadAheadBufferSamples = 32768;
+    /** Slice head + mmap theo PRELOAD_SECONDS — đọc đĩa trên TimeSliceThread, không trong audio callback. */
+    static int defaultReadAheadSamples (double sampleRate) noexcept
+    {
+        return showcontrol::preload::readAheadSamplesForRate (sampleRate);
+    }
 
     explicit SoundPad (juce::AudioFormatManager& formatManagerIn)
         : formatManager (formatManagerIn),
-          thumbnail (512, formatManager, showcontrol::waveform::sharedCache()),
+          thumbnail (384, formatManager, showcontrol::waveform::sharedCache()),
           realtimeSource (transportSource)
     {
         thumbnail.addChangeListener (this);
@@ -166,6 +174,8 @@ public:
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
         readerSource.reset();
+        memorySource.reset();
+        ownedFullRamBuffer.setSize (0, 0);
     }
 
     /** Message thread: vô hiệu callAsync/enqueue đang treo + dừng normalize — gọi trước remove/compact. */
@@ -289,6 +299,9 @@ public:
     {
         playbackPreloadRequested.store (true, std::memory_order_relaxed);
 
+        if (musicFile.existsAsFile())
+            showcontrol::preload::sharedPool().requestPreload (musicFile);
+
         if (! hasFile && ! isLoading() && musicFile.existsAsFile())
             loadAudioFileInternal (musicFile);
         else if (hasFile)
@@ -327,11 +340,14 @@ public:
     bool isThumbnailLoaded() const noexcept { return thumbnailLoaded; }
 
     /** Ép nạp lại FileInputSource vào AudioThumbnail (sau load config / drop file). */
-    void reloadWaveformThumbnail()
+    void reloadWaveformThumbnail (bool force = false)
     {
         const juce::File file = musicFile.existsAsFile() ? musicFile : thumbnailPendingFile;
 
         if (! file.existsAsFile())
+            return;
+
+        if (! force && thumbnailLoaded && thumbnailPendingFile == file)
             return;
 
         thumbnailPendingFile = file;
@@ -347,6 +363,15 @@ public:
         ensureThumbnailLoaded();
     }
 
+    /** Chỉ queue load nếu chưa có — tránh xóa cache khi layout lại grid/list. */
+    void requestWaveformThumbnailLoad() noexcept
+    {
+        if (thumbnailLoaded)
+            return;
+
+        ensureThumbnailLoaded();
+    }
+
     /** UI đọc cueState (cập nhật ngay khi bấm); audio thread đồng bộ sau. */
     bool isPlaying() const { return getCueState() == PadCueState::playing; }
     bool isPaused() const { return getCueState() == PadCueState::paused; }
@@ -355,6 +380,12 @@ public:
     {
         return isPlaying() || isPaused() || isFading() || isStopping();
     }
+
+    /** Chỉ playing/paused — không tính fade-out stop (UI/waveform/highlight). */
+    bool isPlaybackPositionLive() const noexcept
+    {
+        return isPlaying() || isPaused();
+    }
     bool usesCuePauseResume() const noexcept { return isCueListPlayback; }
 
     void setCueListPlayback (bool isCueList) noexcept { isCueListPlayback = isCueList; }
@@ -362,7 +393,13 @@ public:
     bool isRegisteredWithMasterMixer() const noexcept { return mixerRegisteredWithMaster; }
     void markRegisteredWithMasterMixer() noexcept { mixerRegisteredWithMaster = true; }
     void markUnregisteredFromMasterMixer() noexcept { mixerRegisteredWithMaster = false; }
-    double getPlaybackPosition() const { return realtimeSource.getPublishedPosition(); }
+    double getPlaybackPosition() const
+    {
+        if (! isPlaybackPositionLive())
+            return getTrimStart();
+
+        return realtimeSource.getPublishedPosition();
+    }
     double getPlaybackLength() const { return realtimeSource.getPublishedLength(); }
     void seekTo (double seconds) { realtimeSource.postSeek (seconds); }
     void setOutputGain (float gain) { realtimeSource.postSetGain (gain); }
@@ -399,9 +436,13 @@ public:
     /** Cue: loop ô. BGM: mặc định auto-next; bật loop = giữ lại bài này (playlist vẫn loop list khi hết chuỗi). */
     void setLooping (bool s)
     {
+        if (isLoopingState == s)
+            return;
+
         isLoopingState = s;
+        // Loop theo trim do PadRealtimeSource xử lý — file-loop của reader gây nhảy position khi bật giữa chừng.
         if (readerSource)
-            readerSource->setLooping (s);
+            readerSource->setLooping (false);
         realtimeSource.setLooping (s);
 
         if (! isRenderAsGridMode)
@@ -540,7 +581,7 @@ public:
         if (isPlaying() || (isCueListPlayback && isPaused()))
             textX = showcontrol::bgmList::kNameStartWithStatusIcon;
 
-        const bool reserveLoopSlot = ! isCueListPlayback && isLooping() && hasFile;
+        const bool reserveLoopSlot = ! isCueListPlayback && hasFile;
         const auto nameLayout = showcontrol::bgmList::layoutListNameRow (getWidth(), getHeight(), textX,
                                                                          reserveLoopSlot);
         return nameLayout.nameArea.contains (localX, localY);
@@ -557,10 +598,10 @@ public:
     }
     juce::String getShortcutLabel() const { return shortcutLabel; }
     bool hasAudioFile() const { return hasFile && ! isLoading(); }
-    /** CUE grid động: giữ ô khi đang load hoặc đã gán đường dẫn — tránh compact xóa nhầm lúc import folder. */
+    /** CUE grid động: giữ ô khi đang load, đã có file, hoặc còn đường dẫn cấu hình (kể cả file tạm thiếu trên đĩa). */
     bool occupiesCueGridSlot() const noexcept
     {
-        return isLoading() || hasFile || musicFile.existsAsFile();
+        return isLoading() || hasFile || musicFile.getFullPathName().isNotEmpty();
     }
     int getPadIndex() const { return myIndex; }
     juce::String getPadDragIdentityToken() const noexcept { return juce::String (myIndex); }
@@ -713,6 +754,37 @@ public:
         return payload;
     }
 
+    static std::unique_ptr<LoadedAudioPayload> payloadFromPreloadedCue (
+        std::unique_ptr<showcontrol::preload::PreloadedAudioCue> cue)
+    {
+        if (cue == nullptr)
+            return nullptr;
+
+        auto payload = std::make_unique<LoadedAudioPayload>();
+        payload->file = cue->file;
+        payload->sampleRate = cue->sampleRate;
+        payload->displayName = cue->displayName;
+        payload->meta = cue->meta;
+        payload->usesFullRam = cue->usesFullRam;
+        payload->fullRamBuffer = std::move (cue->fullRamBuffer);
+        payload->slicePreloadBuffer = std::move (cue->slicePreloadBuffer);
+        payload->mappedFile = std::move (cue->mappedFile);
+
+        if (payload->usesFullRam)
+            return payload;
+
+        payload->reader = std::move (cue->reader);
+
+        if (payload->reader == nullptr)
+        {
+            juce::AudioFormatManager localFormatManager;
+            localFormatManager.registerBasicFormats();
+            payload->reader.reset (localFormatManager.createReaderFor (payload->file));
+        }
+
+        return payload;
+    }
+
     /** Message thread: gắn file đã đọc sẵn — hủy load async đang chờ, refresh waveform ngay. */
     void adoptPreloadedAudioPayload (std::unique_ptr<LoadedAudioPayload> payload)
     {
@@ -838,13 +910,14 @@ public:
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
         readerSource.reset();
+        memorySource.reset();
 
         sourceSampleRate = reader->sampleRate;
         readerSource = std::make_unique<juce::AudioFormatReaderSource> (reader.release(), true);
-        readerSource->setLooping (isLoopingState);
+        readerSource->setLooping (false);
         realtimeSource.setLooping (isLoopingState);
 
-        const int readAhead = sharedTimeSliceThread != nullptr ? kReadAheadBufferSamples : 0;
+        const int readAhead = sharedTimeSliceThread != nullptr ? defaultReadAheadSamples (sourceSampleRate) : 0;
         transportUsesReadAhead = readAhead > 0;
         transportSource.setSource (readerSource.get(), readAhead, sharedTimeSliceThread, sourceSampleRate);
 
@@ -894,7 +967,7 @@ public:
                 if (isStopping())
                     return;
 
-                stopTransportWithConfiguredFade();
+                triggerStopImmediate();
                 return;
             }
 
@@ -911,7 +984,7 @@ public:
 
             ensureLufsSyncBeforePlay();
             postPlayOrFadeIn (CueTransitionReason::userPlayToggle);
-            startTimer (40);
+            startLiveUiTimer();
             notifyPlaybackStateChanged();
             return;
         }
@@ -940,7 +1013,7 @@ public:
             postPlayOrFadeIn (CueTransitionReason::userPlayToggle);
         }
 
-        startTimer (40);
+        startLiveUiTimer();
         notifyPlaybackStateChanged();
     }
 
@@ -961,7 +1034,7 @@ public:
         setCueState (PadCueState::paused, CueTransitionReason::userPause);
         realtimeSource.postPause();
         transportSource.stop();
-        startTimer (40);
+        startLiveUiTimer();
         notifyPlaybackStateChanged();
     }
 
@@ -980,7 +1053,7 @@ public:
         setCueState (PadCueState::playing, CueTransitionReason::userResume);
         if (! realtimeSource.postResume())
             setCueState (PadCueState::paused, CueTransitionReason::userResume, true);
-        startTimer (40);
+        startLiveUiTimer();
         notifyPlaybackStateChanged();
     }
 
@@ -997,7 +1070,7 @@ public:
         lastDeferredStopGeneration = realtimeSource.getDeferredStopGeneration();
     }
 
-    /** Dừng cứng 0ms — bỏ qua fade guard (fadeOutMs = 0 hoặc panic stop). */
+    /** Dừng cứng 0ms — chém đứt vách âm thanh, không fade ngầm. */
     void triggerStopImmediate() noexcept
     {
         if (isPlaybackCommandBlocked && isPlaybackCommandBlocked())
@@ -1005,15 +1078,16 @@ public:
 
         playState.store (PlayState::Stopped, std::memory_order_release);
         setCueState (PadCueState::stopped, CueTransitionReason::userStop, true);
+        realtimeSource.clearVisualFadeFlagsOnMessageThread();
         realtimeSource.postStop();
         transportSource.stop();
         transportSource.setPosition (trimStart);
         realtimeSource.postSeek (trimStart);
+        realtimeSource.snapPublishedUiToTrimOnMessageThread();
         lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
         lastDeferredStopGeneration = realtimeSource.getDeferredStopGeneration();
-        stopTimer();
+        shortCircuitPlaybackVisuals();
         notifyPlaybackStateChanged();
-        repaint();
     }
 
     void triggerStop()
@@ -1021,21 +1095,10 @@ public:
         if (isPlaybackCommandBlocked && isPlaybackCommandBlocked())
             return;
 
-        if (fadeOutMs < 5.0)
-        {
-            triggerStopImmediate();
-            return;
-        }
-
-        // ── Guard idempotency: nếu đang FadingOut, bỏ toàn bộ stop dội
-        // (không re-touch gain/transportSource.stop để tránh giật).
         if (playState.load (std::memory_order_acquire) == PlayState::FadingOut
             || isFadeOutArmed()
             || isStopping())
-        {
-            playState.store (PlayState::FadingOut, std::memory_order_release);
             return;
-        }
 
         triggerStopImmediate();
     }
@@ -1053,7 +1116,7 @@ public:
     void startFadeIn (double durationMs = 500.0)
     {
         realtimeSource.postFadeIn ((float) durationMs, transportSource.getGain());
-        startTimer (40);
+        startLiveUiTimer();
     }
 
     /** durationMsOverride < 0 → dùng fadeOutMs của pad; ngược lại dùng giá trị truyền vào. */
@@ -1089,7 +1152,7 @@ public:
             return;
         }
 
-        startTimer (40);
+        startLiveUiTimer();
         notifyPlaybackStateChanged();
     }
 
@@ -1477,9 +1540,17 @@ public:
         consumeDeferredTransportStopRequests();
         consumeRealtimeDiagnostics();
 
+        if (! isPlaybackPositionLive() && ! isLoading())
+        {
+            shortCircuitPlaybackVisuals();
+            stopTimer();
+            return;
+        }
+
         if (isStopping() && ! isFading())
         {
             finalizeStoppingAfterFadeOut();
+            stopTimer();
             return;
         }
 
@@ -1488,9 +1559,6 @@ public:
         {
             lastTrackFinishedGen = finishedGen;
             setCueState (PadCueState::ready, CueTransitionReason::naturalEnd, true);
-            // consumeDeferredTransportStopRequests() đã chạy trước nhưng skip stop
-            // vì lúc đó getCueState() còn là playing (shouldApplyPublishedCueState block).
-            // Luôn dừng transport trực tiếp tại đây để tránh tự loop từ vị trí trimStart.
             transportSource.stop();
             stopTimer();
 
@@ -1508,9 +1576,11 @@ public:
             return;
         }
 
+        const auto prevCueState = getCueState();
         syncCueStateFromPlayback();
 
-        if (ownsPlaybackUiUpdates() && (isLoading() || isTransportActive()))
+        if (isPlaybackPositionLive()
+            && (prevCueState != getCueState() || isLoading()))
             repaint();
     }
 
@@ -1805,8 +1875,8 @@ public:
 
         if (hasFile)
         {
-            const double remainingTime = isTransportActive() ? getRemainingSeconds() : 0.0;
-            if ((isPlaying() || isPaused()) && remainingTime <= 5.0 && isPlaying())
+            const double remainingTime = isPlaybackPositionLive() ? getRemainingSeconds() : 0.0;
+            if (isPlaybackPositionLive() && remainingTime <= 5.0 && isPlaying())
             {
                 if ((juce::Time::getMillisecondCounter() % 400) < 200) g.setColour (pal.danger);
                 else g.setColour (pal.textSecondary);
@@ -1857,6 +1927,19 @@ public:
             paintListMode (g, bounds);
     }
 
+    /** Message thread: dập tắt waveform/highlight ngay khi stop — 0ms hard-kill. */
+    void shortCircuitPlaybackVisuals() noexcept
+    {
+        if (! isPlaybackPositionLive() && ! isLoading())
+            realtimeSource.snapPublishedUiToTrimOnMessageThread();
+
+        invalidateWaveformBaseCache();
+        stopTimer();
+        setAlpha (1.0f);
+        juce::Desktop::getInstance().getAnimator().cancelAnimation (this, true);
+        repaint();
+    }
+
 private:
     enum class CueTransitionReason
     {
@@ -1886,6 +1969,8 @@ private:
 
     juce::AudioFormatManager& formatManager;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
+    std::unique_ptr<juce::MemoryAudioSource> memorySource;
+    juce::AudioBuffer<float> ownedFullRamBuffer;
     juce::AudioTransportSource transportSource;
     PadRealtimeSource realtimeSource;
     juce::AudioThumbnail thumbnail;
@@ -2067,7 +2152,7 @@ private:
             ? showcontrol::bgmList::kNameStartWithStatusIcon
             : showcontrol::bgmList::kNameStartDefault;
 
-        const bool reserveLoopSlot = ! isCueListPlayback && isLooping() && hasFile;
+        const bool reserveLoopSlot = ! isCueListPlayback && hasFile;
         const auto nameLayout = showcontrol::bgmList::layoutListNameRow (getWidth(), getHeight(),
                                                                          paintResources.listNameTextX,
                                                                          reserveLoopSlot);
@@ -2169,18 +2254,25 @@ private:
 
     void ensureReadAheadBuffer()
     {
-        if (! hasFile || readerSource == nullptr || sharedTimeSliceThread == nullptr || transportUsesReadAhead)
+        if (! hasFile || memorySource != nullptr || readerSource == nullptr
+            || sharedTimeSliceThread == nullptr || transportUsesReadAhead)
             return;
 
         const float g = transportSource.getGain();
-        transportSource.setSource (readerSource.get(), kReadAheadBufferSamples, sharedTimeSliceThread, sourceSampleRate);
+        transportSource.setSource (readerSource.get(),
+                                   defaultReadAheadSamples (sourceSampleRate),
+                                   sharedTimeSliceThread,
+                                   sourceSampleRate);
         transportSource.setGain (g);
         transportUsesReadAhead = true;
     }
 
-    /** Prime BufferingAudioSource + OS page cache — message thread, trước GO/PAD. */
+    /** Prime BufferingAudioSource + slice cache — message thread, trước GO/PAD. */
     void warmReadAheadPipeline() noexcept
     {
+        if (memorySource != nullptr)
+            return;
+
         ensureReadAheadBuffer();
 
         if (sharedTimeSliceThread != nullptr)
@@ -2396,13 +2488,18 @@ private:
     {
         rebuildPaintResources();
 
-        if (! ownsPlaybackUiUpdates())
-            return;
+        if (! isPlaybackPositionLive() && ! isLoading())
+            shortCircuitPlaybackVisuals();
 
         repaint();
 
-        if (onPlaybackStateChanged)
+        if (ownsPlaybackUiUpdates() && onPlaybackStateChanged)
             onPlaybackStateChanged();
+    }
+
+    void startLiveUiTimer() noexcept
+    {
+        startTimerHz (60);
     }
 
     /** Kết thúc fade-out stop im lặng — không kích hoạt onTrackFinished / GO. */
@@ -2412,6 +2509,7 @@ private:
             return;
 
         playState.store (PlayState::Stopped, std::memory_order_release);
+        realtimeSource.clearVisualFadeFlagsOnMessageThread();
         realtimeSource.clearStaleFadeOutArmOnMessageThread();
         setCueState (PadCueState::stopped, CueTransitionReason::userStop, true);
         lastTrackFinishedGen = realtimeSource.getTrackFinishedGeneration();
@@ -2423,17 +2521,9 @@ private:
         transportSource.setPosition (trimStart);
         realtimeSource.postSeek (trimStart);
         realtimeSource.postSetGain (getOutputGain());
-
-        if (! isTransportActive())
-            stopTimer();
-
-        if (ownsPlaybackUiUpdates())
-        {
-            repaint();
-
-            if (onPlaybackStateChanged)
-                onPlaybackStateChanged();
-        }
+        realtimeSource.snapPublishedUiToTrimOnMessageThread();
+        shortCircuitPlaybackVisuals();
+        notifyPlaybackStateChanged();
     }
 
     void consumeDeferredTransportStopRequests()
@@ -2518,7 +2608,7 @@ private:
 
         if (isFading())
         {
-            if (getCueState() != PadCueState::stopping)
+            if (getCueState() != PadCueState::stopping && getCueState() != PadCueState::stopped)
                 setCueState (PadCueState::playing, CueTransitionReason::timerSync);
             return;
         }
@@ -2531,7 +2621,7 @@ private:
 
         if (published == PadCueState::empty)
             setCueState (PadCueState::ready, CueTransitionReason::timerSync);
-        else
+        else if (published != local)
             setCueState (published, CueTransitionReason::timerSync, true);
     }
 
@@ -2598,12 +2688,31 @@ private:
 
     void loadAudioFileInternal (const juce::File& f)
     {
+        musicFile = f;
+
         if (! f.existsAsFile())
+        {
+            hasFile = false;
+            cachedFileName = f.getFileNameWithoutExtension();
+            setCueState (PadCueState::empty, CueTransitionReason::fileLoadFail, true);
+            repaint();
             return;
+        }
+
+        showcontrol::preload::sharedPool().requestPreload (f);
+
+        if (auto cached = showcontrol::preload::sharedPool().tryTake (f))
+        {
+            auto payload = payloadFromPreloadedCue (std::move (cached));
+
+            if (payload != nullptr)
+            {
+                commitLoadedAudioPayload (std::move (payload));
+                return;
+            }
+        }
 
         const uint32_t generation = audioLoadGeneration.fetch_add (1, std::memory_order_acq_rel) + 1;
-
-        musicFile = f;
         hasFile = false;
         setCueState (PadCueState::loading, CueTransitionReason::fileLoadStart, true);
         repaint();
@@ -2617,7 +2726,7 @@ private:
 
             if (auto warmReader = std::unique_ptr<juce::AudioFormatReader> (localFormatManager.createReaderFor (f)))
             {
-                const int warmSamples = juce::jmin (kReadAheadBufferSamples,
+                const int warmSamples = juce::jmin (showcontrol::preload::readAheadSamplesForRate (warmReader->sampleRate),
                                                     (int) warmReader->lengthInSamples);
                 if (warmSamples > 0)
                 {
@@ -2655,7 +2764,7 @@ private:
     /** Message thread: hoán đổi reader + transport — không đọc đĩa, RT-safe cho play ngay sau. */
     void commitLoadedAudioPayload (std::unique_ptr<LoadedAudioPayload> payload)
     {
-        if (payload == nullptr || payload->reader == nullptr)
+        if (payload == nullptr || (! payload->usesFullRam && payload->reader == nullptr))
         {
             setCueState (PadCueState::empty, CueTransitionReason::fileLoadFail, true);
             repaint();
@@ -2665,6 +2774,8 @@ private:
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
         readerSource.reset();
+        memorySource.reset();
+        ownedFullRamBuffer.setSize (0, 0);
 
         const auto& f = payload->file;
         musicFile = f;
@@ -2677,17 +2788,27 @@ private:
         if (cachedMeta.formatInfoString.isEmpty())
             cachedMeta.formatInfoString = cachedMeta.buildFormatInfoUncached();
         sourceSampleRate = payload->sampleRate;
-        readerSource = std::make_unique<juce::AudioFormatReaderSource> (payload->reader.release(), true);
 
         if (! isCueListPlayback && isLoopingState)
             isLoopingState = false;
 
-        readerSource->setLooping (isLoopingState);
-        realtimeSource.setLooping (isLoopingState);
+        if (payload->usesFullRam && payload->fullRamBuffer.getNumSamples() > 0)
+        {
+            ownedFullRamBuffer = std::move (payload->fullRamBuffer);
+            memorySource = std::make_unique<juce::MemoryAudioSource> (ownedFullRamBuffer, false);
+            transportUsesReadAhead = false;
+            transportSource.setSource (memorySource.get(), 0, nullptr, sourceSampleRate);
+        }
+        else
+        {
+            readerSource = std::make_unique<juce::AudioFormatReaderSource> (payload->reader.release(), true);
+            readerSource->setLooping (false);
+            const int readAhead = sharedTimeSliceThread != nullptr ? defaultReadAheadSamples (sourceSampleRate) : 0;
+            transportUsesReadAhead = readAhead > 0;
+            transportSource.setSource (readerSource.get(), readAhead, sharedTimeSliceThread, sourceSampleRate);
+        }
 
-        const int readAhead = sharedTimeSliceThread != nullptr ? kReadAheadBufferSamples : 0;
-        transportUsesReadAhead = readAhead > 0;
-        transportSource.setSource (readerSource.get(), readAhead, sharedTimeSliceThread, sourceSampleRate);
+        realtimeSource.setLooping (isLoopingState);
         setOutputGain (pendingLoadGain);
 
         thumbnailPendingFile = f;
@@ -2732,7 +2853,7 @@ private:
         g.setColour (getPadSurfaceColour());
         g.fillRoundedRectangle (bounds, corner);
 
-        const bool playingNow = isPlaying() || isFading();
+        const bool playingNow = isPlaybackPositionLive();
 
         if (isSelectedRowState)
         {
@@ -2871,7 +2992,7 @@ private:
             g.setColour (getPadSelectionBorderColour());
             g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 2.5f);
         }
-        else if (isPlaying() || isFading())
+        else if (isPlaybackPositionLive())
         {
             g.setColour (palWave.padPlayingBorder);
             g.drawRoundedRectangle (bounds.reduced (0.5f), ShowTheme::kPanelCornerRadius, 1.5f);
@@ -2922,7 +3043,7 @@ private:
             return;
 
         const auto pal = ShowTheme::get (isDarkMode);
-        double remainingTime = isTransportActive() ? getRemainingSeconds() : 0.0;
+        double remainingTime = isPlaybackPositionLive() ? getRemainingSeconds() : 0.0;
 
         if (isPlaying() && remainingTime <= 5.0)
             g.setColour ((juce::Time::getMillisecondCounter() % 400) < 200 ? pal.danger : pal.textSecondary);
@@ -2981,6 +3102,8 @@ private:
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
         readerSource.reset();
+        memorySource.reset();
+        ownedFullRamBuffer.setSize (0, 0);
         hasFile = false;
         thumbnailLoaded = false;
         thumbnailPendingFile = juce::File();

@@ -296,17 +296,17 @@ inline juce::String shiftModifierLabel() noexcept
    #if JUCE_MAC
     return juce::String::fromUTF8 (u8"⇧");
    #else
-    return "Shift+";
+    return "Sh+";
    #endif
 }
 
-/** Sidebar: Mac CUE=⌘ / BGM=⌃. Windows CUE=Ctrl / BGM=Ctrl+Shift (Alt dành cho PAD hàng 5–8). */
+/** Sidebar: Mac CUE=⌘ / BGM=⌃. Windows CUE=Ctrl / BGM=Ctrl+Sh (Alt dành cho PAD hàng 5–8). */
 inline juce::String formatPlaylistShortcut (bool isCueGridList, const juce::String& hotkeyChar) noexcept
 {
    #if JUCE_MAC
     return (isCueGridList ? commandModifierLabel() : controlModifierLabel()) + hotkeyChar;
    #else
-    return (isCueGridList ? juce::String ("Ctrl+") : juce::String ("Ctrl+Shift+")) + hotkeyChar;
+    return (isCueGridList ? juce::String ("Ctrl+") : juce::String ("Ctrl+Sh+")) + hotkeyChar;
    #endif
 }
 
@@ -334,7 +334,7 @@ inline juce::String formatKeyPressDescription (const juce::KeyPress& key)
         desc += "Alt+";
 
     if (mods.isShiftDown())
-        desc += "Shift+";
+        desc += shiftModifierLabel();
    #endif
 
     desc += key.getTextDescription().toUpperCase();

@@ -90,6 +90,7 @@ public:
     void itemDragMove (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
     void itemDragExit (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
     void itemDropped (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
+    void dragOperationEnded (const juce::DragAndDropTarget::SourceDetails& dragSourceDetails) override;
 
     void loadList (int listIndex, int trackCount, bool isGrid);
     void saveProject();
@@ -128,6 +129,9 @@ public:
     void setAppLanguage (int languageIndex);
     void lookAndFeelChanged() override;
     void refreshSidebarPlayingStatus();
+    /** Dập tắt waveform/highlight/meter toàn app ngay khi stop — không chờ fade/decay. */
+    void shortCircuitGlobalPlaybackVisuals();
+    void forceRepaintAllListPads() noexcept;
     /** Quét ưu tiên toàn cục PAD → CUE → BGM và cập nhật MasterDeck — độc lập luồng chuyển playlist Sidebar. */
     void updateMainDeskDisplay();
     void showAudioSettingsDialog();
@@ -159,11 +163,13 @@ public:
     void setBackupTakeoverActive (bool active);
     bool isBackupTakeoverActive() const noexcept { return backupTakeoverActive; }
     void finalizeStartupPlaylistUi();
+    void warmAudioPreloadPoolForProject();
     juce::var buildPlaylistJson() const;
     bool loadPlaylistFromJson (const juce::var& playlistVar);
     void reloadPadWaveformFromConfig (SoundPad* pad);
     void reloadAllPadWaveformsFromConfig();
-    void reloadAllPadWaveformsStaggered (int batchSize = 6, int batchDelayMs = 16);
+    void reloadAllPadWaveformsStaggered (int batchSize = 16, int batchDelayMs = 4);
+    void staggerWaveformLoadsForPads (const juce::Array<SoundPad*>& pads, int batchSize, int batchDelayMs);
     void refreshStartupPlaylistDisplay();
 
     juce::UndoManager& getUndoManager() noexcept { return undoManager; }
@@ -285,6 +291,12 @@ private:
     void syncCueMetadataFromPads (ListData& list);
     void applyTagColourToPadAndCue (ListData& list, int index, juce::Colour colour);
     void applyTagColourWithUndo (int listIdx, int index, juce::Colour colour);
+    void applyAutoTagColoursToListWithUndo (int listIdx);
+    void resetAllTagColoursInListWithUndo (int listIdx);
+    juce::Colour getTagColourAtListIndex (const ListData& list, int index) const;
+    void applyTagColourBatchInternal (int listIdx, const juce::Array<juce::Colour>& colours);
+    void applyTagColourBatchWithUndo (int listIdx, const juce::Array<juce::Colour>& colours,
+                                      const juce::String& undoLabel);
     void applyTrackRenameAtIndex (int listIdx, int cueIndex, const juce::String& newName, bool saveNow = true);
     void applyTrackRenameWithUndo (int listIdx, int cueIndex, const juce::String& newName, const juce::String& oldName);
     void performActiveListIngestWithUndo (std::function<void (ListData&)> ingestFn);
@@ -305,6 +317,8 @@ private:
     bool triggerCueListPlay (int padIndex, bool fromSync = false, int listIndexOverride = -1);
     bool triggerCueListPause (int padIndex);
     bool triggerCueListStop (int padIndex);
+    bool triggerInspectorPlayPause (SoundPad* pad);
+    bool triggerInspectorFadeStop (SoundPad* pad);
     bool isCueListViewActive() const noexcept;
     void armPad (SoundPad* pad);
     void setSoloPad (SoundPad* pad, bool enable);
@@ -575,6 +589,19 @@ private:
         float getBusPeakR (int bus) const noexcept
         {
             return (bus >= 0 && bus < kMaxBuses) ? buses[bus].peakR.load (std::memory_order_relaxed) : 0.0f;
+        }
+
+        /** Message thread: dập tắt VU bus/master ngay khi stop — không decay 2 giây. */
+        void snapAllMetersToSilence() noexcept
+        {
+            masterMeterL.store (0.0f, std::memory_order_relaxed);
+            masterMeterR.store (0.0f, std::memory_order_relaxed);
+
+            for (auto& bus : buses)
+            {
+                bus.peakL.store (0.0f, std::memory_order_relaxed);
+                bus.peakR.store (0.0f, std::memory_order_relaxed);
+            }
         }
 
         // AudioIODeviceCallback

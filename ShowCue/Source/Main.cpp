@@ -12,6 +12,24 @@
 
 #endif
 
+#if JUCE_WINDOWS
+ #include <Windows.h>
+
+ namespace showcontrol::win
+ {
+ /** Gọi trước main/JUCE — Per-Monitor DPI V2 để DirectWrite sắc trên màn 125%/150%. */
+ struct DpiAwarenessBootstrap
+ {
+     DpiAwarenessBootstrap()
+     {
+         SetProcessDpiAwarenessContext (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+     }
+ };
+
+ static const DpiAwarenessBootstrap gDpiAwarenessBootstrap;
+ } // namespace showcontrol::win
+#endif
+
 
 
 namespace
@@ -153,6 +171,10 @@ public:
     {
 
         juce::ignoreUnused (commandLine);
+
+       #if JUCE_WINDOWS
+        SetProcessDpiAwarenessContext (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+       #endif
 
         showcontrol::typography::ensureLoaded();
 

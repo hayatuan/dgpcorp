@@ -131,7 +131,16 @@ public:
         refreshLocalMachineDisplay();
         refreshRoleUi();
         refreshTakeoverButton();
-        startTimerHz (1);
+    }
+
+    void visibilityChanged() override
+    {
+        juce::Component::visibilityChanged();
+
+        if (isVisible() && isShowing())
+            startTimerHz (1);
+        else
+            haltActiveTimers();
     }
 
     void loadFromPreferences()
@@ -307,7 +316,7 @@ public:
         syncConfigBtn.setButtonText (showcontrol::localization::tr (u8"Đồng bộ cấu hình sang máy phụ"));
 
         followerLockToggle.setButtonText (showcontrol::localization::tr (
-            u8"Khóa điều khiển (Follower)"));
+            u8"Khóa điều khiển trên máy phụ"));
         oscEnableToggle.setButtonText (showcontrol::localization::tr (u8"Nhận OSC / đồng bộ LAN"));
         takeoverBtn.setButtonText (showcontrol::localization::tr (u8"Takeover (máy phụ)"));
 
@@ -677,7 +686,7 @@ private:
         else if (isBackupRole())
         {
             helpLabel.setText (showcontrol::localization::tr (
-                u8"Quét LAN → chọn máy chính → Kết nối. Máy phụ mirror lệnh từ Primary.\n"
+                u8"Quét LAN → chọn máy chính → Kết nối. Máy phụ nhận lệnh GO / Stop / Panic.\n"
                 u8"Thêm cùng file nhạc trên máy này — đường dẫn Mac/Win có thể khác máy chính.\n"
                 u8"Dùng 「Kết nối lại」 khi mất link. macOS: bật Local Network."),
                 juce::dontSendNotification);

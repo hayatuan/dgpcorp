@@ -207,6 +207,20 @@ public:
         return publishedPosition.load (std::memory_order_relaxed);
     }
 
+    /** Message thread: ép playhead/meter UI về trim IN ngay khi stop — không chờ audio thread. */
+    void snapPublishedUiToTrimOnMessageThread() noexcept
+    {
+        const double trimStart = (double) trimStartSec.load (std::memory_order_relaxed);
+        publishedPosition.store (trimStart, std::memory_order_relaxed);
+    }
+
+    /** Message thread: dập cờ fade ngay — UI/timer không chờ audio thread (~2s tail). */
+    void clearVisualFadeFlagsOnMessageThread() noexcept
+    {
+        fadeActive.store (false, std::memory_order_release);
+        releaseFadeOutArm();
+    }
+
     double getPublishedLength() const noexcept
     {
         return publishedLength.load (std::memory_order_relaxed);
@@ -231,6 +245,13 @@ public:
     bool isOutputGainSmoothing() const noexcept
     {
         return outputGainProcessor.isSmoothing();
+    }
+
+    /** Audio/meter thread: chỉ coi là đang phát khi transport thực sự chạy (không decay ảo). */
+    bool isCurrentlyPlayingForMetering() const noexcept
+    {
+        return playingState.load (std::memory_order_relaxed)
+            && ! pausedState.load (std::memory_order_relaxed);
     }
 
     PadDspChain&       getDsp()       noexcept { return dspChain; }
@@ -307,11 +328,10 @@ public:
             return;
         }
 
-        // Chỉ đọc transport khi user-state còn "đang phát" hoặc đang fade — tránh replay sau fade-out
-        // (transport có thể vẫn isPlaying() cho đến khi message thread gọi stop()).
+        const bool fadingOut = fadeActive.load (std::memory_order_relaxed) && ! fadeIsIn;
         const bool wantsOutput = playingState.load (std::memory_order_relaxed)
                               || fadeActive.load (std::memory_order_relaxed)
-                              || outputGainProcessor.isSmoothing();
+                              || (fadingOut && outputGainProcessor.isSmoothing());
 
         if (! wantsOutput)
         {
@@ -321,18 +341,14 @@ public:
         }
 
         const bool transportRunning = transport.isPlaying();
-        const bool fadeOutTail      = fadeActive.load (std::memory_order_relaxed)
-                                   && ! fadeIsIn
-                                   && outputGainProcessor.isSmoothing();
 
         if (transportRunning)
         {
             transport.getNextAudioBlock (info);
             applyOutputGain (info);
         }
-        else if (fadeOutTail)
+        else if (fadingOut && outputGainProcessor.isSmoothing())
         {
-            // Transport đã dừng nhưng ramp gain chưa xong — làm mượt phần đuôi (tránh click/block zip).
             info.clearActiveBufferRegion();
             applyOutputGain (info);
         }
@@ -444,7 +460,9 @@ private:
         publishedCueState.store (static_cast<uint8_t> (PadCueState::stopped), std::memory_order_relaxed);
         outputGainProcessor.setRampDurationSeconds (0.0);
         outputGainProcessor.setGainLinear (0.0f);
+        publishedGain.store (0.0f, std::memory_order_relaxed);
         const double trimStart = (double) trimStartSec.load (std::memory_order_relaxed);
+        transport.stop();
         transport.setPosition (trimStart);
         publishedPosition.store (trimStart, std::memory_order_relaxed);
         deferTransportStopFromAudioThread();
@@ -500,7 +518,11 @@ private:
                 case PadCommandType::setGain:
                     baseGain = cmd.param0;
                     if (! fadeActive.load (std::memory_order_relaxed))
-                        scheduleOutputGainRamp (baseGain, 0.02);
+                    {
+                        outputGainProcessor.setRampDurationSeconds (0.0);
+                        outputGainProcessor.setGainLinear (baseGain);
+                        publishedGain.store (baseGain, std::memory_order_relaxed);
+                    }
                     break;
 
                 case PadCommandType::startFadeIn:
@@ -572,6 +594,7 @@ private:
         fadeActive.store (false, std::memory_order_relaxed);
         fadeOutArm.store (false, std::memory_order_release);
         publishedCueState.store (static_cast<uint8_t> (PadCueState::paused), std::memory_order_relaxed);
+        transport.stop();
         requestDeferredTransportStop();
     }
 
@@ -608,7 +631,9 @@ private:
         publishedCueState.store (static_cast<uint8_t> (PadCueState::stopped), std::memory_order_relaxed);
         outputGainProcessor.setRampDurationSeconds (0.0);
         outputGainProcessor.setGainLinear (0.0f);
+        publishedGain.store (0.0f, std::memory_order_relaxed);
         const double trimStart = (double) trimStartSec.load (std::memory_order_relaxed);
+        transport.stop();
         transport.setPosition (trimStart);
         publishedPosition.store (trimStart, std::memory_order_relaxed);
         deferTransportStopFromAudioThread();

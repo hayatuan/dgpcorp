@@ -664,7 +664,7 @@ public:
     {
         audioPanel = std::make_unique<AudioDeviceSettingsPanel> (deviceManager, darkMode, busNames, true);
         themePanel = std::make_unique<ThemePreferencesPanel> (themeId, languageIndex);
-        permissionsPanel = std::make_unique<showcontrol::permissions::SystemPermissionsPanel>();
+        permissionsPanel = std::make_unique<showcontrol::permissions::SystemPermissionsPanel> (&deviceManager);
         backupPanel      = std::make_unique<BackupSyncPreferencesPanel>();
 
         if (cb.getBackupTakeoverActive != nullptr)
@@ -1013,6 +1013,7 @@ private:
         {
             backupPanel->refreshLocalizedText();
             backupPanel->refreshNetworkInfo();
+            backupPanel->resized();
         }
     }
 };
