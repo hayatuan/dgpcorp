@@ -20,16 +20,35 @@ inline int chunkCountForPayload (int payloadBytes) noexcept
     return (payloadBytes + kChunkPayloadBytes - 1) / kChunkPayloadBytes;
 }
 
+inline int utf8SafeChunkLength (const char* utf8, int totalBytes, int maxBytes) noexcept
+{
+    const int capped = juce::jmin (maxBytes, totalBytes);
+
+    if (capped >= totalBytes)
+        return capped;
+
+    int splitAt = capped;
+
+    while (splitAt > 0 && (static_cast<juce::uint8> (utf8[splitAt - 1]) & 0xC0) == 0x80)
+        --splitAt;
+
+    if (splitAt <= 0)
+        return capped;
+
+    return splitAt;
+}
+
 inline juce::StringArray splitPayload (const juce::String& payload)
 {
     juce::StringArray chunks;
     const auto utf8 = payload.toUTF8();
     const int total = payload.getNumBytesAsUTF8();
 
-    for (int offset = 0; offset < total; offset += kChunkPayloadBytes)
+    for (int offset = 0; offset < total;)
     {
-        const int len = juce::jmin (kChunkPayloadBytes, total - offset);
+        const int len = utf8SafeChunkLength (utf8.getAddress(), total - offset, kChunkPayloadBytes);
         chunks.add (juce::String::fromUTF8 (utf8.getAddress() + offset, len));
+        offset += len;
     }
 
     return chunks;

@@ -64,6 +64,9 @@ public:
     bool hasAnyPadPlaying() const noexcept;
     SoundPad* getCurrentlyPlayingPadTrack() const noexcept;
     juce::Point<int> gridCellAtPoint (juce::Point<int> local) const noexcept;
+    /** { col, row } — ưu tiên ô hover khi đang kéo, fallback tính từ local. */
+    juce::Point<int> resolveDropGridCell (juce::Point<int> localFallback) const noexcept;
+    bool hasDragHoverCell() const noexcept { return hoveredRow >= 0 && hoveredCol >= 0; }
     BoundedGridLayout getBoundedGridLayout() const noexcept { return boundedLayout; }
 
     void mouseDown (const juce::MouseEvent& e) override;

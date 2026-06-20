@@ -235,6 +235,23 @@ public:
         expect (receiver.isComplete());
         expectEquals (receiver.takePayload(), sampleJson);
 
+        beginTest ("config sync chunk round-trip with UTF-8 text");
+        juce::String utf8Json = juce::String (u8"{\"listName\":\"Danh sách tiếng Việt — cue αβγ\",\"playlist\":[");
+        for (int i = 0; i < 40; ++i)
+            utf8Json += juce::String (u8"{\"title\":\"mục ") + juce::String (i) + u8" — tiếng Việt\"},";
+        utf8Json += u8"]}";
+        const auto utf8Parts = showcontrol::backup::configsync::splitPayload (utf8Json);
+        expect (utf8Parts.size() > 1);
+
+        showcontrol::backup::configsync::Receiver utf8Receiver;
+        expect (utf8Receiver.begin (7, utf8Json.getNumBytesAsUTF8(), utf8Parts.size()));
+
+        for (int i = 0; i < utf8Parts.size(); ++i)
+            expect (utf8Receiver.addChunk (7, i, utf8Parts[i]));
+
+        expect (utf8Receiver.isComplete());
+        expectEquals (utf8Receiver.takePayload(), utf8Json);
+
         beginTest ("cross-platform path remap");
         const juce::String localXml =
             R"(<ShowControlProject><List name="A"><Pad index="0" file="/Users/show/intro.wav"/><Pad index="1" file="/Users/show/outro.wav"/></List></ShowControlProject>)";

@@ -4552,6 +4552,35 @@ void MainComponent::safelyPreparePadForDeletion (SoundPad* pad)
     pad->releaseThumbnailResources();
 }
 
+void MainComponent::destroyAllListPads()
+{
+    inspectorPanel.selectPad (nullptr);
+    masterDeckPanel.setActivePad (nullptr);
+    lastUiSyncedPlayingPad = nullptr;
+
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad == nullptr)
+                continue;
+
+            safelyPreparePadForDeletion (pad);
+
+            if (scrollContent != nullptr)
+                scrollContent->removeChildComponent (pad);
+
+            delete pad;
+        }
+    }
+
+    allLists.clear();
+    sidebarPanel.clearAllLists();
+}
+
 void MainComponent::deletePadFromList (SoundPad* pad)
 {
     if (pad == nullptr)
@@ -6177,6 +6206,28 @@ void MainComponent::consumeInternalJucePadDrop() noexcept
     cancelPadReorder (true);
 }
 
+void MainComponent::applyPadGridDropFallbackIfNeeded (int listIdx,
+                                                      SoundPad* pad,
+                                                      int targetRow,
+                                                      int targetCol,
+                                                      const juce::Array<int>& dragSelection,
+                                                      int anchorIndex)
+{
+    if (crossComponentDragConsumed)
+        return;
+
+    if (pad == nullptr || listIdx < 0 || listIdx >= allLists.size())
+        return;
+
+    if (! showcontrol::padgrid::isValidGridCell (targetRow, targetCol))
+        return;
+
+    if (dragSelection.size() > 1)
+        movePadsToGridCell (listIdx, dragSelection, anchorIndex, targetRow, targetCol);
+    else
+        movePadToGridCell (listIdx, pad, targetRow, targetCol);
+}
+
 void MainComponent::endPadReorder()
 {
     if (crossComponentDragConsumed)
@@ -6200,32 +6251,53 @@ void MainComponent::endPadReorder()
     auto* draggedPad = padReorderSource;
     const bool gridMode = padReorderIsGridMode;
 
-    if (gridMode && draggedPad != nullptr && draggedPad->hasActiveJuceSystemDrag())
+    juce::Array<int> dragSelection = selectedPadIndices;
+    dragSelection.sort();
+
+    if (dragSelection.isEmpty() || ! dragSelection.contains (from))
     {
-        cancelPadReorder();
-        return;
+        dragSelection.clear();
+        dragSelection.add (from);
     }
 
     if (gridMode && draggedPad != nullptr && listIdx >= 0 && listIdx < allLists.size())
     {
         if (auto* panel = getPadPanel())
         {
-            const auto cell = panel->gridCellAtPoint (padReorderPointerPos);
-            juce::Array<int> dragSelection = selectedPadIndices;
-            dragSelection.sort();
+            const auto cell = panel->resolveDropGridCell (padReorderPointerPos);
+            const int targetRow = cell.y;
+            const int targetCol = cell.x;
 
-            if (dragSelection.isEmpty() || ! dragSelection.contains (from))
+            if (draggedPad->hasActiveJuceSystemDrag())
             {
-                dragSelection.clear();
-                dragSelection.add (from);
+                cancelPadReorder (true);
+
+                juce::Component::SafePointer<MainComponent> safeThis (this);
+                juce::Component::SafePointer<SoundPad> safePad (draggedPad);
+                const auto selectionCopy = dragSelection;
+
+                juce::MessageManager::callAsync ([safeThis, listIdx, safePad, selectionCopy, from, targetRow, targetCol]()
+                {
+                    if (safeThis == nullptr || safePad == nullptr)
+                        return;
+
+                    safeThis->applyPadGridDropFallbackIfNeeded (listIdx,
+                                                                safePad.getComponent(),
+                                                                targetRow,
+                                                                targetCol,
+                                                                selectionCopy,
+                                                                from);
+                });
+
+                return;
             }
 
             cancelPadReorder();
 
             if (dragSelection.size() > 1)
-                movePadsToGridCell (listIdx, dragSelection, from, cell.y, cell.x);
+                movePadsToGridCell (listIdx, dragSelection, from, targetRow, targetCol);
             else
-                movePadToGridCell (listIdx, draggedPad, cell.y, cell.x);
+                movePadToGridCell (listIdx, draggedPad, targetRow, targetCol);
 
             return;
         }
@@ -6242,15 +6314,6 @@ void MainComponent::endPadReorder()
 
     const int n = list->pads.size();
     const int to = juce::jlimit (0, n, target);
-
-    juce::Array<int> dragSelection = selectedPadIndices;
-    dragSelection.sort();
-
-    if (dragSelection.isEmpty() || ! dragSelection.contains (from))
-    {
-        dragSelection.clear();
-        dragSelection.add (from);
-    }
 
     if (dragSelection.size() == 1)
     {
@@ -13021,25 +13084,7 @@ void MainComponent::applyFactoryDefaultApplicationState()
     lastUiSyncedPlayingPad = nullptr;
     resetPlaybackDisplayCaches();
 
-    for (auto* list : allLists)
-    {
-        if (list == nullptr)
-            continue;
-
-        for (auto* pad : list->pads)
-        {
-            if (pad == nullptr)
-                continue;
-
-            safelyPreparePadForDeletion (pad);
-
-            if (scrollContent != nullptr)
-                scrollContent->removeChildComponent (pad);
-        }
-    }
-
-    allLists.clear();
-    sidebarPanel.clearAllLists();
+    destroyAllListPads();
 
     activeListIndex = -1;
     selectedPadIndices.clear();
@@ -13174,8 +13219,7 @@ void MainComponent::loadApplicationState()
             }
 
             resetPlaybackDisplayCaches();
-            allLists.clear();
-            sidebarPanel.clearAllLists();
+            destroyAllListPads();
 
             for (auto* listElem : xml->getChildIterator())
             {
@@ -15507,7 +15551,14 @@ void MainComponent::handleSyncConfigEnd (int transferId)
     showcontrol::backup::logSyncEvent ("RX config end id=" + juce::String (transferId)
                                        + " applying");
 
-    applyImportedProjectConfig (payload);
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::MessageManager::callAsync ([safeThis, payload]()
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->applyImportedProjectConfig (payload);
+    });
 }
 
 void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
@@ -15515,7 +15566,29 @@ void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
     if (configJson.isEmpty())
         return;
 
+    const bool wasSyncing = syncApplying.exchange (true, std::memory_order_acq_rel);
+    struct SyncApplyingScope
+    {
+        std::atomic<bool>& flag;
+        bool restore;
+        ~SyncApplyingScope()
+        {
+            if (restore)
+                flag.store (false, std::memory_order_release);
+        }
+    } syncScope { syncApplying, ! wasSyncing };
+
     const auto parsed = juce::JSON::parse (configJson);
+
+    if (parsed.isVoid())
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            showcontrol::localization::tr (u8"Đồng bộ cấu hình"),
+            showcontrol::localization::tr (u8"Dữ liệu cấu hình nhận từ máy chính không hợp lệ."),
+            showcontrol::localization::tr (u8"Đã hiểu"));
+        return;
+    }
 
     if (auto* obj = parsed.getDynamicObject())
     {
@@ -15564,10 +15637,11 @@ void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
     }
 
     forceStopActiveAudioForSafety();
+    clearAllPanelsSelectionLive();
     loadApplicationState();
     applyThemePreference (themePreferenceId);
     setAppLanguage (languagePreferenceIndex);
-    scheduleRestartBackupSync();
+    scheduleRestartBackupSync (750);
     updateBackupConnectionUi();
 
     juce::AlertWindow::showMessageBoxAsync (

@@ -114,6 +114,12 @@ public:
     void appendCopyTracksToPlaylist (int targetListIdx,
                                      const juce::Array<showcontrol::crossdrag::TrackCopyRecord>& tracks);
     void consumeInternalJucePadDrop() noexcept;
+    void applyPadGridDropFallbackIfNeeded (int listIdx,
+                                           SoundPad* pad,
+                                           int targetRow,
+                                           int targetCol,
+                                           const juce::Array<int>& dragSelection,
+                                           int anchorIndex);
     int getActiveListIndex() const noexcept { return activeListIndex; }
     bool isPadGridReorderActive() const noexcept { return padReorderActive && padReorderIsGridMode; }
     void saveApplicationState();
@@ -429,6 +435,7 @@ private:
     void promptDeleteSelectedPadsConfirmation();
     juce::Array<int> collectActiveListDeletionIndices() const;
     void safelyPreparePadForDeletion (SoundPad* pad);
+    void destroyAllListPads();
     void surgicalStopPadIfTransportActive (SoundPad* pad) noexcept;
     void surgicalStopTransportActivePadsInList (const ListData& list) noexcept;
     void detachDeckUiReferencesIfPadInList (const ListData& list) noexcept;

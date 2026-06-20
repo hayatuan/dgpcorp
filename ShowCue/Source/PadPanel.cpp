@@ -299,10 +299,25 @@ juce::Point<int> PadPanel::gridCellAtPoint (juce::Point<int> local) const noexce
                                                               boundedLayout.activeRows);
 }
 
+juce::Point<int> PadPanel::resolveDropGridCell (juce::Point<int> localFallback) const noexcept
+{
+    if (hoveredRow >= 0 && hoveredCol >= 0)
+        return { hoveredCol, hoveredRow };
+
+    if (isDraggingActive)
+    {
+        const auto hoverCell = activeGridCellAtLocalPoint (localFallback);
+
+        if (hoverCell.x >= 0 && hoverCell.y >= 0)
+            return hoverCell;
+    }
+
+    return gridCellAtPoint (localFallback);
+}
+
 juce::Point<int> PadPanel::localPointFromDragDetails (const SourceDetails& dragSourceDetails) const noexcept
 {
-    const auto screenPos = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
-    return showcontrol::crossdrag::screenPointToComponentLocal (*this, screenPos);
+    return showcontrol::crossdrag::dragTargetLocalPoint (*this, dragSourceDetails, true);
 }
 
 bool PadPanel::isInterestedInDragSource (const SourceDetails& dragSourceDetails)
@@ -390,17 +405,11 @@ void PadPanel::itemDropped (const SourceDetails& dragSourceDetails)
         if (mainComp != nullptr)
             mainComp->consumeInternalJucePadDrop();
 
-        int targetRow = hoveredRow;
-        int targetCol = hoveredCol;
+        const auto dropCell = resolveDropGridCell (localPointFromDragDetails (dragSourceDetails));
+        const int targetCol = dropCell.x;
+        const int targetRow = dropCell.y;
 
-        if (targetCol < 0 || targetRow < 0)
-        {
-            const auto dropCell = activeGridCellAtLocalPoint (localPointFromDragDetails (dragSourceDetails));
-            targetCol = dropCell.x;
-            targetRow = dropCell.y;
-        }
-
-        if (targetRow >= 0 && targetCol >= 0)
+        if (showcontrol::padgrid::isValidGridCell (targetRow, targetCol))
         {
             juce::Array<int> multiIndices;
             int anchorIndex = -1;
