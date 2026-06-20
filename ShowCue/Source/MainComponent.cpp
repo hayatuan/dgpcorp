@@ -4572,11 +4572,12 @@ void MainComponent::destroyAllListPads()
 
             if (scrollContent != nullptr)
                 scrollContent->removeChildComponent (pad);
-
-            delete pad;
         }
+
+        list->cueMeta.clear();
     }
 
+    // OwnedArray<ListData> + OwnedArray<SoundPad> — không delete pad thủ công.
     allLists.clear();
     sidebarPanel.clearAllLists();
 }
@@ -15637,6 +15638,9 @@ void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
     }
 
     forceStopActiveAudioForSafety();
+    audioFormatMigrationRunning.store (false, std::memory_order_release);
+    startupReassertTimer.reset();
+    startupGuardTimer.reset();
     clearAllPanelsSelectionLive();
     loadApplicationState();
     applyThemePreference (themePreferenceId);
