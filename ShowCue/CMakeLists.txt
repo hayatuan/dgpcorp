@@ -59,12 +59,12 @@ if (APPLE)
         COMMENT "Prepare macOS AppIcon (opaque + iconutil .icns)")
 
     add_custom_command(TARGET ShowCue POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_showcue_icon_icns}"
-            "$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.icns"
-        COMMAND ${CMAKE_COMMAND} -E rm -f
-            "$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.png"
-        COMMENT "Install native iconutil AppIcon.icns; drop stale AppIcon.png")
+        COMMAND ${CMAKE_COMMAND}
+            -DICNS=${_showcue_icon_icns}
+            -DDEST=$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.icns
+            -DPNG_TO_REMOVE=$<TARGET_BUNDLE_DIR:ShowCue>/Contents/Resources/AppIcon.png
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_app_icon_if_exists.cmake
+        COMMENT "Install native iconutil AppIcon.icns when available; drop stale AppIcon.png")
 
     target_sources(ShowCue PRIVATE Source/ShowControlMacWindow.mm
                                  Source/ShowBackupMacNetworkBonjour.mm

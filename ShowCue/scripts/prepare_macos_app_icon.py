@@ -77,17 +77,27 @@ def write_iconset(master: Image.Image, iconset_dir: Path) -> None:
         resized.save(iconset_dir / name, format="PNG", optimize=True)
 
 
-def write_icns(iconset_dir: Path, icns_path: Path) -> None:
+def write_icns(iconset_dir: Path, icns_path: Path) -> bool:
     if icns_path.exists():
         icns_path.unlink()
 
-    subprocess.run(
-        ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(icns_path)],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(icns_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError) as err:
+        print(
+            f"iconutil skipped ({err}); AppIcon.png still updated for bundle.",
+            file=sys.stderr,
+        )
+        return False
 
 
-def prepare_icon(source: Path) -> None:
+def prepare_icon(source: Path) -> bool:
     if not source.exists():
         raise FileNotFoundError(f"Missing source icon: {source}")
 
@@ -97,7 +107,7 @@ def prepare_icon(source: Path) -> None:
         ABOUT_OUTPUT, format="PNG", optimize=True
     )
     write_iconset(master, ICONSET_DIR)
-    write_icns(ICONSET_DIR, OUTPUT_ICNS)
+    return write_icns(ICONSET_DIR, OUTPUT_ICNS)
 
 
 def main() -> int:
@@ -109,10 +119,11 @@ def main() -> int:
         print("No icon source found.", file=sys.stderr)
         return 1
 
-    prepare_icon(source)
+    wrote_icns = prepare_icon(source)
     print(f"Wrote {OUTPUT_PNG}")
     print(f"Wrote {ABOUT_OUTPUT}")
-    print(f"Wrote {OUTPUT_ICNS}")
+    if wrote_icns:
+        print(f"Wrote {OUTPUT_ICNS}")
     return 0
 
 

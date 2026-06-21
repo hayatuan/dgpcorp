@@ -1,8 +1,0 @@
-{
-  "cmake.generator": "Visual Studio 18 2026",
-  "cmake.configureSettings": {
-    "CMAKE_GENERATOR_PLATFORM": "x64"
-  },
-  "cmake.configurePreset": "windows-debug",
-  "cmake.buildPreset": "windows-debug"
-}

@@ -34,8 +34,7 @@ CMakeUserPresets.json
 /ShowCue/compile_flags.txt
 
 # --- Phân khu 3: IDE Cursor & Visual Studio Code ---
-.vscode/*
-!.vscode/settings.json
+.vscode/
 .cursor/
 .history/
 *.code-workspace
@@ -78,3 +77,12 @@ $RECYCLE.BIN/
 !ShowCue/JUCE/extras/Build/**
 # JUCE binary bundle lẫn vào tree — không cần cho build ShowCue
 ShowCue/JUCE/DemoRunner.app/
+# JUCE vendored — CMake chỉ cần modules/ + extras/Build/
+ShowCue/JUCE/.github/
+ShowCue/JUCE/examples/
+ShowCue/JUCE/docs/
+ShowCue/JUCE/Projucer.app/
+ShowCue/JUCE/extras/*
+!ShowCue/JUCE/extras/Build/
+!ShowCue/JUCE/extras/Build/**
+ShowCue/Resources/AppIcon.iconset/
