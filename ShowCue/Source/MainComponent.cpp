@@ -9136,7 +9136,7 @@ void MainComponent::finishDeferredStartup()
     if (updateChecker != nullptr)
         updateChecker->checkForUpdatesAsync (false);
 
-    scheduleRestartBackupSync (200);
+    scheduleRestartBackupSync (200, true);
 }
 
 void MainComponent::triggerManualMusicIngestion()
@@ -12266,7 +12266,7 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
 
     callbacks.onBackupSettingsChanged = [this]
     {
-        scheduleRestartBackupSync();
+        scheduleRestartBackupSync (80, true);
         updateBackupConnectionUi();
     };
 
@@ -15047,7 +15047,7 @@ void MainComponent::updateBackupConnectionUi()
         quality = showcontrol::backup::LinkQuality::offline;
         detail  = showcontrol::localization::tr (u8"Mất liên kết máy chính");
     }
-    else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
+    else if (now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatDegradedThresholdMs)
     {
         quality = showcontrol::backup::LinkQuality::degraded;
         detail  = showcontrol::localization::tr (u8"Kết nối không ổn định");
@@ -15111,7 +15111,7 @@ void MainComponent::tickBackupPeerHealth()
                      > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
                 status.quality = showcontrol::backup::LinkQuality::offline;
             else if (heartbeatNow - lastPrimaryHeartbeatRxMs
-                     > (juce::uint32) (showcontrol::backup::kHeartbeatStaleThresholdMs / 2))
+                     > (juce::uint32) showcontrol::backup::kHeartbeatDegradedThresholdMs)
                 status.quality = showcontrol::backup::LinkQuality::degraded;
             else
                 status.quality = showcontrol::backup::LinkQuality::good;
@@ -15168,7 +15168,7 @@ void MainComponent::tickBackupPeerHealth()
 void MainComponent::reconnectBackupSync()
 {
     lastPrimaryHeartbeatRxMs = 0;
-    scheduleRestartBackupSync (0);
+    scheduleRestartBackupSync (0, true);
     updateBackupConnectionUi();
 }
 
@@ -15339,17 +15339,7 @@ void MainComponent::tickBackupHeartbeat()
     {
         if (lastPrimaryHeartbeatRxMs > 0
             && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
-        {
-            if (lastBackupAutoReconnectMs == 0
-                || now - lastBackupAutoReconnectMs
-                       >= (juce::uint32) showcontrol::backup::kBackupAutoReconnectCooldownMs)
-            {
-                lastBackupAutoReconnectMs = now;
-                scheduleRestartBackupSync (150);
-            }
-
             updateBackupConnectionUi();
-        }
 
         return;
     }
@@ -15369,27 +15359,25 @@ void MainComponent::tickBackupHeartbeat()
         return;
 
     lastHeartbeatTickMs = now;
-    backupBroadcaster->sendHeartbeat (++heartbeatSendSeq);
+    const auto heartbeatSeq = ++heartbeatSendSeq;
+    const bool sent = backupBroadcaster->sendHeartbeat (heartbeatSeq);
 
-    if (! hasReachableBackupPeer())
+    if (! sent)
     {
-        if (primaryPeerOfflineSinceMs == 0)
-            primaryPeerOfflineSinceMs = now;
-        else if (now - primaryPeerOfflineSinceMs
-                     > (juce::uint32) showcontrol::backup::kPrimaryPeerOfflineGraceMs
-                 && (lastPrimaryBroadcasterRefreshMs == 0
-                     || now - lastPrimaryBroadcasterRefreshMs
-                            >= (juce::uint32) showcontrol::backup::kPrimaryBroadcasterRefreshMs))
+        if (lastPrimaryBroadcasterRefreshMs == 0
+            || now - lastPrimaryBroadcasterRefreshMs
+                   >= (juce::uint32) showcontrol::backup::kPrimaryBroadcasterRefreshMs)
         {
             lastPrimaryBroadcasterRefreshMs = now;
             const auto peers = showcontrol::prefs::loadBackupPeerHosts();
             const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
             backupBroadcaster->configure (peers, showcontrol::prefs::loadBackupSyncPort(), bindAddress);
+            showcontrol::backup::logSyncEvent ("Primary refreshed OSC sender after heartbeat TX failure");
         }
     }
-    else
+    else if (! peerReachable)
     {
-        primaryPeerOfflineSinceMs = 0;
+        backupBroadcaster->sendHeartbeat (heartbeatSeq);
     }
 }
 
@@ -15407,15 +15395,31 @@ bool MainComponent::hasReachableBackupPeer() const noexcept
     return false;
 }
 
-void MainComponent::scheduleRestartBackupSync (int delayMs)
+void MainComponent::scheduleRestartBackupSync (int delayMs, bool resetBackupHeartbeat)
 {
     if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
 
+    const auto now = juce::Time::getMillisecondCounter();
+
+    if (delayMs > 0
+        && lastScheduleRestartRequestMs != 0
+        && now - lastScheduleRestartRequestMs
+               < (juce::uint32) showcontrol::backup::kRestartBackupSyncDebounceMs)
+        return;
+
+    lastScheduleRestartRequestMs = now;
+    pendingRestartResetHeartbeat = pendingRestartResetHeartbeat || resetBackupHeartbeat;
+
     if (backupSyncRestartTimer == nullptr)
     {
         backupSyncRestartTimer = std::make_unique<OneShotApplicationTimer>();
-        backupSyncRestartTimer->onFire = [this] { restartBackupSync(); };
+        backupSyncRestartTimer->onFire = [this]
+        {
+            const bool resetHeartbeat = pendingRestartResetHeartbeat;
+            pendingRestartResetHeartbeat = false;
+            restartBackupSync (resetHeartbeat);
+        };
     }
 
     backupSyncRestartTimer->startMs (juce::jmax (1, delayMs));
@@ -15447,7 +15451,7 @@ void MainComponent::stopBackupNetworking() noexcept
     backupPeerHealthPingInFlight.store (false, std::memory_order_release);
 }
 
-void MainComponent::restartBackupSync()
+void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
 {
     if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
@@ -15467,7 +15471,8 @@ void MainComponent::restartBackupSync()
         lastPeerHealthTickMs = 0;
         lastBackupAutoReconnectMs = 0;
         lastPrimaryBroadcasterRefreshMs = 0;
-        primaryPeerOfflineSinceMs = 0;
+        lastScheduleRestartRequestMs = 0;
+        pendingRestartResetHeartbeat = false;
         backupPeerStatuses.clear();
         syncApplying.store (false, std::memory_order_release);
         pendingPadPatchListIdx = -1;
@@ -15524,8 +15529,11 @@ void MainComponent::restartBackupSync()
 
     if (role == (int) showcontrol::backup::Role::backup)
     {
-        lastPrimaryHeartbeatRxMs = 0;
-        lastBackupAutoReconnectMs = 0;
+        if (resetBackupHeartbeat)
+        {
+            lastPrimaryHeartbeatRxMs = 0;
+            lastBackupAutoReconnectMs = 0;
+        }
 
         if (peers.size() > 0)
         {
@@ -15945,7 +15953,7 @@ void MainComponent::applyImportedProjectConfig (const juce::String& configJson)
     loadApplicationState();
     applyThemePreference (themePreferenceId);
     setAppLanguage (languagePreferenceIndex);
-    scheduleRestartBackupSync (750);
+    scheduleRestartBackupSync (750, true);
     updateBackupConnectionUi();
 
     juce::AlertWindow::showMessageBoxAsync (

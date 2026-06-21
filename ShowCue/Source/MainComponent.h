@@ -170,8 +170,8 @@ public:
     void menuAddBgmList();
     void menuAddCueList();
     void menuAutoTagActiveList();
-    void restartBackupSync();
-    void scheduleRestartBackupSync (int delayMs = 80);
+    void restartBackupSync (bool resetBackupHeartbeat = false);
+    void scheduleRestartBackupSync (int delayMs = 80, bool resetBackupHeartbeat = false);
     void broadcastProjectConfigToBackups();
     void restartOscListener() { scheduleRestartBackupSync(); }
     void setBackupTakeoverActive (bool active);
@@ -888,7 +888,8 @@ private:
     juce::uint32 lastPeerHealthTickMs = 0;
     juce::uint32 lastBackupAutoReconnectMs = 0;
     juce::uint32 lastPrimaryBroadcasterRefreshMs = 0;
-    juce::uint32 primaryPeerOfflineSinceMs = 0;
+    juce::uint32 lastScheduleRestartRequestMs = 0;
+    bool pendingRestartResetHeartbeat = false;
     std::atomic<bool> backupPeerHealthPingInFlight { false };
     std::atomic<bool> applicationShuttingDown { false };
     juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;

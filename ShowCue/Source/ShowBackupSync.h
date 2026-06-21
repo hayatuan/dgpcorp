@@ -22,14 +22,14 @@ enum class SyncPlayMode : int
 
 inline constexpr int kDefaultSyncPort           = 9000;
 inline constexpr int kHeartbeatIntervalMs         = 400;
-inline constexpr int kHeartbeatStaleThresholdMs   = 6000;
+inline constexpr int kHeartbeatStaleThresholdMs   = 10000;
+inline constexpr int kHeartbeatDegradedThresholdMs = 5000;
 inline constexpr int kHeartbeatOfflineProbeMs     = 5000;
 inline constexpr int kPeerHealthIntervalMs        = 1000;
 inline constexpr int kPeerPingTimeoutMs           = 400;
 inline constexpr int kLanAnnounceIntervalMs       = 1500;
-inline constexpr int kBackupAutoReconnectCooldownMs = 8000;
-inline constexpr int kPrimaryBroadcasterRefreshMs = 10000;
-inline constexpr int kPrimaryPeerOfflineGraceMs   = 3000;
+inline constexpr int kPrimaryBroadcasterRefreshMs = 15000;
+inline constexpr int kRestartBackupSyncDebounceMs = 3000;
 inline constexpr int kPadPatchDebounceMs          = 60;
 inline constexpr int kSelectionSyncDebounceMs     = 20;
 inline constexpr int kMaxBackupPeers            = 16;
@@ -135,7 +135,11 @@ public:
                                    : peer->socket.bindToPort (0);
 
             if (! bound)
+            {
                 peer->socket.bindToPort (0);
+                showcontrol::backup::logSyncEvent ("WARN OSC sender bind failed on "
+                                                   + localBind + " — using OS default route");
+            }
 
             if (peer->sender.connectToSocket (peer->socket, host, targetPort))
                 peerSenders.add (peer);
