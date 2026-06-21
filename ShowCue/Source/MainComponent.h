@@ -886,6 +886,9 @@ private:
     juce::uint32 lastHeartbeatTickMs = 0;
     juce::uint32 lastLanAnnounceBroadcastMs = 0;
     juce::uint32 lastPeerHealthTickMs = 0;
+    juce::uint32 lastBackupAutoReconnectMs = 0;
+    juce::uint32 lastPrimaryBroadcasterRefreshMs = 0;
+    juce::uint32 primaryPeerOfflineSinceMs = 0;
     std::atomic<bool> backupPeerHealthPingInFlight { false };
     std::atomic<bool> applicationShuttingDown { false };
     juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;

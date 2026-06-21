@@ -242,6 +242,48 @@ inline juce::String getLocalLanBindAddress()
     return getPrimaryLocalLanNetworkInfo().ip;
 }
 
+/** Chọn interface cùng subnet với peer (quan trọng khi Mac Backup nhận từ Win Primary). */
+inline juce::String pickLanBindAddressForPeer (const juce::String& peerIpv4)
+{
+    const auto peer = peerIpv4.trim();
+
+    if (peer.isEmpty())
+        return getLocalLanBindAddress();
+
+    const uint32_t peerAddr = ipv4ToUint32 (peer);
+
+    if (peerAddr == 0)
+        return getLocalLanBindAddress();
+
+    const auto targets = collectLanScanTargets();
+
+    for (const auto& target : targets)
+    {
+        const uint32_t ifaceAddr = ipv4ToUint32 (target.interfaceAddress);
+
+        if (ifaceAddr == 0)
+            continue;
+
+        const int prefix = target.prefix > 0 ? target.prefix : inferIpv4Prefix (ifaceAddr, ipv4ToUint32 (target.broadcastAddress));
+        const int usePrefix = juce::jlimit (8, 32, prefix > 0 ? prefix : 24);
+        const uint32_t mask = (usePrefix == 32) ? 0xffffffffu : (~0u << (32 - usePrefix));
+
+        if ((ifaceAddr & mask) == (peerAddr & mask))
+            return target.interfaceAddress;
+    }
+
+    return getLocalLanBindAddress();
+}
+
+inline juce::String resolveBackupLanBindAddress (int role, const juce::StringArray& peerHosts)
+{
+    if (peerHosts.size() > 0)
+        return pickLanBindAddressForPeer (peerHosts[0]);
+
+    juce::ignoreUnused (role);
+    return getLocalLanBindAddress();
+}
+
 inline juce::String describeLocalLanNetwork (const LocalLanNetworkInfo& info)
 {
     if (info.ip.isEmpty())

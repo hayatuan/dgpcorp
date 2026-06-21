@@ -22,11 +22,14 @@ enum class SyncPlayMode : int
 
 inline constexpr int kDefaultSyncPort           = 9000;
 inline constexpr int kHeartbeatIntervalMs         = 400;
-inline constexpr int kHeartbeatStaleThresholdMs   = 5000;
+inline constexpr int kHeartbeatStaleThresholdMs   = 6000;
 inline constexpr int kHeartbeatOfflineProbeMs     = 5000;
 inline constexpr int kPeerHealthIntervalMs        = 1000;
 inline constexpr int kPeerPingTimeoutMs           = 400;
 inline constexpr int kLanAnnounceIntervalMs       = 1500;
+inline constexpr int kBackupAutoReconnectCooldownMs = 8000;
+inline constexpr int kPrimaryBroadcasterRefreshMs = 10000;
+inline constexpr int kPrimaryPeerOfflineGraceMs   = 3000;
 inline constexpr int kPadPatchDebounceMs          = 60;
 inline constexpr int kSelectionSyncDebounceMs     = 20;
 inline constexpr int kMaxBackupPeers            = 16;
@@ -90,11 +93,12 @@ inline void logSyncEvent (const juce::String& message)
 class ShowBackupSyncBroadcaster
 {
 public:
-    bool configure (const juce::StringArray& peerHosts, int port)
+    bool configure (const juce::StringArray& peerHosts, int port, const juce::String& localBindAddress = {})
     {
         peerSenders.clear();
         targetHosts.clear();
         targetPort = juce::jlimit (1024, 65535, port);
+        localBind = localBindAddress.trim();
 
         for (const auto& host : peerHosts)
         {
@@ -126,23 +130,32 @@ public:
             auto* peer = new PeerSender();
             peer->host = host;
 
-            if (peer->sender.connect (host, targetPort))
+            const bool bound = localBind.isNotEmpty()
+                                   ? peer->socket.bindToPort (0, localBind)
+                                   : peer->socket.bindToPort (0);
+
+            if (! bound)
+                peer->socket.bindToPort (0);
+
+            if (peer->sender.connectToSocket (peer->socket, host, targetPort))
                 peerSenders.add (peer);
             else
                 delete peer;
         }
 
+        connected = peerSenders.size() > 0;
+
         return connected;
     }
 
-    bool configure (const juce::String& peerHost, int port)
+    bool configure (const juce::String& peerHost, int port, const juce::String& localBindAddress = {})
     {
         juce::StringArray hosts;
 
         if (peerHost.trim().isNotEmpty())
             hosts.add (peerHost.trim());
 
-        return configure (hosts, port);
+        return configure (hosts, port, localBindAddress);
     }
 
     void disconnect() noexcept
@@ -347,6 +360,7 @@ private:
     struct PeerSender
     {
         juce::String host;
+        juce::DatagramSocket socket { true };
         juce::OSCSender sender;
     };
 
@@ -386,6 +400,7 @@ private:
 
     juce::OwnedArray<PeerSender> peerSenders;
     juce::StringArray targetHosts;
+    juce::String localBind;
     int targetPort = kDefaultSyncPort;
     bool connected = false;
 };

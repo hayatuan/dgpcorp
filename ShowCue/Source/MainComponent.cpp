@@ -14736,7 +14736,10 @@ void MainComponent::handleSyncPauseCue (int listIndex, int padIndex)
 void MainComponent::handleSyncHeartbeat (juce::uint32 /*sequence*/)
 {
     if (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::backup)
+    {
         lastPrimaryHeartbeatRxMs = juce::Time::getMillisecondCounter();
+        lastBackupAutoReconnectMs = 0;
+    }
 }
 
 void MainComponent::handleSyncTakeover (bool active)
@@ -15215,7 +15218,8 @@ void MainComponent::startBackupDiscoveryResponder()
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
     backupDiscoverySocket->setEnablePortReuse (true);
 
-    const auto bindAddress = showcontrol::backup::getLocalLanBindAddress();
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (
+        role, showcontrol::prefs::loadBackupPeerHosts());
     bool bound = false;
 
     if (bindAddress.isNotEmpty())
@@ -15336,6 +15340,14 @@ void MainComponent::tickBackupHeartbeat()
         if (lastPrimaryHeartbeatRxMs > 0
             && now - lastPrimaryHeartbeatRxMs > (juce::uint32) showcontrol::backup::kHeartbeatStaleThresholdMs)
         {
+            if (lastBackupAutoReconnectMs == 0
+                || now - lastBackupAutoReconnectMs
+                       >= (juce::uint32) showcontrol::backup::kBackupAutoReconnectCooldownMs)
+            {
+                lastBackupAutoReconnectMs = now;
+                scheduleRestartBackupSync (150);
+            }
+
             updateBackupConnectionUi();
         }
 
@@ -15358,6 +15370,27 @@ void MainComponent::tickBackupHeartbeat()
 
     lastHeartbeatTickMs = now;
     backupBroadcaster->sendHeartbeat (++heartbeatSendSeq);
+
+    if (! hasReachableBackupPeer())
+    {
+        if (primaryPeerOfflineSinceMs == 0)
+            primaryPeerOfflineSinceMs = now;
+        else if (now - primaryPeerOfflineSinceMs
+                     > (juce::uint32) showcontrol::backup::kPrimaryPeerOfflineGraceMs
+                 && (lastPrimaryBroadcasterRefreshMs == 0
+                     || now - lastPrimaryBroadcasterRefreshMs
+                            >= (juce::uint32) showcontrol::backup::kPrimaryBroadcasterRefreshMs))
+        {
+            lastPrimaryBroadcasterRefreshMs = now;
+            const auto peers = showcontrol::prefs::loadBackupPeerHosts();
+            const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+            backupBroadcaster->configure (peers, showcontrol::prefs::loadBackupSyncPort(), bindAddress);
+        }
+    }
+    else
+    {
+        primaryPeerOfflineSinceMs = 0;
+    }
 }
 
 bool MainComponent::hasReachableBackupPeer() const noexcept
@@ -15432,6 +15465,9 @@ void MainComponent::restartBackupSync()
         lastPrimaryHeartbeatRxMs = 0;
         lastHeartbeatTickMs = 0;
         lastPeerHealthTickMs = 0;
+        lastBackupAutoReconnectMs = 0;
+        lastPrimaryBroadcasterRefreshMs = 0;
+        primaryPeerOfflineSinceMs = 0;
         backupPeerStatuses.clear();
         syncApplying.store (false, std::memory_order_release);
         pendingPadPatchListIdx = -1;
@@ -15468,25 +15504,33 @@ void MainComponent::restartBackupSync()
     }
 #endif
 
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+
     if (role == (int) showcontrol::backup::Role::primary)
     {
         backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
 
-        if (! backupBroadcaster->configure (peers, port))
+        if (! backupBroadcaster->configure (peers, port, bindAddress))
             std::cout << "[BACKUP] [WARN] Primary: no backup peer IP configured." << std::endl;
         else
             std::cout << "[BACKUP] Primary broadcasting to " << peers.size()
-                      << " peer(s) on port " << port << std::endl;
+                      << " peer(s) on port " << port;
+
+        if (bindAddress.isNotEmpty())
+            std::cout << " via " << bindAddress.toRawUTF8();
+
+        std::cout << std::endl;
     }
 
     if (role == (int) showcontrol::backup::Role::backup)
     {
         lastPrimaryHeartbeatRxMs = 0;
+        lastBackupAutoReconnectMs = 0;
 
         if (peers.size() > 0)
         {
             backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
-            backupBroadcaster->configure (peers[0], port);
+            backupBroadcaster->configure (peers[0], port, bindAddress);
         }
     }
 
@@ -15605,7 +15649,6 @@ void MainComponent::restartBackupSync()
     }
 
     auto listener = std::make_unique<showcontrol::osc::ShowOscListener> (callbacks);
-    const auto bindAddress = showcontrol::backup::getLocalLanBindAddress();
 
     if (! listener->start (port, bindAddress))
     {
