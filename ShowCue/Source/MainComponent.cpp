@@ -16174,7 +16174,7 @@ void MainComponent::importProjectShowcuePackage()
                 safeThis->loadApplicationState();
                 safeThis->applyThemePreference (safeThis->themePreferenceId);
                 safeThis->setAppLanguage (safeThis->languagePreferenceIndex);
-                safeThis->scheduleRestartBackupSync (750);
+                safeThis->scheduleRestartBackupSync (750, true);
                 safeThis->updateBackupConnectionUi();
 
                 juce::String body =
