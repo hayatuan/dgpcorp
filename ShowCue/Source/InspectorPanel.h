@@ -388,6 +388,43 @@ public:
 
     void mouseDoubleClick (const juce::MouseEvent& e) override { juce::ignoreUnused (e); if (onWaveformDoubleClicked) onWaveformDoubleClicked(); }
 
+    std::function<void()> onViewRangeChanged;
+
+    bool canScrollHorizontally() const noexcept
+    {
+        return totalLen > 0.01 && (viewEnd - viewStart) < totalLen - 0.01;
+    }
+
+    double getViewScrollRatio() const noexcept
+    {
+        if (! canScrollHorizontally())
+            return 0.0;
+
+        const double range = viewEnd - viewStart;
+        const double maxStart = totalLen - range;
+        return maxStart > 0.0 ? viewStart / maxStart : 0.0;
+    }
+
+    void setViewScrollRatio (double ratio)
+    {
+        if (! canScrollHorizontally())
+            return;
+
+        const double range = viewEnd - viewStart;
+        const double maxStart = juce::jmax (0.0, totalLen - range);
+        const double start = juce::jlimit (0.0, maxStart, ratio * maxStart);
+        viewStart = start;
+        viewEnd   = start + range;
+        repaint();
+    }
+
+    double getVisibleDuration() const noexcept { return viewEnd - viewStart; }
+    double getTotalLength() const noexcept { return totalLen; }
+    double getCurrentPosition() const noexcept { return currentPos; }
+
+    /** True while pointer is down on waveform (scrub / marker / cut-select drag). */
+    bool isPointerInteractionActive() const noexcept { return pointerInteractionActive; }
+
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
     {
         if (thumbnail == nullptr || totalLen <= 0.0) return;
@@ -409,12 +446,18 @@ public:
         if (viewEnd > totalLen) { viewEnd = totalLen; viewStart = totalLen - newRange; }
         
         repaint();
+
+        if (onViewRangeChanged)
+            onViewRangeChanged();
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (thumbnail == nullptr || totalLen <= 0.0) return;
-        dragMode = getDragMode (e.getPosition());
+
+        pointerInteractionActive = true;
+        const bool allowCutSelect = cutSelectionEnabled && e.mods.isShiftDown();
+        dragMode = getDragMode (e.getPosition(), allowCutSelect);
         trimEditedDuringDrag = false;
         cutSelDragging = false;
 
@@ -498,20 +541,22 @@ public:
 
         dragMode = 0;
         cutSelDragging = false;
+        pointerInteractionActive = false;
 
         if (wasTrimDrag && trimEditedDuringDrag && onTrimGestureFinished)
             onTrimGestureFinished();
     }
     void mouseMove (const juce::MouseEvent& e) override
     {
-        const int mode = getDragMode (e.getPosition());
+        const bool allowCutSelect = cutSelectionEnabled && e.mods.isShiftDown();
+        const int mode = getDragMode (e.getPosition(), allowCutSelect);
 
         if (mode == 1 || mode == 2)
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
         else if (mode == 3)
             setMouseCursor (juce::MouseCursor::CrosshairCursor);
         else
-            setMouseCursor (juce::MouseCursor::NormalCursor);
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
     }
 
 private:
@@ -561,22 +606,34 @@ private:
         }
     }
 
-    int getDragMode (juce::Point<int> mousePos) const {
-        if (thumbnail == nullptr || totalLen <= 0.0 || (viewEnd <= viewStart)) return 0; 
+    int getDragMode (juce::Point<int> mousePos, bool allowCutSelect) const {
+        if (thumbnail == nullptr || totalLen <= 0.0 || (viewEnd <= viewStart)) return 0;
+
         const auto waveArea = getWaveformBounds();
-        if (! waveArea.contains (mousePos))
+        auto hitArea = waveArea;
+
+        if (showTimeRuler)
+            hitArea = getRulerBounds().getUnion (waveArea);
+
+        if (! hitArea.contains (mousePos))
             return 0;
 
         double effectiveEnd = (trimEnd > 0.0) ? trimEnd : totalLen;
         const int startX = showcontrol::gfx::timeToPixelX (waveArea, trimStart, viewStart, viewEnd);
         const int endX   = showcontrol::gfx::timeToPixelX (waveArea, effectiveEnd, viewStart, viewEnd);
 
-        if (std::abs (mousePos.x - startX) <= 12) return 1;
-        if (std::abs (mousePos.x - endX) <= 12) return 2;
-        if (cutSelectionEnabled) return 3;
+        constexpr int kMarkerHitPx = 14;
+        if (std::abs (mousePos.x - startX) <= kMarkerHitPx) return 1;
+        if (std::abs (mousePos.x - endX) <= kMarkerHitPx) return 2;
+
+        if (! waveArea.contains (mousePos))
+            return 0;
+
+        if (allowCutSelect) return 3;
         return 0;
     }
     juce::AudioThumbnail* thumbnail = nullptr; double currentPos = 0.0, totalLen = 0.0, trimStart = 0.0, trimEnd = 0.0; bool isDark = true; int dragMode = 0;
+    bool pointerInteractionActive = false;
     double viewStart = 0.0, viewEnd = 0.0;
     double fadeInSec = 0.0, fadeOutSec = 0.0, effectiveLen = 0.0;
     bool showTimeRuler = false;
@@ -974,7 +1031,9 @@ struct AdvancedTrimEditorCallbacks
     std::function<bool()> canRedo;
 };
 
-class AdvancedTrimComponent : public juce::Component, public juce::Timer
+class AdvancedTrimComponent : public juce::Component,
+                            public juce::Timer,
+                            private juce::ScrollBar::Listener
 {
 public:
     AdvancedTrimComponent (SoundPad* pad, bool isDark, AdvancedTrimEditorCallbacks callbacksIn)
@@ -986,15 +1045,25 @@ public:
         if (currentPad != nullptr)
             currentPad->setThumbnailLoadAllowed (true);
 
-        setSize (780, 420);
+        setSize (960, 520);
         addAndMakeVisible (largeWaveform);
         largeWaveform.setThumbnail (&currentPad->getThumbnail());
         largeWaveform.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
         largeWaveform.setCutSelectionEnabled (true);
 
+        addAndMakeVisible (hScrollBar);
+        hScrollBar.setSingleStepSize (0.015);
+        hScrollBar.setAutoHide (false);
+        hScrollBar.addListener (this);
+        largeWaveform.onViewRangeChanged = [this]
+        {
+            syncWaveformScrollBar();
+            resized();
+        };
+
         double initialLen = currentPad->getPlaybackLength();
-        double initialPos = currentPad->getPlaybackPosition();
-        largeWaveform.setProgress (initialPos, initialLen);
+        editorPlayheadPos = currentPad->getPlaybackPosition();
+        largeWaveform.setProgress (editorPlayheadPos, initialLen);
         largeWaveform.setDarkMode (isDark);
 
         largeWaveform.onTrimStartChanged = [this] (double t) {
@@ -1006,13 +1075,20 @@ public:
                 currentPad->setTrimEnd (t);
         };
         largeWaveform.onTrimGestureFinished = [this] { finalizeTrimGesture(); };
-        largeWaveform.onPlayheadScrubbed = [this] (double t) { if (currentPad) currentPad->seekTo (t); };
+        largeWaveform.onPlayheadScrubbed = [this] (double t)
+        {
+            editorPlayheadPos = t;
+
+            if (currentPad != nullptr)
+                currentPad->seekTo (t);
+        };
         largeWaveform.onCutSelectionChanged = [this] { updateCutControls(); };
         largeWaveform.setShowTimeRuler (true);
 
         addAndMakeVisible (infoLabel);
         infoLabel.setText (showcontrol::localization::tr (
-                               u8"IN/OUT: kéo marker vàng/đỏ. Cắt nhạc: quét chọn vùng đỏ hoặc đặt điểm cắt tại playhead. Lăn chuột để zoom."),
+                               u8"IN/OUT: kéo marker vàng/đỏ. Playhead: click/kéo trên waveform. "
+                               u8"Chọn vùng cắt: giữ Shift + kéo. Zoom: lăn chuột (thanh ngang khi zoom)."),
                            juce::dontSendNotification);
         infoLabel.setFont (showcontrol::trimEditor::infoFont());
         const auto pal = ShowTheme::get (isDark);
@@ -1025,7 +1101,7 @@ public:
         };
 
         addAndMakeVisible (cutStartBtn);
-        cutStartBtn.setButtonText (showcontrol::localization::tr (u8"Đầu cắt"));
+        cutStartBtn.setButtonText (showcontrol::localization::tr (u8"IN (điểm cắt)"));
         styleSecondaryBtn (cutStartBtn);
         cutStartBtn.onClick = [this]
         {
@@ -1034,7 +1110,7 @@ public:
         };
 
         addAndMakeVisible (cutEndBtn);
-        cutEndBtn.setButtonText (showcontrol::localization::tr (u8"Cuối cắt"));
+        cutEndBtn.setButtonText (showcontrol::localization::tr (u8"OUT (điểm cắt)"));
         styleSecondaryBtn (cutEndBtn);
         cutEndBtn.onClick = [this]
         {
@@ -1052,7 +1128,7 @@ public:
         };
 
         addAndMakeVisible (cutBtn);
-        cutBtn.setButtonText (showcontrol::localization::tr (u8"CẮT & XÓA"));
+        cutBtn.setButtonText (showcontrol::localization::tr (u8"Xóa đoạn"));
         cutBtn.setColour (juce::TextButton::buttonColourId, showcontrol::ui::destructiveActionColour (getLookAndFeel()));
         cutBtn.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
         cutBtn.onClick = [this] { requestAudioCut(); };
@@ -1081,24 +1157,47 @@ public:
         resetButton.onClick = [this] { performTrimReset(); };
 
         addAndMakeVisible (closeBtn);
-        closeBtn.setButtonText (showcontrol::localization::tr (u8"XÁC NHẬN & ĐÓNG BẢNG"));
+        closeBtn.setButtonText (showcontrol::localization::tr (u8"XÁC NHẬN & ĐÓNG"));
         closeBtn.setColour (juce::TextButton::buttonColourId, pal.accentSoft);
         closeBtn.setColour (juce::TextButton::textColourOffId, isDark ? juce::Colours::white : pal.panelElevated);
         closeBtn.onClick = [this] { if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) dw->exitModalState (0); };
 
         updateCutControls();
+        syncWaveformScrollBar();
         startTimer (40);
     }
     ~AdvancedTrimComponent() override
     {
         stopTimer();
+        hScrollBar.removeListener (this);
         largeWaveform.setThumbnail (nullptr);
+    }
+
+    void scrollBarMoved (juce::ScrollBar* scrollBarThatHasMoved, double newRangeStart) override
+    {
+        juce::ignoreUnused (scrollBarThatHasMoved);
+
+        if (updatingScrollFromWaveform)
+            return;
+
+        const double total = juce::jmax (0.001, largeWaveform.getTotalLength());
+        const double proportion = juce::jlimit (0.05, 1.0, largeWaveform.getVisibleDuration() / total);
+        const double maxStart = 1.0 - proportion;
+        largeWaveform.setViewScrollRatio (maxStart > 0.0 ? newRangeStart / maxStart : 0.0);
     }
 
     void timerCallback() override
     {
         if (currentPad != nullptr)
-            largeWaveform.setProgress (currentPad->getPlaybackPosition(), currentPad->getPlaybackLength());
+        {
+            const double len = currentPad->getPlaybackLength();
+
+            if (currentPad->isPlaybackPositionLive())
+                editorPlayheadPos = currentPad->getPlaybackPosition();
+
+            if (! largeWaveform.isPointerInteractionActive())
+                largeWaveform.setProgress (editorPlayheadPos, len);
+        }
 
         updateUndoRedoButtons();
     }
@@ -1133,31 +1232,86 @@ public:
             bounds.removeFromTop (kMacTopDragInset);
 
         auto b = bounds.reduced (20);
-        const int footerH = 88;
+        const int footerH = 108;
+        const int scrollH = (largeWaveform.canScrollHorizontally() || hScrollBar.isVisible()) ? 16 : 0;
         auto footer = b.removeFromBottom (footerH);
 
+        if (scrollH > 0)
+        {
+            hScrollBar.setVisible (true);
+            hScrollBar.setBounds (b.removeFromBottom (scrollH).reduced (0, 1));
+        }
+        else
+        {
+            hScrollBar.setVisible (false);
+        }
+
         largeWaveform.setBounds (b);
-        infoLabel.setBounds (footer.removeFromTop (26));
+        infoLabel.setBounds (footer.removeFromTop (22));
 
-        auto buttonRow = footer;
+        auto buttonArea = footer;
         const int btnH = 32;
-        buttonRow = buttonRow.withHeight (btnH);
+        const int rowGap = 6;
 
-        closeBtn.setBounds (buttonRow.removeFromRight (188));
-        buttonRow.removeFromRight (8);
-        resetButton.setBounds (buttonRow.removeFromRight (108));
-        buttonRow.removeFromRight (8);
-        redoBtn.setBounds (buttonRow.removeFromRight (88));
-        buttonRow.removeFromRight (6);
-        undoBtn.setBounds (buttonRow.removeFromRight (88));
-        buttonRow.removeFromRight (10);
-        cutBtn.setBounds (buttonRow.removeFromRight (108));
-        buttonRow.removeFromRight (6);
-        clearSelBtn.setBounds (buttonRow.removeFromRight (88));
-        buttonRow.removeFromRight (6);
-        cutEndBtn.setBounds (buttonRow.removeFromRight (88));
-        buttonRow.removeFromRight (6);
-        cutStartBtn.setBounds (buttonRow.removeFromRight (88));
+        struct BtnSpec { juce::Button* btn; int width; };
+        const BtnSpec row1[] = {
+            { &cutStartBtn, 108 }, { &cutEndBtn, 112 }, { &clearSelBtn, 88 }, { &cutBtn, 96 }
+        };
+        const BtnSpec row2[] = {
+            { &undoBtn, 80 }, { &redoBtn, 80 }, { &resetButton, 96 }, { &closeBtn, 168 }
+        };
+
+        auto layoutCenteredRow = [&] (juce::Rectangle<int> row, const BtnSpec* specs, int count)
+        {
+            const int gap = 6;
+            int totalW = 0;
+
+            for (int i = 0; i < count; ++i)
+                totalW += specs[i].width + gap;
+
+            totalW -= gap;
+            int x = row.getCentreX() - totalW / 2;
+
+            for (int i = 0; i < count; ++i)
+            {
+                specs[i].btn->setBounds (x, row.getY(), specs[i].width, btnH);
+                x += specs[i].width + gap;
+            }
+        };
+
+        auto row1Area = buttonArea.removeFromTop (btnH);
+        layoutCenteredRow (row1Area, row1, 4);
+        buttonArea.removeFromTop (rowGap);
+        auto row2Area = buttonArea.removeFromTop (btnH);
+        layoutCenteredRow (row2Area, row2, 4);
+    }
+
+private:
+    void syncWaveformScrollBar()
+    {
+        updatingScrollFromWaveform = true;
+
+        if (largeWaveform.canScrollHorizontally())
+        {
+            hScrollBar.setVisible (true);
+
+            const double total = juce::jmax (0.001, largeWaveform.getTotalLength());
+            const double proportion = juce::jlimit (0.05, 1.0, largeWaveform.getVisibleDuration() / total);
+            const double maxStart = 1.0 - proportion;
+            const double start = largeWaveform.getViewScrollRatio() * maxStart;
+
+            hScrollBar.setRangeLimits (0.0, maxStart);
+            hScrollBar.setCurrentRange (start, proportion, juce::dontSendNotification);
+        }
+        else
+        {
+            hScrollBar.setVisible (false);
+        }
+
+        updatingScrollFromWaveform = false;
+
+        if (largeWaveform.canScrollHorizontally())
+            hScrollBar.toFront (false);
     }
 
 private:
@@ -1175,7 +1329,8 @@ private:
         currentPad->reloadThumbnailImmediately();
         largeWaveform.clearCutSelection();
         largeWaveform.setTrimPoints (currentPad->getTrimStart(), currentPad->getTrimEnd());
-        largeWaveform.setProgress (currentPad->getPlaybackPosition(), currentPad->getPlaybackLength());
+        editorPlayheadPos = currentPad->getPlaybackPosition();
+        largeWaveform.setProgress (editorPlayheadPos, currentPad->getPlaybackLength());
         updateCutControls();
 
         if (onUpdate)
@@ -1273,7 +1428,8 @@ private:
         currentPad->triggerTrimUpdateLive();
 
         largeWaveform.setTrimPoints (0.0, totalLen);
-        largeWaveform.setProgress (currentPad->getPlaybackPosition(), totalLen);
+        editorPlayheadPos = 0.0;
+        largeWaveform.setProgress (editorPlayheadPos, totalLen);
 
         if (onUpdate)
             onUpdate();
@@ -1283,7 +1439,10 @@ private:
 
     SoundPad* currentPad = nullptr;
     bool isDarkTheme = true;
+    double editorPlayheadPos = 0.0;
     bool cutInProgress = false;
+    bool updatingScrollFromWaveform = false;
+    juce::ScrollBar hScrollBar { false };
     AdvancedTrimEditorCallbacks callbacks;
     std::function<void()> onUpdate;
     std::function<void()> onGestureFinished;
@@ -2206,8 +2365,8 @@ public:
         {
             dw->setUsingNativeTitleBar (true);
             dw->setResizable (true, false);
-            dw->setSize (780, 420);
-            dw->setResizeLimits (520, 420, 1600, 420);
+            dw->setSize (960, 520);
+            dw->setResizeLimits (720, 480, 1600, 620);
             showcontrol::ui::centreFloatingWindowInMainApp (*dw, positionAnchor != nullptr ? positionAnchor : this);
            #if JUCE_MAC
             showcontrol::mac::deferFarragoFullSizeContentView (*dw);
@@ -2428,16 +2587,15 @@ public:
         placeLabelControlRow (volumeLabel, volumeSlider, rowHVolume);
         skipGap();
 
-        // --- Đồng bộ âm lượng ---
-        const bool normOn = normalizeToggle.getToggleState();
+        // --- Đồng bộ âm lượng — 2 hàng full width để chữ không bị cắt ---
         {
-            auto normalizeRow = area.removeFromTop (rowHBtn);
-            const int leftWidth = juce::jmax (120, (normalizeRow.getWidth() * 58) / 100);
-            normalizeToggle.setBounds (normalizeRow.removeFromLeft (leftWidth));
-            normalizeRow.removeFromLeft (pairGap);
-            normalizeAdvancedBtn.setBounds (normalizeRow);
+            normalizeToggle.setBounds (area.removeFromTop (rowHBtn));
+            skipGap();
+            normalizeAdvancedBtn.setBounds (area.removeFromTop (rowHBtn));
         }
         normalizeAdvancedBtn.setVisible (true);
+
+        const bool normOn = normalizeToggle.getToggleState();
 
         if (normOn && rmsLabel.isVisible())
         {

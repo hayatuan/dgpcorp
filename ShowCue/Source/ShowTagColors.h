@@ -13,9 +13,9 @@ inline juce::Colour defaultTagColour() noexcept
     return juce::Colour (0xFF2F3542);
 }
 
-inline const std::array<juce::Colour, 9>& tagPalette() noexcept
+inline const std::array<juce::Colour, 10>& tagPalette() noexcept
 {
-    static const std::array<juce::Colour, 9> palette {
+    static const std::array<juce::Colour, 10> palette {
         juce::Colour (0xFF5E35B1), // 1 Tím Matte
         juce::Colour (0xFFD81B60), // 2 Hồng Rose
         juce::Colour (0xFFE53935), // 3 Đỏ Ruby
@@ -24,7 +24,8 @@ inline const std::array<juce::Colour, 9>& tagPalette() noexcept
         juce::Colour (0xFF43A047), // 6 Xanh Lâm Nghiệp
         juce::Colour (0xFF00ACC1), // 7 Xanh Ngọc Mờ
         juce::Colour (0xFF1E88E5), // 8 Xanh Studio
-        defaultTagColour()         // 9 Mặc định Xám Tối
+        juce::Colour (0xFF8E24AA), // 9 Tím Lavender
+        defaultTagColour()         // 10 Mặc định Xám Tối
     };
     return palette;
 }
@@ -48,7 +49,7 @@ inline juce::Colour opaqueWaveformInk (juce::Colour background, juce::Colour ink
     return background.interpolatedWith (ink.withAlpha (1.0f), juce::jlimit (0.0f, 1.0f, alpha));
 }
 
-inline constexpr int kTagPaletteSize = 9;
+inline constexpr int kTagPaletteSize = 10;
 
 inline juce::String colourToHexString (juce::Colour c)
 {
@@ -84,7 +85,7 @@ inline int indexOfTagColour (juce::Colour c) noexcept
 
     static const std::array<juce::uint32, kTagPaletteSize> legacyNeonArgb {{
         0xFF7F39FB, 0xFFFF00FF, 0xFFFF0000, 0xFFFF6600, 0xFFFF9900,
-        0xFF00CC00, 0xFF00CCCC, 0xFF0066FF, 0xFF333333
+        0xFF00CC00, 0xFF00CCCC, 0xFF0066FF, 0xFF9933CC, 0xFF333333
     }};
 
     for (int i = 0; i < kTagPaletteSize; ++i)
@@ -193,7 +194,7 @@ private:
 };
 
 //==============================================================================
-/** Dải 9 chấm tròn ngang — menu chuột phải PAD / CUE / BGM (image_fab764). */
+/** Dải 10 chấm tròn ngang — menu chuột phải PAD / CUE / BGM. */
 class ColorRowMenuComponent final : public juce::PopupMenu::CustomComponent
 {
 public:
@@ -202,12 +203,12 @@ public:
           currentColour (colourRef),
           callback (std::move (onSelect))
     {
-        setSize (240, 36);
+        setSize (268, 36);
     }
 
     void getIdealSize (int& idealWidth, int& idealHeight) override
     {
-        idealWidth  = 240;
+        idealWidth  = 268;
         idealHeight = 36;
     }
 

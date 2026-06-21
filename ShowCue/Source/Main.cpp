@@ -51,7 +51,12 @@ public:
     {
     }
 
-    juce::StringArray getMenuBarNames() override { return { showcontrol::localization::tr (u8"Chỉnh sửa") }; }
+    juce::StringArray getMenuBarNames() override { return {
+        showcontrol::localization::tr (u8"Tệp"),
+        showcontrol::localization::tr (u8"Chức năng"),
+        showcontrol::localization::tr (u8"Chỉnh sửa"),
+        showcontrol::localization::tr (u8"Trợ giúp")
+    }; }
 
 
 
@@ -61,10 +66,28 @@ public:
 
         juce::PopupMenu menu;
 
-        if (menuName == showcontrol::localization::tr (u8"Chỉnh sửa"))
+        if (menuName == showcontrol::localization::tr (u8"Tệp"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::importShowcuePackage);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::exportShowcuePackage);
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Chức năng"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::addBgmList);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::addCueList);
+            menu.addSeparator();
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::autoTagColoursActiveList);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::syncConfigToBackups);
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Chỉnh sửa"))
         {
             menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::undo);
             menu.addCommandItem (&commandManager, juce::StandardApplicationCommandIDs::redo);
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Trợ giúp"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::showAboutDialog);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::checkForUpdates);
         }
 
         return menu;
@@ -96,6 +119,7 @@ public:
     {
         return {
             showcontrol::localization::tr (u8"Tệp"),
+            showcontrol::localization::tr (u8"Chức năng"),
             showcontrol::localization::tr (u8"Chỉnh sửa"),
             showcontrol::localization::tr (u8"Trợ giúp")
         };
@@ -112,6 +136,14 @@ public:
             menu.addCommandItem (&commandManager, ShowControlCommandIDs::openPreferences);
             menu.addSeparator();
             menu.addItem (kQuitMenuItemId, showcontrol::localization::tr (u8"Thoát"));
+        }
+        else if (menuName == showcontrol::localization::tr (u8"Chức năng"))
+        {
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::addBgmList);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::addCueList);
+            menu.addSeparator();
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::autoTagColoursActiveList);
+            menu.addCommandItem (&commandManager, ShowControlCommandIDs::syncConfigToBackups);
         }
         else if (menuName == showcontrol::localization::tr (u8"Chỉnh sửa"))
         {
@@ -275,7 +307,13 @@ public:
             setMenuBar (&desktopMenuBar);
 
             if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
+            {
+                main->refreshSystemMenuCallback = [this]
+                {
+                    desktopMenuBar.menuItemsChanged();
+                };
                 main->syncWindowChromeWithTheme();
+            }
            #endif
 
 
@@ -416,10 +454,6 @@ public:
             extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::checkForUpdates);
 
             extraAppleMenu.addSeparator();
-
-            extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::importShowcuePackage);
-
-            extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::exportShowcuePackage);
 
             extraAppleMenu.addCommandItem (&commandManager, ShowControlCommandIDs::openPreferences);
 

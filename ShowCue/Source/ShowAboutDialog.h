@@ -14,9 +14,9 @@ inline juce::String marketingVersionLine()
                      + juce::String (ProjectInfo::versionString);
 
    #if JUCE_MAC
-    line += juce::String::fromUTF8 (u8" (Universal Binary)");
+    line += juce::String::fromUTF8 (u8" · macOS Universal");
    #elif JUCE_WINDOWS
-    line += juce::String::fromUTF8 (u8" (Windows x64)");
+    line += juce::String::fromUTF8 (u8" · Windows x64");
    #endif
 
     return line;
@@ -60,30 +60,30 @@ inline void paintQrDonatePlaceholder (juce::Graphics& g,
                                       juce::Rectangle<int> area,
                                       const juce::LookAndFeel& laf)
 {
-    const auto outline = laf.findColour (juce::Label::textColourId).withAlpha (0.28f);
-    const auto fill    = laf.findColour (juce::ResizableWindow::backgroundColourId).brighter (0.04f);
+    const auto outline = laf.findColour (juce::Label::textColourId).withAlpha (0.35f);
+    const auto fill    = laf.findColour (juce::ResizableWindow::backgroundColourId).brighter (0.06f);
     const auto textCol = laf.findColour (ShowControlLookAndFeel::textSecondaryColourId);
 
     g.setColour (fill);
-    g.fillRoundedRectangle (area.toFloat(), 6.0f);
+    g.fillRoundedRectangle (area.toFloat(), 8.0f);
 
     g.setColour (outline);
     const float dash[] = { 5.0f, 4.0f };
     juce::Path border;
-    border.addRoundedRectangle (area.toFloat().reduced (1.0f), 6.0f);
+    border.addRoundedRectangle (area.toFloat().reduced (1.0f), 8.0f);
     juce::PathStrokeType stroke (1.2f);
     stroke.createDashedStroke (border, border, dash, 2);
     g.strokePath (border, stroke);
 
     g.setColour (textCol);
-    g.setFont (ShowTheme::font (10.0f));
-    g.drawFittedText ("QR CODE\nDONATE\nPLACEHOLDER",
-                      area.reduced (6),
+    g.setFont (ShowTheme::font (11.0f));
+    g.drawFittedText (showcontrol::localization::tr (u8"QR ủng hộ"),
+                      area.reduced (8),
                       juce::Justification::centred,
-                      3);
+                      2);
 }
 
-/** About phẳng HAYATUAN — nền/màu chữ từ LAF, không TextEditor (tránh crash LnF line 82). */
+/** About ShowCue — nền/màu chữ từ LAF, không TextEditor (tránh crash LnF). */
 class AboutPanel final : public juce::Component
 {
 public:
@@ -119,7 +119,7 @@ public:
         }
 
         donateQrComponent.setVisible (hasDonateQrImage);
-        setSize (560, 472);
+        setSize (620, 540);
     }
 
     std::function<void()> onCloseRequested;
@@ -131,6 +131,7 @@ public:
 
         const auto textPrimary   = laf.findColour (juce::Label::textColourId);
         const auto textSecondary = laf.findColour (ShowControlLookAndFeel::textSecondaryColourId);
+        const auto accent        = laf.findColour (ShowControlLookAndFeel::accentColourId);
 
         if (appIcon.isValid())
         {
@@ -142,65 +143,69 @@ public:
         auto text = leftTextArea;
 
         g.setColour (textPrimary);
-        g.setFont (ShowTheme::fontBold (22.0f));
+        g.setFont (ShowTheme::fontBold (26.0f));
         g.drawFittedText (juce::String::fromUTF8 (u8"ShowCue"),
-                          text.removeFromTop (28),
+                          text.removeFromTop (32),
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (2);
-        g.setFont (ShowTheme::font (14.0f));
-        g.setColour (textSecondary);
+        text.removeFromTop (4);
+        g.setFont (ShowTheme::font (15.5f));
+        g.setColour (textSecondary.withAlpha (0.95f));
         g.drawFittedText (showcontrol::localization::tr (u8"Phần mềm phát nhạc sự kiện"),
+                          text.removeFromTop (22),
+                          juce::Justification::centredLeft,
+                          1);
+
+        text.removeFromTop (8);
+        g.setFont (ShowTheme::fontBold (14.0f));
+        g.setColour (accent.withAlpha (0.95f));
+        g.drawFittedText (marketingVersionLine(),
                           text.removeFromTop (20),
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (6);
-        g.setFont (ShowTheme::font (12.5f));
-        g.drawFittedText (marketingVersionLine(),
-                          text.removeFromTop (18),
-                          juce::Justification::centredLeft,
-                          1);
-
-        text.removeFromTop (6);
+        text.removeFromTop (10);
+        g.setFont (ShowTheme::font (13.0f));
+        g.setColour (textPrimary.withAlpha (0.92f));
         g.drawFittedText (showcontrol::localization::tr (u8"Thiết kế & lập trình: Hayatuan"),
                           text.removeFromTop (20),
                           juce::Justification::centredLeft,
                           1);
 
         text.removeFromTop (2);
+        g.setColour (textSecondary.withAlpha (0.88f));
         g.drawFittedText (showcontrol::localization::tr (u8"© 2026 Hayatuan. All rights reserved."),
                           text.removeFromTop (18),
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (10);
-        g.setFont (showcontrol::aboutTypography::featuresFont());
-        g.setColour (textPrimary.withAlpha (0.88f));
-        g.drawFittedText (juce::String::fromUTF8 (
-            u8"Chức năng chính: Phát CUE & BGM độ trễ thấp; "
-            u8"Kéo thả sắp xếp nhanh; Đồng bộ tên bài hát theo thời gian thực; "
-            u8"Phím tắt điều khiển sân khấu."),
-                          text.removeFromTop (52),
-                          juce::Justification::topLeft,
-                          5);
+        text.removeFromTop (14);
+        g.setFont (ShowTheme::fontBold (13.0f));
+        g.setColour (textPrimary);
+        g.drawFittedText (showcontrol::localization::tr (u8"Chức năng chính"),
+                          text.removeFromTop (20),
+                          juce::Justification::centredLeft,
+                          1);
 
-        text.removeFromTop (6);
-        g.setFont (ShowTheme::font (10.5f).italicised());
-        g.setColour (textSecondary);
-        g.drawFittedText (juce::String::fromUTF8 (
-            u8"Ý tưởng tham khảo từ các ứng dụng tiêu chuẩn công nghiệp: "
-            u8"QLab (macOS), Sports Sound Pro, và Ableton Live."),
-                          text,
+        text.removeFromTop (4);
+        g.setFont (ShowTheme::font (12.5f));
+        g.setColour (textPrimary.withAlpha (0.90f));
+        g.drawFittedText (showcontrol::localization::tr (
+            u8"• Phát CUE & BGM độ trễ thấp, đa bus FOH\n"
+            u8"• Lưới cue, danh sách BGM, trim, EQ, đồng bộ âm lượng\n"
+            u8"• Đồng bộ show Primary ↔ Backup qua LAN\n"
+            u8"• Phím tắt, tìm kiếm, kéo thả sắp xếp nhanh\n"
+            u8"• Nhập / xuất cấu hình .showcue giữa các máy"),
+                          text.removeFromTop (108),
                           juce::Justification::topLeft,
-                          4);
+                          6);
 
         if (! hasDonateQrImage)
             paintQrDonatePlaceholder (g, qrArea, laf);
 
-        g.setColour (textSecondary);
-        g.setFont (ShowTheme::font (10.0f));
+        g.setColour (textSecondary.withAlpha (0.9f));
+        g.setFont (ShowTheme::fontBold (11.0f));
         g.drawFittedText (showcontrol::localization::tr (u8"Ủng hộ phát triển"),
                           qrCaptionArea,
                           juce::Justification::centred,
@@ -217,12 +222,12 @@ public:
 
     void resized() override
     {
-        constexpr int kButtonWidth  = 148;
-        constexpr int kButtonHeight = 30;
-        constexpr int kButtonGap    = 12;
-        constexpr int kBottomMargin = 16;
+        constexpr int kButtonWidth  = 160;
+        constexpr int kButtonHeight = 32;
+        constexpr int kButtonGap    = 10;
+        constexpr int kBottomMargin = 18;
 
-        auto bounds = getLocalBounds().reduced (20, 16);
+        auto bounds = getLocalBounds().reduced (24, 18);
 
         const int closeY = bounds.getBottom() - kBottomMargin - kButtonHeight;
         okButton.setBounds (bounds.getCentreX() - kButtonWidth / 2,
@@ -236,16 +241,16 @@ public:
 
         bounds.removeFromBottom (kBottomMargin + kButtonHeight * 2 + kButtonGap);
 
-        iconArea = bounds.removeFromTop (72).withSizeKeepingCentre (64, 64);
+        iconArea = bounds.removeFromTop (80).withSizeKeepingCentre (72, 72);
 
-        bounds.removeFromTop (4);
+        bounds.removeFromTop (6);
         auto content = bounds;
 
-        auto rightColumn = content.removeFromRight (136);
-        qrArea = rightColumn.removeFromTop (120).reduced (4, 0);
-        qrCaptionArea = rightColumn.removeFromTop (18);
+        auto rightColumn = content.removeFromRight (148);
+        qrArea = rightColumn.removeFromTop (128).reduced (4, 0);
+        qrCaptionArea = rightColumn.removeFromTop (20);
 
-        leftTextArea = content.reduced (0, 2);
+        leftTextArea = content.reduced (0, 4);
 
         if (hasDonateQrImage)
             donateQrComponent.setBounds (qrArea.reduced (4));
@@ -277,7 +282,7 @@ inline void showAboutDialog (juce::Component* centreAround,
 
     juce::DialogWindow::LaunchOptions opts;
     opts.content.setOwned (panel);
-    opts.dialogTitle                  = juce::String::fromUTF8 (u8"Giới thiệu");
+    opts.dialogTitle                  = showcontrol::localization::tr (u8"Giới thiệu");
     opts.dialogBackgroundColour       = laf.findColour (juce::ResizableWindow::backgroundColourId);
     opts.escapeKeyTriggersCloseButton = true;
     opts.useNativeTitleBar            = true;

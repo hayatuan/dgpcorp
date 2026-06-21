@@ -101,6 +101,18 @@ public:
 
         for (int b = 0; b < PadParametricEq6::kNumBands; ++b)
             drawBandNode (g, plot, b);
+
+        static const char* bandLabels[] = { "HP", "LS", "P1", "P2", "HS", "LP" };
+        g.setFont (ShowTheme::font (9.5f));
+        g.setColour (pal.textSecondary.withAlpha (0.85f));
+
+        for (int b = 0; b < PadParametricEq6::kNumBands; ++b)
+        {
+            const auto node = getBandNodeCentre (plot, b);
+            g.drawText (bandLabels[b],
+                        (int) node.x - 16, plot.getBottom() + 2, 32, 14,
+                        juce::Justification::centred, false);
+        }
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -327,6 +339,13 @@ private:
         g.setColour (pal.textMuted);
         g.drawText ("Hz", plot.getX(), plot.getBottom() + 2, 28, 16, juce::Justification::centredLeft);
         g.drawText ("dB", plot.getX() - 2, plot.getY() - 2, 24, 14, juce::Justification::bottomRight);
+    }
+
+    juce::Point<float> getBandNodeCentre (juce::Rectangle<int> plot, int band) const
+    {
+        const float hz = PadParametricEq6::kBandFreqHz[band];
+        const float db = nodeDisplayDb (band);
+        return { (float) freqToX (hz, plot), (float) gainToY (db, plot) };
     }
 
     void drawBandNode (juce::Graphics& g, juce::Rectangle<int> plot, int band) const

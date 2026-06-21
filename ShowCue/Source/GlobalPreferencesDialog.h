@@ -591,8 +591,7 @@ class GlobalPreferencesDialog : public juce::Component
 public:
     static constexpr int kDefaultDialogWidth = 680;
 
-    /** Chiều cao nội dung tab Quyền (đo từ UI mẫu ~645px cửa sổ trên Windows). */
-    static int getDefaultContentHeight() noexcept
+    static int getPreferredPanelHeight() noexcept
     {
         const int cardCount =
        #if JUCE_WINDOWS
@@ -601,8 +600,35 @@ public:
             2;
        #endif
 
-        const int cardsH = 4 + cardCount * 116 + (cardCount - 1) * 12 + 4;
-        return kMacTitleDragInset + kTabBarHeight + 1 + 28 + cardsH;
+        constexpr int cardH = 116;
+        constexpr int gap   = 12;
+        constexpr int pad   = 28;
+        const int cardsH = pad + cardCount * cardH + (cardCount - 1) * gap;
+        const int heroMinH = 260;
+        return juce::jmax (cardsH, heroMinH);
+    }
+
+    static int getPermissionsPanelHeight() noexcept
+    {
+        return getPreferredPanelHeight();
+    }
+
+    static int getPreferredPanelHeightForTab (int tabIndex) noexcept
+    {
+        switch (tabIndex)
+        {
+            case 0: return AudioDeviceSettingsPanel::getPreferredEmbeddedHeight();
+            case 1: return 460;
+            case 2: return getPreferredPanelHeight();
+            case 3: return 640;
+            default: return 520;
+        }
+    }
+
+    /** Chiều cao nội dung tab Quyền (đo từ UI mẫu ~645px cửa sổ trên Windows). */
+    static int getDefaultContentHeight() noexcept
+    {
+        return kMacTitleDragInset + kTabBarHeight + 1 + getPreferredPanelHeightForTab (2);
     }
 
     static juce::Point<int> getDefaultContentSize() noexcept
@@ -1014,6 +1040,23 @@ private:
             backupPanel->refreshLocalizedText();
             backupPanel->refreshNetworkInfo();
             backupPanel->resized();
+        }
+
+        resizeToFitActiveTab();
+    }
+
+    void resizeToFitActiveTab()
+    {
+        const int panelH = getPreferredPanelHeightForTab (activeTab);
+        const int contentH = kMacTitleDragInset + kTabBarHeight + 1 + panelH;
+        setSize (kDefaultDialogWidth, contentH);
+        resized();
+
+        if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+        {
+            const int winH = contentH + getNativeTitleBarAllowance();
+            dw->setSize (kDefaultDialogWidth, winH);
+            dw->centreWithSize (kDefaultDialogWidth, winH);
         }
     }
 };

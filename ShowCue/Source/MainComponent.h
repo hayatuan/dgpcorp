@@ -45,7 +45,11 @@ namespace ShowControlCommandIDs
         checkForUpdates       = 0x53430002,
         openPreferences       = 0x53430003,
         exportShowcuePackage  = 0x53430004,
-        importShowcuePackage  = 0x53430005
+        importShowcuePackage  = 0x53430005,
+        addBgmList            = 0x53430006,
+        addCueList            = 0x53430007,
+        autoTagColoursActiveList = 0x53430008,
+        syncConfigToBackups   = 0x53430009
     };
 }
 
@@ -162,6 +166,9 @@ public:
     void triggerGlobalPauseAll();
     void exportProjectShowcuePackage();
     void importProjectShowcuePackage();
+    void menuAddBgmList();
+    void menuAddCueList();
+    void menuAutoTagActiveList();
     void restartBackupSync();
     void scheduleRestartBackupSync (int delayMs = 80);
     void broadcastProjectConfigToBackups();
@@ -521,6 +528,7 @@ private:
     /** Ép resized + nạp lại nội dung vùng trung tâm sau toggle view (0ms, message thread). */
     void flushPlayoutViewGraphics (bool isPadMode);
     void refreshAllPanelThemes (bool shouldBeDark);
+    std::function<void()> refreshSystemMenuCallback;
     void refreshLocalizedUi();
     void refreshLocalizedBusNames();
     void darkModeSettingChanged() override;

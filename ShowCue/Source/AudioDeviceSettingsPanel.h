@@ -646,6 +646,17 @@ class AudioDeviceSettingsPanel : public juce::Component
 public:
     static constexpr int kNumBuses = AudioBusNamingList::kNumBuses;
 
+    static int getPreferredEmbeddedHeight() noexcept
+    {
+        constexpr int outerPad     = 12;
+        constexpr int busLabelH    = 20;
+        constexpr int busListH     = 132;
+        constexpr int sectionGap   = 8;
+        constexpr int groupChrome  = 34;
+        constexpr int deviceMinH   = 228;
+        return outerPad * 2 + busLabelH + 4 + busListH + sectionGap + groupChrome + deviceMinH;
+    }
+
     AudioDeviceSettingsPanel (juce::AudioDeviceManager& deviceManager,
                               bool darkMode,
                               const juce::StringArray& busNames,
@@ -679,7 +690,7 @@ public:
 
         applyTheme();
         setWantsKeyboardFocus (true);
-        setSize (540, embeddedInPreferences ? 460 : 500);
+        setSize (540, embeddedInPreferences ? getPreferredEmbeddedHeight() : 500);
     }
 
     ~AudioDeviceSettingsPanel() override = default;
@@ -792,7 +803,7 @@ public:
     void resized() override
     {
         constexpr int outerPad   = 12;
-        constexpr int sectionGap = 6;
+        constexpr int sectionGap = 8;
         const int footerH = embeddedInPreferences ? 0 : 44;
 
         auto bounds = getLocalBounds().reduced (outerPad);
@@ -801,6 +812,22 @@ public:
         {
             auto footer = bounds.removeFromBottom (footerH);
             okBtn.setBounds (footer.removeFromRight (108).withHeight (32).reduced (0, 4));
+        }
+
+        if (embeddedInPreferences)
+        {
+            constexpr int busLabelH = 20;
+            constexpr int busListH  = 132;
+
+            busSectionLabel.setBounds (bounds.removeFromTop (busLabelH));
+            bounds.removeFromTop (4);
+            busList.setBounds (bounds.removeFromTop (busListH));
+            busList.resized();
+            bounds.removeFromTop (sectionGap);
+
+            audioGroup.setBounds (bounds);
+            deviceSelector->setBounds (audioGroup.getBounds().reduced (10, 14));
+            return;
         }
 
         audioGroup.setBounds (bounds);

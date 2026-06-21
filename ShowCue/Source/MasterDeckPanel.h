@@ -925,11 +925,11 @@ public:
         const auto leftCol = getLeftColumnBounds();
 
         g.setColour (findColour (MasterDeckComponent::panelHeaderColourId).withAlpha (0.92f));
-        g.setFont (ShowTheme::fontBold (13.5f));
+        g.setFont (ShowTheme::fontBold (17.0f));
         const juce::String currentName = activePad ? activePad->getPadName()
                                                    : showcontrol::localization::tr (u8"KHÔNG CÓ BÀI HÁT ĐANG PHÁT");
-        g.drawFittedText (currentName, leftCol.getX() + 8, leftCol.getY() + 6,
-                          leftCol.getWidth() - 16, 28, juce::Justification::topLeft, 2, 0.90f);
+        g.drawFittedText (currentName, leftCol.getX() + 8, leftCol.getY() + 4,
+                          leftCol.getWidth() - 16, 36, juce::Justification::topLeft, 2, 0.92f);
 
         auto waveInner = waveBounds.reduced (1).toFloat();
         g.setColour (findColour (MasterDeckComponent::waveInnerColourId));

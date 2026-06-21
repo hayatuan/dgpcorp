@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # ShowCue — trình phát sự kiện cue-based (JUCE 8)
-project(ShowCue VERSION 1.0.0 LANGUAGES C CXX)
+project(ShowCue VERSION 1.0.1 LANGUAGES C CXX)
 
 if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Export compile_commands.json for clangd")
@@ -17,7 +17,7 @@ file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/InfoPlistExtra.plist" SHOWCUE_P
 
 juce_add_gui_app(ShowCue
     PRODUCT_NAME "ShowCue"
-    VERSION 1.0.0
+    VERSION 1.0.1
     COMPANY_NAME "DGP Corp"
     BUNDLE_ID "com.dgpco.showcue"
     ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/Resources/AppIcon.png"

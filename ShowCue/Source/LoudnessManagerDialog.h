@@ -186,7 +186,29 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (ShowTheme::get (isDarkTheme).windowBg);
+        const auto pal = ShowTheme::get (isDarkTheme);
+        g.fillAll (pal.windowBg);
+
+        auto bounds = getLocalBounds().reduced (16, 12);
+        auto header = bounds.removeFromTop (44);
+        g.setColour (pal.panelElevated);
+        g.fillRoundedRectangle (header.toFloat(), 8.0f);
+        g.setColour (pal.border.withAlpha (0.55f));
+        g.drawRoundedRectangle (header.toFloat().reduced (0.5f), 8.0f, 1.0f);
+
+        g.setFont (ShowTheme::fontBold (15.0f));
+        g.setColour (pal.textPrimary);
+        g.drawText (showcontrol::localization::tr (u8"Quản lý đồng bộ âm lượng"),
+                    header.reduced (14, 0),
+                    juce::Justification::centredLeft,
+                    true);
+
+        g.setFont (ShowTheme::font (11.5f));
+        g.setColour (pal.textSecondary);
+        g.drawText (showcontrol::localization::tr (u8"Preset · Profile · Safe mode · Preview toàn list"),
+                    header.reduced (14, 0).withTrimmedTop (22),
+                    juce::Justification::centredLeft,
+                    true);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -212,7 +234,7 @@ public:
     void resized() override
     {
         auto b = getLocalBounds().reduced (14);
-        constexpr int kTopInset = 18;
+        constexpr int kTopInset = 52;
         constexpr int kRowGap = 8;
         constexpr int kFieldLabelW = 56;
         constexpr int kPairGap = 10;

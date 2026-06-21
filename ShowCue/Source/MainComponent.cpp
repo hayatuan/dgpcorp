@@ -3786,6 +3786,8 @@ void MainComponent::applyTrackRenameAtIndex (int listIdx,
     if (auto* renamedPad = list->pads[cueIndex])
         broadcastPadPatchIfPrimary (showcontrol::backup::padpatch::patchFromPad (
             listIdx, cueIndex, showcontrol::backup::padpatch::kName, renamedPad));
+
+    masterDeckPanel.repaint();
 }
 
 void MainComponent::applyTrackRenameWithUndo (int listIdx,
@@ -8823,8 +8825,8 @@ MainComponent::MainComponent()
                         bool allWordsMatch = true;
                         for (auto word : searchWords) { if (! targetTokens.contains (word)) { allWordsMatch = false; break; } }
                         if (allWordsMatch) listHasMatch = true;
-                        if (i == activeListIndex) pad->setVisible (searchWords.size() == 0 || allWordsMatch);
-                        else pad->setVisible (false);
+                        if (i == activeListIndex)
+                            pad->setVisible (searchWords.size() == 0 || allWordsMatch);
                     }
                 }
             }
@@ -12296,6 +12298,10 @@ void MainComponent::getAllCommands (juce::Array<juce::CommandID>& commands)
     commands.add (ShowControlCommandIDs::openPreferences);
     commands.add (ShowControlCommandIDs::importShowcuePackage);
     commands.add (ShowControlCommandIDs::exportShowcuePackage);
+    commands.add (ShowControlCommandIDs::addBgmList);
+    commands.add (ShowControlCommandIDs::addCueList);
+    commands.add (ShowControlCommandIDs::autoTagColoursActiveList);
+    commands.add (ShowControlCommandIDs::syncConfigToBackups);
 }
 
 void MainComponent::getCommandInfo (juce::CommandID commandID, juce::ApplicationCommandInfo& result)
@@ -12370,6 +12376,36 @@ void MainComponent::getCommandInfo (juce::CommandID commandID, juce::Application
                             0);
             break;
 
+        case ShowControlCommandIDs::addBgmList:
+            result.setInfo (showcontrol::localization::tr (u8"Thêm BGM"),
+                            showcontrol::localization::tr (u8"Tạo danh sách phát nhạc nền mới"),
+                            showcontrol::localization::tr (u8"Chức năng"),
+                            0);
+            break;
+
+        case ShowControlCommandIDs::addCueList:
+            result.setInfo (showcontrol::localization::tr (u8"Thêm Cue"),
+                            showcontrol::localization::tr (u8"Tạo danh sách cue kịch bản mới"),
+                            showcontrol::localization::tr (u8"Chức năng"),
+                            0);
+            break;
+
+        case ShowControlCommandIDs::autoTagColoursActiveList:
+            result.setInfo (showcontrol::localization::tr (u8"Tô màu tự động"),
+                            showcontrol::localization::tr (u8"Gán màu tag cho các item trong list đang chọn"),
+                            showcontrol::localization::tr (u8"Chức năng"),
+                            0);
+            result.setActive (activeListIndex >= 0 && activeListIndex < allLists.size());
+            break;
+
+        case ShowControlCommandIDs::syncConfigToBackups:
+            result.setInfo (showcontrol::localization::tr (u8"Đồng bộ cấu hình sang máy phụ"),
+                            showcontrol::localization::tr (u8"Gửi toàn bộ cấu hình show qua LAN tới máy Backup"),
+                            showcontrol::localization::tr (u8"Chức năng"),
+                            0);
+            result.setActive (showcontrol::prefs::loadBackupRole() == (int) showcontrol::backup::Role::primary);
+            break;
+
         default:
             break;
     }
@@ -12403,6 +12439,22 @@ bool MainComponent::perform (const juce::ApplicationCommandTarget::InvocationInf
 
         case ShowControlCommandIDs::exportShowcuePackage:
             exportProjectShowcuePackage();
+            return true;
+
+        case ShowControlCommandIDs::addBgmList:
+            menuAddBgmList();
+            return true;
+
+        case ShowControlCommandIDs::addCueList:
+            menuAddCueList();
+            return true;
+
+        case ShowControlCommandIDs::autoTagColoursActiveList:
+            menuAutoTagActiveList();
+            return true;
+
+        case ShowControlCommandIDs::syncConfigToBackups:
+            broadcastProjectConfigToBackups();
             return true;
 
         default:
@@ -12551,6 +12603,9 @@ void MainComponent::refreshLocalizedUi()
    #if JUCE_MAC
     showcontrol::mac::refreshNativeMenuBar();
    #endif
+
+    if (refreshSystemMenuCallback)
+        refreshSystemMenuCallback();
 }
 
 void MainComponent::refreshLocalizedBusNames()
@@ -14208,6 +14263,8 @@ void MainComponent::applySyncedListPatch (const showcontrol::backup::listpatch::
         sidebarPanel.setListThemeColour (patch.listIndex, list->themeColour);
         sidebarPanel.repaint();
     }
+
+    triggerSave();
 }
 
 void MainComponent::handleSyncListPatch (const showcontrol::backup::listpatch::PatchMessage& patch)
@@ -15722,6 +15779,50 @@ void MainComponent::exportProjectShowcuePackage()
     });
 }
 
+void MainComponent::menuAddBgmList()
+{
+    const int idx = allLists.size();
+
+    while (allLists.size() <= idx)
+        allLists.add (new ListData());
+
+    auto* list = allLists[idx];
+    list->isGrid            = false;
+    list->useCueListPanel   = false;
+
+    sidebarPanel.addSet (showcontrol::localization::defaultBgmListName(),
+                         list->pads.size(), false, false, list->isLocked, list->themeColour);
+    loadList (idx, 12, false);
+    saveProject();
+    updateBackupConnectionUi();
+}
+
+void MainComponent::menuAddCueList()
+{
+    const int idx = allLists.size();
+
+    while (allLists.size() <= idx)
+        allLists.add (new ListData());
+
+    auto* list = allLists[idx];
+    list->isGrid            = true;
+    list->useCueListPanel   = false;
+
+    sidebarPanel.addSet (showcontrol::localization::defaultCueListName(),
+                         list->pads.size(), true, false, list->isLocked, list->themeColour);
+    loadList (idx, 0, true);
+    saveProject();
+    updateBackupConnectionUi();
+}
+
+void MainComponent::menuAutoTagActiveList()
+{
+    if (activeListIndex < 0 || activeListIndex >= allLists.size())
+        return;
+
+    applyAutoTagColoursToListWithUndo (activeListIndex);
+}
+
 void MainComponent::importProjectShowcuePackage()
 {
     if (isOperatingState())
@@ -15791,6 +15892,8 @@ void MainComponent::importProjectShowcuePackage()
 
                 const auto remappedProjectXml = remapProjectXmlKeepingLocalPaths (
                     package.projectXml, localProjectXml);
+                const auto remapSummary = showcontrol::persistence::pathremap::summarizeRemap (
+                    package.projectXml, remappedProjectXml);
 
                 juce::var configToSave = juce::JSON::parse (package.configJson);
 
@@ -15813,17 +15916,43 @@ void MainComponent::importProjectShowcuePackage()
                 }
 
                 safeThis->forceStopActiveAudioForSafety();
+                safeThis->audioFormatMigrationRunning.store (false, std::memory_order_release);
+                safeThis->startupReassertTimer.reset();
+                safeThis->startupGuardTimer.reset();
+                safeThis->clearAllPanelsSelectionLive();
                 safeThis->loadApplicationState();
                 safeThis->applyThemePreference (safeThis->themePreferenceId);
-                safeThis->scheduleRestartBackupSync();
+                safeThis->setAppLanguage (safeThis->languagePreferenceIndex);
+                safeThis->scheduleRestartBackupSync (750);
                 safeThis->updateBackupConnectionUi();
 
-                const juce::String body =
+                juce::String body =
                     showcontrol::localization::tr (u8"File: ") + source.getFileName() + "\n"
                     + formatConfigurationPackageStats (summary) + "\n\n"
-                    + showcontrol::localization::tr (u8"Bản cũ đã sao lưu vào thư mục backups/.") + "\n"
-                    + showcontrol::localization::tr (
-                        u8"Kiểm tra đường dẫn media và cấu hình tab Mạng trên máy này.");
+                    + showcontrol::localization::tr (u8"Bản cũ đã sao lưu vào thư mục backups/.");
+
+                if (remapSummary.remappedCount > 0 || remapSummary.unmatchedCount > 0)
+                {
+                    body += "\n\n"
+                          + showcontrol::localization::tr (u8"Đường dẫn media được map theo tên file trên máy này.");
+
+                    if (remapSummary.remappedCount > 0)
+                        body += "\n"
+                              + showcontrol::localization::tr (u8"Đã map %COUNT% track sang đường dẫn local.")
+                                    .replace ("%COUNT%", juce::String (remapSummary.remappedCount));
+
+                    if (remapSummary.unmatchedCount > 0)
+                    {
+                        body += "\n"
+                              + showcontrol::localization::tr (
+                                  u8"Cảnh báo: %COUNT% track chưa có file tương ứng.")
+                                    .replace ("%COUNT%", juce::String (remapSummary.unmatchedCount));
+                    }
+                }
+
+                body += "\n\n"
+                      + showcontrol::localization::tr (
+                          u8"Kiểm tra tab Mạng nếu máy này là Backup.");
 
                 showConfigurationPackageAlert (juce::AlertWindow::InfoIcon,
                     showcontrol::localization::tr (u8"Nhập cấu hình thành công"),
