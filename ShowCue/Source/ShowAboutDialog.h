@@ -105,6 +105,8 @@ public:
 
         if (const auto iconFile = resolveBundledResourceFile ("AppIconAbout.png"); iconFile.existsAsFile())
             appIcon = juce::ImageFileFormat::loadFrom (iconFile);
+        else if (const auto fallbackIcon = resolveBundledResourceFile ("AppIcon.png"); fallbackIcon.existsAsFile())
+            appIcon = juce::ImageFileFormat::loadFrom (fallbackIcon);
 
         if (const auto qrFile = resolveBundledResourceFile ("DonateQR.png"); qrFile.existsAsFile())
         {
@@ -119,7 +121,7 @@ public:
         }
 
         donateQrComponent.setVisible (hasDonateQrImage);
-        setSize (620, 540);
+        setSize (624, 600);
     }
 
     std::function<void()> onCloseRequested;
@@ -140,7 +142,7 @@ public:
                          juce::RectanglePlacement::centred);
         }
 
-        auto text = leftTextArea;
+        auto text = headerTextArea;
 
         g.setColour (textPrimary);
         g.setFont (ShowTheme::fontBold (26.0f));
@@ -180,15 +182,16 @@ public:
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (14);
+        auto features = featuresArea;
+        features.removeFromTop (6);
         g.setFont (ShowTheme::fontBold (13.0f));
         g.setColour (textPrimary);
         g.drawFittedText (showcontrol::localization::tr (u8"Chức năng chính"),
-                          text.removeFromTop (20),
+                          features.removeFromTop (20),
                           juce::Justification::centredLeft,
                           1);
 
-        text.removeFromTop (4);
+        features.removeFromTop (4);
         g.setFont (ShowTheme::font (12.5f));
         g.setColour (textPrimary.withAlpha (0.90f));
         g.drawFittedText (showcontrol::localization::tr (
@@ -197,7 +200,7 @@ public:
             u8"• Đồng bộ show Primary ↔ Backup qua LAN\n"
             u8"• Phím tắt, tìm kiếm, kéo thả sắp xếp nhanh\n"
             u8"• Nhập / xuất cấu hình .showcue giữa các máy"),
-                          text.removeFromTop (108),
+                          features,
                           juce::Justification::topLeft,
                           6);
 
@@ -226,6 +229,7 @@ public:
         constexpr int kButtonHeight = 32;
         constexpr int kButtonGap    = 10;
         constexpr int kBottomMargin = 18;
+        constexpr int kIconSize     = 64;
 
         auto bounds = getLocalBounds().reduced (24, 18);
 
@@ -241,16 +245,27 @@ public:
 
         bounds.removeFromBottom (kBottomMargin + kButtonHeight * 2 + kButtonGap);
 
-        iconArea = bounds.removeFromTop (80).withSizeKeepingCentre (72, 72);
-
-        bounds.removeFromTop (6);
-        auto content = bounds;
-
-        auto rightColumn = content.removeFromRight (148);
+        auto headerRow = bounds.removeFromTop (juce::jmax (kIconSize, 132));
+        auto rightColumn = headerRow.removeFromRight (148);
         qrArea = rightColumn.removeFromTop (128).reduced (4, 0);
         qrCaptionArea = rightColumn.removeFromTop (20);
 
-        leftTextArea = content.reduced (0, 4);
+        if (appIcon.isValid())
+        {
+            iconArea = headerRow.removeFromLeft (kIconSize).withHeight (kIconSize).reduced (0, 2);
+            headerRow.removeFromLeft (12);
+        }
+        else
+        {
+            iconArea = {};
+        }
+
+        headerTextArea = headerRow.reduced (0, 2);
+
+        featuresArea = bounds.reduced (0, 4);
+
+        if (appIcon.isValid())
+            featuresArea = featuresArea.withTrimmedLeft (kIconSize + 12);
 
         if (hasDonateQrImage)
             donateQrComponent.setBounds (qrArea.reduced (4));
@@ -267,7 +282,8 @@ private:
     bool hasDonateQrImage = false;
 
     juce::Rectangle<int> iconArea;
-    juce::Rectangle<int> leftTextArea;
+    juce::Rectangle<int> headerTextArea;
+    juce::Rectangle<int> featuresArea;
     juce::Rectangle<int> qrArea;
     juce::Rectangle<int> qrCaptionArea;
 

@@ -136,6 +136,7 @@ public:
     void applyThemePreference (int themeId);
     /** Đồng bộ nền DocumentWindow + menu bar với theme (gọi sau setMenuBar). */
     void syncWindowChromeWithTheme();
+    void setRefreshSystemMenuCallback (std::function<void()> callback) { refreshSystemMenuCallback = std::move (callback); }
     void setAppLanguage (int languageIndex);
     void lookAndFeelChanged() override;
     void refreshSidebarPlayingStatus();

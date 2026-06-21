@@ -2394,7 +2394,12 @@ void CueListPanel::itemDragEnter (const SourceDetails& dragSourceDetails)
                               ? showcontrol::crossdrag::parseLocalRowReorderSourceIndex (dragSourceDetails.description)
                               : dragSourceRows[0];
 
-    const auto listLocal = listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+    const auto listLocal =
+       #if JUCE_WINDOWS
+        showcontrol::crossdrag::dragTargetLocalPoint (listBox, dragSourceDetails);
+       #else
+        listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+       #endif
     const int prevInsertIndex = cueRowReorderInsertIndex;
     cueRowReorderInsertIndex = computeRowInsertionIndexAtListY (listLocal.y);
 
@@ -2415,7 +2420,12 @@ void CueListPanel::itemDragMove (const SourceDetails& dragSourceDetails)
 
     localRowReorderDragActive = true;
 
-    const auto listLocal = listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+    const auto listLocal =
+       #if JUCE_WINDOWS
+        showcontrol::crossdrag::dragTargetLocalPoint (listBox, dragSourceDetails);
+       #else
+        listBox.getLocalPoint (this, dragSourceDetails.localPosition);
+       #endif
     const int prevInsertIndex = cueRowReorderInsertIndex;
     cueRowReorderInsertIndex = computeRowInsertionIndexAtListY (listLocal.y);
 

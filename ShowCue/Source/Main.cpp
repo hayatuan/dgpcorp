@@ -308,10 +308,10 @@ public:
 
             if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
             {
-                main->refreshSystemMenuCallback = [this]
+                main->setRefreshSystemMenuCallback ([this]
                 {
                     desktopMenuBar.menuItemsChanged();
-                };
+                });
                 main->syncWindowChromeWithTheme();
             }
            #endif

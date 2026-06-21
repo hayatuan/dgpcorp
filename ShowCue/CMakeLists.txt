@@ -95,7 +95,7 @@ if(WIN32)
     target_link_libraries(ShowCue PRIVATE iphlpapi ole32 oleaut32)
 
     set(_showcue_resources_dir "${CMAKE_CURRENT_SOURCE_DIR}/Resources")
-    foreach(_runtime_asset IN ITEMS AppIcon.png DonateQR.png)
+    foreach(_runtime_asset IN ITEMS AppIcon.png AppIconAbout.png DonateQR.png)
         set(_runtime_src "${_showcue_resources_dir}/${_runtime_asset}")
         if(EXISTS "${_runtime_src}")
             add_custom_command(TARGET ShowCue POST_BUILD

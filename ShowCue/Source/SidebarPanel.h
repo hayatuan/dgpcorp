@@ -1508,7 +1508,8 @@ inline void SidebarPanel::itemDragMove (const juce::DragAndDropTarget::SourceDet
     if (! crossComponentDragActive)
         return;
 
-    const auto contentPos = panelPointToListContent (dragSourceDetails.localPosition);
+    const auto panelLocal = showcontrol::crossdrag::dragTargetLocalPoint (*this, dragSourceDetails);
+    const auto contentPos = panelPointToListContent (panelLocal);
     const int row = contentPos.hasValue() ? hitTestListIndexAt (*contentPos) : -1;
 
     if (row >= 0 && row < sets.size())

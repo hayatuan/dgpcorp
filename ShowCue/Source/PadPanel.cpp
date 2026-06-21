@@ -203,8 +203,12 @@ void PadPanel::applyGridDragHoverAtLocalPoint (juce::Point<int> localPosition,
         activeDragColour = resolveActiveDragColour (sourcePad);
     }
 
-    const int currentCellW = juce::jmax (1, getWidth() / juce::jmax (1, dragActiveCols));
-    const int currentCellH = juce::jmax (1, getHeight() / juce::jmax (1, dragActiveRows));
+    const int currentCellW = juce::jmax (1, boundedLayout.cellW > 0
+                                             ? boundedLayout.cellW
+                                             : getWidth() / juce::jmax (1, dragActiveCols));
+    const int currentCellH = juce::jmax (1, boundedLayout.cellH > 0
+                                             ? boundedLayout.cellH
+                                             : getHeight() / juce::jmax (1, dragActiveRows));
 
     const int newHoverCol = localPosition.x / currentCellW;
     const int newHoverRow = localPosition.y / currentCellH;

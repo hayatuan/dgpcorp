@@ -399,16 +399,22 @@ inline juce::Point<int> screenPointToComponentLocal (const juce::Component& targ
     return target.getLocalPoint (nullptr, screenPos);
 }
 
-/** Ưu tiên localPosition JUCE khi target đang nhận drag; fallback screen→local. */
+/** Ưu tiên localPosition JUCE trên macOS; Windows dùng screen→local (HiDPI/viewport ổn định hơn). */
 inline juce::Point<int> dragTargetLocalPoint (const juce::Component& target,
                                               const juce::DragAndDropTarget::SourceDetails& details,
                                               bool preferJuceLocalPosition = true) noexcept
 {
+   #if JUCE_WINDOWS
+    juce::ignoreUnused (preferJuceLocalPosition, details);
+    const auto screenPos = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
+    return screenPointToComponentLocal (target, screenPos);
+   #else
     if (preferJuceLocalPosition)
         return details.localPosition;
 
     const auto screenPos = juce::Desktop::getInstance().getMainMouseSource().getScreenPosition().roundToInt();
     return screenPointToComponentLocal (target, screenPos);
+   #endif
 }
 
 /** Điểm neo drag image — vị trí mouseDown trong bounds nguồn, khớp JUCE startDragging. */

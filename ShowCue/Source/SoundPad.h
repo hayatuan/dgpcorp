@@ -1876,8 +1876,12 @@ public:
                 return;
 
             const auto imageBounds = juce::Rectangle<int> (dragImage.getWidth(), dragImage.getHeight());
-            juce::Point<int> imageOffset = showcontrol::crossdrag::dragImageAnchorFromMouseDown (
-                e.getMouseDownPosition(), imageBounds);
+            const auto logicalDown = e.getMouseDownPosition();
+            juce::Point<int> imageOffset {
+                juce::jlimit (0, juce::jmax (0, imageBounds.getWidth() - 1),
+                              juce::roundToInt ((float) logicalDown.x * dragScale)),
+                juce::jlimit (0, juce::jmax (0, imageBounds.getHeight() - 1),
+                              juce::roundToInt ((float) logicalDown.y * dragScale)) };
 
             // Kéo nội bộ MainComponent — tránh ghost desktop HiDPI văng lệch góc màn hình (Windows).
             dragContainer->startDragging (description,

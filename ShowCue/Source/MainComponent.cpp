@@ -5552,7 +5552,8 @@ bool MainComponent::handleCrossCopyDropOnPadGrid (const juce::DragAndDropTarget:
                                                                  sourceListName))
             return false;
 
-        const auto cell = mapDropPointToPadGridCell (dragSourceDetails.localPosition);
+        const auto dropLocal = showcontrol::crossdrag::dragTargetLocalPoint (*this, dragSourceDetails);
+        const auto cell = mapDropPointToPadGridCell (dropLocal);
         copyLegacySidebarItemsToPadGrid (cell.y, cell.x, legacyItemIds, sourceListName);
         crossComponentDragConsumed = true;
     }
@@ -5561,7 +5562,8 @@ bool MainComponent::handleCrossCopyDropOnPadGrid (const juce::DragAndDropTarget:
         if (copyTracks.isEmpty())
             return false;
 
-        const auto cell = mapDropPointToPadGridCell (dragSourceDetails.localPosition);
+        const auto dropLocal = showcontrol::crossdrag::dragTargetLocalPoint (*this, dragSourceDetails);
+        const auto cell = mapDropPointToPadGridCell (dropLocal);
         copyTracksToPadGrid (cell.y, cell.x, copyTracks);
     }
 
@@ -5573,7 +5575,9 @@ bool MainComponent::isInterestedInDragSource (const juce::DragAndDropTarget::Sou
     if (! showcontrol::crossdrag::isCrossCopyDropInterest (dragSourceDetails.description))
         return false;
 
-    if (sidebarPanel.isVisible() && sidebarPanel.getBounds().contains (dragSourceDetails.localPosition))
+    const auto dropLocal = showcontrol::crossdrag::dragTargetLocalPoint (*this, dragSourceDetails);
+
+    if (sidebarPanel.isVisible() && sidebarPanel.getBounds().contains (dropLocal))
         return false;
 
     if (! canAcceptCrossCopyToPadGrid())
@@ -9437,13 +9441,7 @@ void MainComponent::paint (juce::Graphics& g)
     const auto cols = showcontrol::ui::ThemePaintColours::read (*this);
     g.fillAll (cols.windowBg);
 
-    const int splitW = 6;
-    const int leftOffset = (sidebarVisible ? sidebarWidth + splitW : 0);
-    const int rightOffset = (inspectorVisible ? inspectorWidth + splitW : 0);
-    const int centerTopY = kMacUnifiedTitleBarInset + 200;
-    auto centerFrame = juce::Rectangle<int> (leftOffset, centerTopY,
-                                             getWidth() - leftOffset - rightOffset,
-                                             getHeight() - centerTopY);
+    auto centerFrame = getCenterContentDropBounds();
 
     g.setColour (cols.centerBg);
     g.fillRect (centerFrame);
@@ -9457,13 +9455,7 @@ void MainComponent::paintOverChildren (juce::Graphics& g)
         return;
 
     const auto pal = ShowTheme::get (isDarkMode);
-    const int splitW = 6;
-    const int leftOffset = (sidebarVisible ? sidebarWidth + splitW : 0);
-    const int rightOffset = (inspectorVisible ? inspectorWidth + splitW : 0);
-    const int centerTopY = kMacUnifiedTitleBarInset + 200;
-    auto centerFrame = juce::Rectangle<int> (leftOffset, centerTopY,
-                                             getWidth() - leftOffset - rightOffset,
-                                             getHeight() - centerTopY).toFloat().reduced (3.0f);
+    auto centerFrame = getCenterContentDropBounds().toFloat().reduced (3.0f);
 
     showcontrol::crossdrag::paintNeonDropTargetGlow (g, centerFrame, pal.accent);
 }

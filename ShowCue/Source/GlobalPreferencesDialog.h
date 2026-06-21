@@ -603,8 +603,8 @@ private:
 class GlobalPreferencesDialog : public juce::Component
 {
 public:
-    static constexpr int kDialogWidth        = 720;
-    static constexpr int kDialogHeight       = 580;
+    static constexpr int kDialogWidth        = 700;
+    static constexpr int kDialogHeight       = 666;
     static constexpr int kMinContentHeight   = 480;
     static constexpr int kMaxContentHeight   = 1080;
     static constexpr int kTopBarHeight       = 75;

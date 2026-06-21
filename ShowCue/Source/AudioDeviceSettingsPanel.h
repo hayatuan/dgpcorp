@@ -880,9 +880,12 @@ public:
     {
         auto bounds = getLocalBounds();
         constexpr int rowH = 34;
-        const int labelW = 92;
-        const int nameW  = juce::jmax (120, bounds.getWidth() / 3);
-        const int gap    = 6;
+        constexpr int labelW = 92;
+        constexpr int gap = 6;
+        constexpr int minNameW = 88;
+        constexpr int maxNameW = 118;
+        const int nameW = juce::jlimit (minNameW, maxNameW,
+                                        (int) std::round ((float) bounds.getWidth() * 0.16f));
 
         for (int i = 0; i < kNumRoutes; ++i)
         {
