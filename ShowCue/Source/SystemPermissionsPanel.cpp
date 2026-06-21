@@ -214,14 +214,14 @@ void PermissionCardComponent::paint (juce::Graphics& g)
 
     g.setColour (textPrimary);
     g.setFont (ShowTheme::fontBold (15.5f));
-    g.drawFittedText (juce::LocalisedStrings::translateWithCurrentMappings (cardTitle),
+    g.drawFittedText (showcontrol::localization::tr (cardTitle.toRawUTF8()),
                       textCol.removeFromTop (22).toNearestInt(),
                       juce::Justification::topLeft, 1);
 
     g.setColour (textMuted);
     g.setFont (ShowTheme::font (13.0f));
     const int descLines = (status == PermissionStatus::warning && warningLabel.isNotEmpty()) ? 2 : 4;
-    g.drawFittedText (juce::LocalisedStrings::translateWithCurrentMappings (cardDescription),
+    g.drawFittedText (showcontrol::localization::tr (cardDescription.toRawUTF8()),
                       textCol.removeFromTop (descLines > 2 ? 34 : 44).toNearestInt(),
                       juce::Justification::topLeft, descLines);
 
@@ -261,20 +261,20 @@ void PermissionCardComponent::refreshLocalizedText()
 SystemPermissionsPanel::SystemPermissionsPanel (juce::AudioDeviceManager* sharedDeviceManagerIn)
     : sharedDeviceManager (sharedDeviceManagerIn),
       audioCard (PermissionCardComponent::IconKind::mic,
-                 "Audio Hardware Access",
+                 juce::String::fromUTF8 (u8"Truy cập phần cứng âm thanh"),
                  juce::String::fromUTF8 (
                      u8"Truy cập soundcard / mixer sân khấu để phát CUE & BGM không độ trễ trên FOH.")),
       networkCard (PermissionCardComponent::IconKind::globe,
-                   "Network Connectivity",
+                   juce::String::fromUTF8 (u8"Kết nối mạng"),
                    juce::String::fromUTF8 (
-                       u8"Trạng thái kết nối Internet/mạng nội bộ để kiểm tra cập nhật từ GitHub và đồng bộ show."))
+                       u8"Kết nối Internet & mạng nội bộ để kiểm tra cập nhật từ GitHub và đồng bộ show."))
    #if JUCE_WINDOWS
       , firewallCard (PermissionCardComponent::IconKind::shield,
-                      "Windows Firewall (LAN sync)",
+                      juce::String::fromUTF8 (u8"Tường lửa Windows (đồng bộ LAN)"),
                       juce::String::fromUTF8 (
                           u8"Cho phép UDP cổng đồng bộ (9000–9001) inbound — bắt buộc khi máy là Máy phụ hoặc nhận OSC."))
       , dragDropCard (PermissionCardComponent::IconKind::shield,
-                      "Drag & Drop File Access",
+                      juce::String::fromUTF8 (u8"Quyền kéo thả file"),
                       juce::String::fromUTF8 (
                           u8"Chạy không nâng quyền Admin để kéo thả file nhạc vào pad an toàn trên Windows."))
    #endif

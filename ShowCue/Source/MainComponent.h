@@ -531,6 +531,13 @@ private:
     std::function<void()> refreshSystemMenuCallback;
     void refreshLocalizedUi();
     void refreshLocalizedBusNames();
+    void refreshInspectorRoutingLabels();
+    void refreshPflAvailability();
+    void prepareAudioRouteForPlayback (int routeId);
+    void triggerPadPlayWithRoute (SoundPad* pad);
+    void triggerPflPreview (SoundPad* pad);
+    void clearPflPreviewOnAllPadsExcept (SoundPad* exceptPad);
+    void applyOutputDeviceForRoute (int routeId);
     void darkModeSettingChanged() override;
     void toggleStageMonitorWindow();
     void pushStageMonitorUpdate();

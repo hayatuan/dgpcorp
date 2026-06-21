@@ -65,6 +65,26 @@ bool AudioEngine::stopCue (SoundPad* pad) noexcept
     return true;
 }
 
+bool AudioEngine::playPflPreview (SoundPad* pad) noexcept
+{
+    if (pad == nullptr || ! pad->hasAudioFile())
+        return false;
+
+    if (pad->isFadeOutInProgress())
+        return false;
+
+    pad->setPflPreviewActive (true);
+
+    if (pad->isPaused())
+        return resumeCue (pad);
+
+    if (pad->isPlaying() || pad->isFading())
+        return true;
+
+    pad->triggerPlay();
+    return true;
+}
+
 bool AudioEngine::anyCueActive (const juce::OwnedArray<SoundPad>& pads) noexcept
 {
     for (auto* p : pads)
@@ -92,4 +112,53 @@ void AudioEngine::clearPreloadPool() noexcept
 size_t AudioEngine::getPreloadPoolUsedBytes() const noexcept
 {
     return showcontrol::preload::sharedPool().getUsedBytes();
+}
+
+void AudioEngine::initPluginScanner()
+{
+    showcontrol::plugins::ShowPluginHost::shared().initialize();
+}
+
+juce::KnownPluginList& AudioEngine::getKnownPluginList() noexcept
+{
+    return showcontrol::plugins::ShowPluginHost::shared().getKnownPluginList();
+}
+
+const juce::KnownPluginList& AudioEngine::getKnownPluginList() const noexcept
+{
+    return showcontrol::plugins::ShowPluginHost::shared().getKnownPluginList();
+}
+
+juce::AudioPluginFormatManager& AudioEngine::getPluginFormatManager() noexcept
+{
+    return showcontrol::plugins::ShowPluginHost::shared().getFormatManager();
+}
+
+const juce::AudioPluginFormatManager& AudioEngine::getPluginFormatManager() const noexcept
+{
+    return showcontrol::plugins::ShowPluginHost::shared().getFormatManager();
+}
+
+void AudioEngine::loadEffectIntoPad (SoundPad* pad, const juce::PluginDescription& desc)
+{
+    if (pad == nullptr)
+        return;
+
+    pad->applyAudioFxDescription (desc);
+}
+
+void AudioEngine::removeEffectFromPad (SoundPad* pad)
+{
+    if (pad == nullptr)
+        return;
+
+    pad->clearAudioFx();
+}
+
+void AudioEngine::openPluginEditorForPad (SoundPad* pad, juce::Component* centreRelativeTo)
+{
+    if (pad == nullptr)
+        return;
+
+    pad->openAudioFxEditor (centreRelativeTo);
 }

@@ -40,7 +40,7 @@ public:
           onApplyToList (std::move (onApplyToListIn)),
           fetchPreview (std::move (fetchPreviewIn))
     {
-        setSize (640, 600);
+        setSize (640, 548);
 
         addAndMakeVisible (enableToggle);
         enableToggle.setButtonText (showcontrol::localization::tr (u8"Bật đồng bộ âm lượng"));
@@ -186,29 +186,7 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        const auto pal = ShowTheme::get (isDarkTheme);
-        g.fillAll (pal.windowBg);
-
-        auto bounds = getLocalBounds().reduced (16, 12);
-        auto header = bounds.removeFromTop (44);
-        g.setColour (pal.panelElevated);
-        g.fillRoundedRectangle (header.toFloat(), 8.0f);
-        g.setColour (pal.border.withAlpha (0.55f));
-        g.drawRoundedRectangle (header.toFloat().reduced (0.5f), 8.0f, 1.0f);
-
-        g.setFont (ShowTheme::fontBold (15.0f));
-        g.setColour (pal.textPrimary);
-        g.drawText (showcontrol::localization::tr (u8"Quản lý đồng bộ âm lượng"),
-                    header.reduced (14, 0),
-                    juce::Justification::centredLeft,
-                    true);
-
-        g.setFont (ShowTheme::font (11.5f));
-        g.setColour (pal.textSecondary);
-        g.drawText (showcontrol::localization::tr (u8"Preset · Profile · Safe mode · Preview toàn list"),
-                    header.reduced (14, 0).withTrimmedTop (22),
-                    juce::Justification::centredLeft,
-                    true);
+        g.fillAll (ShowTheme::get (isDarkTheme).windowBg);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -233,8 +211,8 @@ public:
 
     void resized() override
     {
-        auto b = getLocalBounds().reduced (14);
-        constexpr int kTopInset = 52;
+        auto b = getLocalBounds().reduced (14, 12);
+        constexpr int kTopInset = 4;
         constexpr int kRowGap = 8;
         constexpr int kFieldLabelW = 56;
         constexpr int kPairGap = 10;
@@ -503,7 +481,7 @@ inline void showLoudnessManagerDialog (juce::Component* parent,
     {
         dw->setUsingNativeTitleBar (true);
         dw->setResizable (true, false);
-        dw->setSize (640, 600);
+        dw->setSize (640, 548);
         showcontrol::ui::centreFloatingWindowInMainApp (*dw, parent);
        #if JUCE_MAC
         showcontrol::mac::deferFarragoFullSizeContentView (*dw);

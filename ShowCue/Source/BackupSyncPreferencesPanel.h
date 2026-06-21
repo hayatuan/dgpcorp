@@ -14,6 +14,7 @@ class BackupSyncPreferencesPanel : public juce::Component,
 {
 public:
     std::function<void()> onSettingsChanged;
+    std::function<void()> onPreferredHeightChanged;
     std::function<void()> onTakeoverToggled;
     std::function<void()> onSyncConfigRequested;
     std::function<void()> onReconnectRequested;
@@ -253,7 +254,8 @@ public:
         const int rowH = 30;
         const int gap  = 8;
 
-        helpPanelBounds = bounds.removeFromBottom (kHelpPanelH);
+        const int helpH = juce::jmax (kHelpPanelH, (int) (bounds.getHeight() * 0.20f));
+        helpPanelBounds = bounds.removeFromBottom (helpH);
         bounds.removeFromBottom (10);
         mainPanelBounds = bounds;
 
@@ -264,11 +266,15 @@ public:
             helpLabel.setBounds (helpInner);
         }
 
+        if (mainPanelBounds.isEmpty())
+            return;
+
         auto inner = mainPanelBounds.reduced (16, 14);
         stackAreaBounds = inner;
 
+        const int stackH = measureContentHeight (rowH, gap);
         const int contentW = juce::jmin (kStackMaxW, stackAreaBounds.getWidth());
-        auto block = stackAreaBounds.removeFromTop (measureContentHeight (rowH, gap));
+        auto block = inner.removeFromTop (juce::jmin (stackH, inner.getHeight()));
         block = block.withSizeKeepingCentre (contentW, block.getHeight());
 
         layoutContentStack (block, rowH, gap);
@@ -352,6 +358,17 @@ public:
         scanResultsList.setColour (juce::ListBox::outlineColourId, listBorder);
         activePeersList.setColour (juce::ListBox::backgroundColourId, listBg);
         activePeersList.setColour (juce::ListBox::outlineColourId, listBorder);
+    }
+
+    int getPreferredEmbeddedHeight() const noexcept
+    {
+        constexpr int rowH = 30;
+        constexpr int gap  = 8;
+        constexpr int outerVPad = 24;
+        constexpr int mainInnerVPad = 28;
+        constexpr int betweenPanels = 10;
+        return outerVPad + mainInnerVPad + measureContentHeight (rowH, gap)
+             + betweenPanels + kHelpPanelH;
     }
 
 private:
@@ -474,7 +491,11 @@ private:
     void layoutActionToggles (const std::function<juce::Rectangle<int> (int)>& takeRow, int rowH)
     {
         if (oscEnableToggle.isVisible())
-            oscEnableToggle.setBounds (takeRow (rowH));
+        {
+            auto row = takeRow (rowH);
+            const int toggleW = juce::jmin (320, row.getWidth());
+            oscEnableToggle.setBounds (row.withSizeKeepingCentre (toggleW, rowH));
+        }
 
         if (! followerLockToggle.isVisible())
             return;
@@ -772,6 +793,9 @@ private:
         refreshReconnectButton();
         applyVisibility();
         resized();
+
+        if (onPreferredHeightChanged != nullptr)
+            onPreferredHeightChanged();
     }
 
     void notifyChanged()

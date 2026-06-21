@@ -11,6 +11,7 @@
 #include "PadCueState.h"
 #include "ShowDsp.h"
 #include "ShowOutputRouting.h"
+#include "ShowPluginHost.h"
 
 //==============================================================================
 /** Lệnh POD — chỉ UI/message thread ghi, audio thread đọc. */
@@ -187,6 +188,22 @@ public:
         return outputBusIndex.load (std::memory_order_relaxed);
     }
 
+    void setPflPreviewActive (bool active) noexcept
+    {
+        pflPreviewActive.store (active, std::memory_order_relaxed);
+    }
+
+    bool isPflPreviewActive() const noexcept
+    {
+        return pflPreviewActive.load (std::memory_order_relaxed);
+    }
+
+    int getEffectiveOutputBus() const noexcept
+    {
+        return showcontrol::routing::getEffectiveOutputRoute (
+            getOutputBus(), isPflPreviewActive());
+    }
+
     bool isPlayingPublished() const noexcept
     {
         return playingState.load (std::memory_order_relaxed);
@@ -258,6 +275,10 @@ public:
     const PadDspChain& getDsp() const noexcept { return dspChain; }
 
     double getDeviceSampleRate() const noexcept { return sampleRateHz; }
+    int getPreparedBlockSize() const noexcept { return blockSize; }
+
+    showcontrol::plugins::PadPluginSlot& getPluginSlot() noexcept { return pluginSlot; }
+    const showcontrol::plugins::PadPluginSlot& getPluginSlot() const noexcept { return pluginSlot; }
 
     /** Tăng mỗi lần bài kết thúc (không loop); UI so sánh generation. */
     uint32_t getTrackFinishedGeneration() const noexcept
@@ -288,11 +309,18 @@ public:
         outputGainProcessor.setGainLinear (baseGain);
 
         publishedLength.store (transport.getLengthInSeconds(), std::memory_order_relaxed);
+        pluginSlot.prepareToPlay (sampleRate, samplesPerBlockExpected);
+
+        static constexpr int kMaxPluginLatencySamples = 8192;
+        pluginLookaheadBuffer.setSize (2,
+                                       juce::jmax (samplesPerBlockExpected, kMaxPluginLatencySamples),
+                                       false, false, true);
     }
 
     void releaseResources() override
     {
         transport.releaseResources();
+        pluginSlot.releaseResources();
         dspChain.getEq().markUnprepared();
     }
 
@@ -362,7 +390,35 @@ public:
         processFadeCompletionAndTrimEnd (info);
 
         if (info.buffer != nullptr && info.numSamples > 0)
+        {
             dspChain.process (*info.buffer, info.startSample, info.numSamples);
+
+            if (pluginSlot.hasActiveFx())
+            {
+                const int latency = pluginSlot.getLatencySamples();
+                const juce::AudioBuffer<float>* lookaheadPtr = nullptr;
+                int lookaheadCount = 0;
+
+                if (latency > 0 && transportRunning)
+                {
+                    const double posAfterMain = transport.getCurrentPosition();
+                    const int laSamples = juce::jmin (latency, pluginLookaheadBuffer.getNumSamples());
+
+                    if (laSamples > 0)
+                    {
+                        juce::AudioSourceChannelInfo laInfo { &pluginLookaheadBuffer, 0, laSamples };
+                        transport.getNextAudioBlock (laInfo);
+                        transport.setPosition (posAfterMain);
+
+                        lookaheadPtr = &pluginLookaheadBuffer;
+                        lookaheadCount = laSamples;
+                    }
+                }
+
+                pluginSlot.process (*info.buffer, info.startSample, info.numSamples,
+                                    lookaheadPtr, lookaheadCount);
+            }
+        }
 
         publishPlaybackState();
     }
@@ -370,7 +426,10 @@ public:
 private:
     juce::AudioTransportSource& transport;
     PadDspChain dspChain;
+    showcontrol::plugins::PadPluginSlot pluginSlot;
     PadCommandQueue commandQueue;
+
+    juce::AudioBuffer<float> pluginLookaheadBuffer;
 
     int blockSize = 512;
     double sampleRateHz = 44100.0;
@@ -389,6 +448,7 @@ private:
     /** Message thread: latch ngay khi postFadeOut — audio thread bỏ qua lệnh play/stop trùng. */
     std::atomic<bool> fadeOutArm { false };
     std::atomic<int>  outputBusIndex { 0 };       // RT-safe bus routing index
+    std::atomic<bool> pflPreviewActive { false }; // Nghe thử PFL — không đổi route lưu
     std::atomic<uint32_t> trackFinishedGeneration { 0 };
     std::atomic<uint32_t> deferredStopGeneration { 0 };
     std::atomic<int> audioProcessDepth { 0 };

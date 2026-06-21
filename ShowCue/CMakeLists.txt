@@ -38,6 +38,7 @@ target_sources(ShowCue PRIVATE
     Source/StageMonitorComponent.cpp
     Source/CueListPanel.cpp
     Source/AudioEngine.cpp
+    Source/ShowPluginHost.cpp
     Source/ShowUpdateChecker.cpp
     Source/SystemPermissionsPanel.cpp
     Source/PadPanel.cpp
@@ -116,6 +117,7 @@ target_link_libraries(ShowCue PRIVATE
     juce::juce_audio_devices
     juce::juce_audio_formats
     juce::juce_audio_basics
+    juce::juce_audio_processors
     juce::juce_dsp
     juce::juce_gui_extra
     juce::juce_gui_basics
@@ -126,6 +128,13 @@ target_link_libraries(ShowCue PRIVATE
 
 # Tự động tạo file Header hệ thống
 juce_generate_juce_header(ShowCue)
+
+target_compile_definitions(ShowCue PRIVATE
+    JUCE_PLUGINHOST_VST3=1)
+
+if (APPLE)
+    target_compile_definitions(ShowCue PRIVATE JUCE_PLUGINHOST_AU=1)
+endif()
 
 # --- P4: target tùy chọn cho clangd (không link vào app, EXCLUDE_FROM_ALL) ---
 option(SHOWCUE_BUILD_IDE_INDEX "Build ShowCueIDEIndex for clangd header indexing" ON)
@@ -149,12 +158,18 @@ if(SHOWCUE_BUILD_IDE_INDEX)
         juce::juce_audio_devices
         juce::juce_audio_formats
         juce::juce_audio_basics
+        juce::juce_audio_processors
         juce::juce_dsp
         juce::juce_gui_extra
         juce::juce_gui_basics
         juce::juce_graphics
         juce::juce_data_structures
         juce::juce_core)
+
+    target_compile_definitions(ShowCueIDEIndex PRIVATE JUCE_PLUGINHOST_VST3=1)
+    if (APPLE)
+        target_compile_definitions(ShowCueIDEIndex PRIVATE JUCE_PLUGINHOST_AU=1)
+    endif()
 
     add_dependencies(ShowCueIDEIndex ShowCue)
 

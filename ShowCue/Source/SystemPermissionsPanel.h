@@ -70,6 +70,20 @@ public:
 
     void haltActiveTimers() noexcept;
 
+    static int getPreferredEmbeddedHeight() noexcept
+    {
+        constexpr int cardH = 116;
+        constexpr int gap   = 12;
+        constexpr int padV  = 28;
+        const int cardCount =
+       #if JUCE_WINDOWS
+            4;
+       #else
+            2;
+       #endif
+        return padV + cardCount * cardH + (cardCount - 1) * gap;
+    }
+
     void paint (juce::Graphics& g) override;
     void resized() override;
     void visibilityChanged() override;

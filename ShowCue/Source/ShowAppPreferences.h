@@ -1,5 +1,8 @@
 #pragma once
 #include <juce_data_structures/juce_data_structures.h>
+#include <juce_audio_devices/juce_audio_devices.h>
+#include <array>
+#include "ShowOutputRouting.h"
 
 /** Ghi/đọc Theme + Ngôn ngữ ngay lập tức — không phụ thuộc saveProject() lúc thoát app. */
 namespace showcontrol::prefs
@@ -174,5 +177,106 @@ namespace showcontrol::prefs
             hosts.add (peerHost.trim());
 
         saveBackupSyncSettings (role, hosts, syncPort, followerLock, oscEnabled, oscPort);
+    }
+
+    inline void saveDirectRoutingSettings (const std::array<juce::String, showcontrol::routing::kRouteCount>& outputChoices,
+                                           const juce::StringArray& customBusNames)
+    {
+        auto& prefs = appPreferencesFile();
+        prefs.setValue ("routeMasterOutput", outputChoices[(size_t) showcontrol::routing::kMasterRouteId]);
+
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+        {
+            prefs.setValue ("routeBusOutput" + juce::String (i),
+                            outputChoices[(size_t) (i + 1)]);
+            prefs.setValue ("routeBusName" + juce::String (i),
+                            i < customBusNames.size() ? customBusNames[i] : juce::String());
+        }
+
+        prefs.save();
+    }
+
+    inline juce::String loadRouteOutputChoice (int routeId) noexcept
+    {
+        auto& prefs = appPreferencesFile();
+
+        if (routeId == showcontrol::routing::kMasterRouteId)
+            return prefs.getValue ("routeMasterOutput", {});
+
+        if (routeId > showcontrol::routing::kMasterRouteId
+            && routeId < showcontrol::routing::kRouteCount)
+        {
+            return prefs.getValue ("routeBusOutput" + juce::String (routeId - 1), {});
+        }
+
+        return {};
+    }
+
+    inline std::array<juce::String, showcontrol::routing::kRouteCount> loadAllRouteOutputChoices() noexcept
+    {
+        std::array<juce::String, showcontrol::routing::kRouteCount> choices {};
+
+        for (int r = 0; r < showcontrol::routing::kRouteCount; ++r)
+            choices[(size_t) r] = loadRouteOutputChoice (r);
+
+        return choices;
+    }
+
+    inline void loadDirectRoutingIntoLiveTable (juce::AudioDeviceManager* manager = nullptr) noexcept
+    {
+        auto* device = manager != nullptr ? manager->getCurrentAudioDevice() : nullptr;
+        const auto choices = loadAllRouteOutputChoices();
+
+        for (int r = 0; r < showcontrol::routing::kRouteCount; ++r)
+        {
+            auto choice = choices[(size_t) r].trim();
+
+            if (choice.isEmpty() && manager != nullptr)
+            {
+                juce::AudioDeviceManager::AudioDeviceSetup setup;
+                manager->getAudioDeviceSetup (setup);
+                const auto endpoints = showcontrol::routing::scanAvailableOutputEndpoints (*manager);
+
+                if (r == showcontrol::routing::kMasterRouteId)
+                {
+                    choice = setup.outputDeviceName.trim();
+
+                    if (choice.isEmpty() && endpoints.size() > 0)
+                        choice = endpoints[0];
+                }
+                else if (r > showcontrol::routing::kMasterRouteId
+                         && (r - 1) < endpoints.size())
+                {
+                    choice = endpoints[(size_t) (r - 1)];
+                }
+                else if (endpoints.size() > 0)
+                {
+                    choice = endpoints[0];
+                }
+            }
+
+            showcontrol::routing::bindRouteOutputChoice (r, choice, device);
+        }
+    }
+
+    inline void loadDirectRoutingIntoLiveTable() noexcept
+    {
+        loadDirectRoutingIntoLiveTable (nullptr);
+    }
+
+    inline juce::StringArray loadCustomBusNamesFromPrefs() noexcept
+    {
+        juce::StringArray names;
+        auto& prefs = appPreferencesFile();
+
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+        {
+            const auto saved = prefs.getValue ("routeBusName" + juce::String (i), {}).trim();
+            names.add (saved.isNotEmpty()
+                           ? saved
+                           : showcontrol::routing::defaultCustomBusName (i));
+        }
+
+        return names;
     }
 } // namespace showcontrol::prefs

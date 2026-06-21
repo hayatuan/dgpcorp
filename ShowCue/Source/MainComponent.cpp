@@ -938,7 +938,11 @@ void MainComponent::MultiOutputAudioCallback::audioDeviceIOCallbackWithContext (
         if (src == nullptr)
             continue;
 
-        const int busIdx = juce::jlimit (0, kMaxBuses - 1, src->getOutputBus());
+        const int busIdx = juce::jlimit (0, kMaxBuses - 1, src->getEffectiveOutputBus());
+
+        if (busIdx > showcontrol::routing::kMasterRouteId
+            && ! showcontrol::routing::isRouteActiveOnCurrentDevice (busIdx))
+            continue;
 
         int ch0 = 0;
         int ch1 = 1;
@@ -1202,6 +1206,7 @@ void MainComponent::shutdownAudioAndPads() noexcept
     showcontrol::waveform::shutdownSharedCache();
     showcontrol::preload::shutdownSharedPool();
     audioEngine.clearPreloadPool();
+    showcontrol::plugins::ShowPluginHost::shared().shutdown();
 }
 
 namespace
@@ -2267,7 +2272,7 @@ void MainComponent::triggerBgmPlayPause()
             playing->triggerStopImmediate();
 
         broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-        targetPad->triggerPlay();
+        triggerPadPlayWithRoute (targetPad);
         syncUiToPlayingPad (targetPad, false);
         return;
     }
@@ -2303,7 +2308,7 @@ void MainComponent::triggerBgmPlayPause()
             other->triggerStop();
 
     broadcastGoSync (activeListIndex, targetIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-    targetPad->triggerPlay();
+    triggerPadPlayWithRoute (targetPad);
     syncUiToPlayingPad (targetPad, true);
 }
 
@@ -2337,7 +2342,7 @@ void MainComponent::triggerBgmNext()
             pad->triggerStop();
 
     broadcastGoSync (activeListIndex, nextIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-    nextPad->triggerPlay();
+    triggerPadPlayWithRoute (nextPad);
     syncUiToPlayingPad (nextPad, false);
 }
 
@@ -2371,7 +2376,7 @@ void MainComponent::triggerBgmPrev()
             pad->triggerStop();
 
     broadcastGoSync (activeListIndex, prevIdx, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-    prevPad->triggerPlay();
+    triggerPadPlayWithRoute (prevPad);
     syncUiToPlayingPad (prevPad, false);
 }
 
@@ -8228,7 +8233,7 @@ void MainComponent::advanceBgmPlaylistOnNaturalEnd (SoundPad* finishedPad)
             pad->triggerStop();
     }
 
-    nextPad->triggerPlay();
+    triggerPadPlayWithRoute (nextPad);
     syncUiToPlayingPad (nextPad, true);
 }
 
@@ -8238,6 +8243,7 @@ MainComponent::MainComponent()
     setOpaque (true);
     formatManager.registerBasicFormats();
     showcontrol::audio::bindActiveFormatManager (formatManager);
+    showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
     updateChecker = std::make_unique<showcontrol::update::ShowUpdateChecker>();
 
     // Áp dụng Global LookAndFeel ngay đầu, trước khi thêm bất kỳ widget nào
@@ -8961,7 +8967,15 @@ MainComponent::MainComponent()
         }
     };
 
-    inspectorPanel.onOutputBusChanged = [this] (int /*bus*/) { saveProject(); };
+    inspectorPanel.onOutputBusChanged = [this] (int /*route*/)
+    {
+        saveProject();
+    };
+
+    inspectorPanel.onPflPreviewRequested = [this] (SoundPad* pad)
+    {
+        triggerPflPreview (pad);
+    };
 
     inspectorPanel.onNormalizeActiveListRequested = [this] (const showcontrol::loudness::LoudnessSettings& settings)
     {
@@ -9049,13 +9063,28 @@ void MainComponent::finishDeferredStartup()
         }
     }
 
-    for (int b = 0; b < showcontrol::routing::kInspectorBusCount; ++b)
-        multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
+    showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+    applyOutputDeviceForRoute (showcontrol::routing::kMasterRouteId);
+    showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
 
-    for (int b = showcontrol::routing::kInspectorBusCount; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+    for (int b = 0; b < showcontrol::routing::kRouteCount; ++b)
+    {
+        if (b == showcontrol::routing::kMasterRouteId)
+            multiOutputCallback.setBusName (b, showcontrol::routing::masterRouteDisplayName());
+        else
+        {
+            const auto custom = showcontrol::prefs::loadCustomBusNamesFromPrefs();
+            const int idx = b - 1;
+            multiOutputCallback.setBusName (b,
+                idx < custom.size() ? custom[idx] : showcontrol::routing::defaultCustomBusName (idx));
+        }
+    }
+
+    for (int b = showcontrol::routing::kRouteCount; b < MultiOutputAudioCallback::kMaxBuses; ++b)
         multiOutputCallback.setBusName (b, "AUX " + juce::String (b));
 
     deviceManager.addAudioCallback (&multiOutputCallback);
+    audioEngine.initPluginScanner();
 
     registerAllPadsWithMixer();
     forceAllPadsIdleAtStartup();
@@ -9068,7 +9097,27 @@ void MainComponent::finishDeferredStartup()
     };
     deferredIdlePadsTimer->startMs (150);
 
-    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+    refreshInspectorRoutingLabels();
+    refreshPflAvailability();
+
+    {
+        auto choices = showcontrol::prefs::loadAllRouteOutputChoices();
+
+        if (choices[(size_t) showcontrol::routing::kMasterRouteId].trim().isEmpty())
+        {
+            juce::AudioDeviceManager::AudioDeviceSetup setup;
+            deviceManager.getAudioDeviceSetup (setup);
+
+            if (setup.outputDeviceName.trim().isNotEmpty())
+            {
+                choices[(size_t) showcontrol::routing::kMasterRouteId] = setup.outputDeviceName.trim();
+                showcontrol::prefs::saveDirectRoutingSettings (choices,
+                                                               showcontrol::prefs::loadCustomBusNamesFromPrefs());
+                showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+            }
+        }
+    }
+
     attachReadAheadToAllPads();
     refreshSidebarPlayingStatus();
     resized();
@@ -11595,6 +11644,8 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync, int listInd
 
             if (auto* goPad = activeList->pads[padIndex])
             {
+                prepareAudioRouteForPlayback (goPad->getOutputBus());
+                goPad->setPflPreviewActive (false);
                 audioEngine.playCue (goPad);
                 updateCuePlaybackIndicators();
                 refreshSidebarPlayingStatus();
@@ -11611,6 +11662,9 @@ bool MainComponent::triggerCueListPlay (int padIndex, bool fromSync, int listInd
     if (! fromSync)
         broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::cueListPlay);
 
+    prepareAudioRouteForPlayback (pad->getOutputBus());
+    pad->setPflPreviewActive (false);
+    inspectorPanel.refreshPflPreviewButtonState();
     const bool ok = audioEngine.playCue (pad);
     updateCuePlaybackIndicators();
     refreshSidebarPlayingStatus();
@@ -11736,7 +11790,7 @@ bool MainComponent::triggerInspectorPlayPause (SoundPad* pad)
                 playing->triggerStopImmediate();
 
             broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-            pad->triggerPlay();
+            triggerPadPlayWithRoute (pad);
             syncUiToPlayingPad (pad, false);
             refreshMasterDeckBgmTransportState();
             return true;
@@ -11772,7 +11826,7 @@ bool MainComponent::triggerInspectorPlayPause (SoundPad* pad)
                 other->triggerStop();
 
         broadcastGoSync (listIdx, padIndex, 0.0f, showcontrol::backup::SyncPlayMode::bgmPlay);
-        pad->triggerPlay();
+        triggerPadPlayWithRoute (pad);
         syncUiToPlayingPad (pad, true);
         refreshMasterDeckBgmTransportState();
         return true;
@@ -11913,7 +11967,7 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync, int listIndexOver
         if (goPad->isPaused())
         {
             goPad->triggerStop();
-            goPad->triggerPlay();
+            triggerPadPlayWithRoute (goPad);
         }
         else if (goPad->isPlaying() || goPad->isFading() || goPad->isStopping())
         {
@@ -11924,7 +11978,7 @@ bool MainComponent::triggerCueGo (int padIndex, bool fromSync, int listIndexOver
             return;
         }
 
-        goPad->triggerPlay();
+        triggerPadPlayWithRoute (goPad);
         updateCuePlaybackIndicators();
         refreshSidebarPlayingStatus();
     };
@@ -12184,16 +12238,19 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
 
         multiOutputCallback.setBusName (busIndex, name);
 
-        if (busIndex < showcontrol::routing::kInspectorBusCount)
-            inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+        if (busIndex < showcontrol::routing::kRouteCount)
+            refreshInspectorRoutingLabels();
     };
 
     callbacks.onAudioSettingsApplied = [this] (const AudioDeviceSettingsPanel::ApplyResult& result)
     {
-        for (int b = 0; b < AudioDeviceSettingsPanel::kNumBuses && b < result.busNames.size(); ++b)
+        showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+
+        for (int b = 0; b < AudioDeviceSettingsPanel::kNumRoutes && b < result.busNames.size(); ++b)
             multiOutputCallback.setBusName (b, result.busNames[b]);
 
-        inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+        refreshInspectorRoutingLabels();
+        refreshPflAvailability();
         busMixerPanel.repaint();
         saveProject();
     };
@@ -12269,16 +12326,24 @@ void MainComponent::showPreferencesDialog (int initialTabIndex)
     if (auto* dw = opts.launchAsync())
     {
         GlobalPreferencesDialog::configureDialogWindow (*dw);
-        dw->toFront (true);
 
        #if JUCE_MAC
         showcontrol::mac::applyFarragoFullSizeContentView (*dw);
+       #endif
 
+        dialog->ensureWindowFitsActiveTab (this);
+        dw->toFront (true);
+
+       #if JUCE_MAC
+        juce::Component::SafePointer<GlobalPreferencesDialog> safeDialog (dialog);
         juce::Component::SafePointer<juce::DialogWindow> safePrefsWindow (dw);
-        juce::MessageManager::callAsync ([safePrefsWindow]
+        juce::MessageManager::callAsync ([safeDialog, safePrefsWindow]
         {
             if (safePrefsWindow != nullptr)
                 showcontrol::mac::applyFarragoFullSizeContentView (*safePrefsWindow);
+
+            if (safeDialog != nullptr)
+                safeDialog->ensureWindowFitsActiveTab();
         });
        #endif
     }
@@ -12608,17 +12673,141 @@ void MainComponent::refreshLocalizedUi()
         refreshSystemMenuCallback();
 }
 
+void MainComponent::refreshInspectorRoutingLabels()
+{
+    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+}
+
+void MainComponent::refreshPflAvailability()
+{
+    inspectorPanel.setPflPreviewAvailable (
+        showcontrol::routing::isIndependentPflAvailable (deviceManager.getCurrentAudioDevice()));
+}
+
+void MainComponent::clearPflPreviewOnAllPadsExcept (SoundPad* exceptPad)
+{
+    for (auto* list : allLists)
+    {
+        if (list == nullptr)
+            continue;
+
+        for (auto* pad : list->pads)
+        {
+            if (pad == nullptr || pad == exceptPad || ! pad->isPflPreviewActive())
+                continue;
+
+            pad->setPflPreviewActive (false);
+            pad->triggerStopImmediate();
+        }
+    }
+}
+
+void MainComponent::triggerPflPreview (SoundPad* pad)
+{
+    if (pad == nullptr || isPlaybackCommandBlocked())
+        return;
+
+    if (! showcontrol::routing::isIndependentPflAvailable (deviceManager.getCurrentAudioDevice()))
+        return;
+
+    if (showcontrol::routing::resolvePflPreviewRouteId() <= showcontrol::routing::kMasterRouteId)
+        return;
+
+    if (! pad->hasAudioFile())
+        return;
+
+    if (pad->isTransportActive() && ! pad->isPflPreviewActive())
+        return;
+
+    if (pad->isPflPreviewActive() && pad->isTransportActive())
+    {
+        pad->setPflPreviewActive (false);
+        pad->triggerStopImmediate();
+        inspectorPanel.refreshPflPreviewButtonState();
+        return;
+    }
+
+    clearPflPreviewOnAllPadsExcept (pad);
+    audioEngine.playPflPreview (pad);
+    inspectorPanel.refreshPflPreviewButtonState();
+}
+
+void MainComponent::prepareAudioRouteForPlayback (int routeId)
+{
+    const int route = juce::jlimit (0, showcontrol::routing::kRouteCount - 1, routeId);
+    applyOutputDeviceForRoute (route);
+    showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+}
+
+void MainComponent::triggerPadPlayWithRoute (SoundPad* pad)
+{
+    if (pad == nullptr)
+        return;
+
+    pad->setPflPreviewActive (false);
+    inspectorPanel.refreshPflPreviewButtonState();
+    prepareAudioRouteForPlayback (pad->getOutputBus());
+    pad->triggerPlay();
+}
+
+void MainComponent::applyOutputDeviceForRoute (int routeId)
+{
+    const auto choice = showcontrol::prefs::loadRouteOutputChoice (routeId).trim();
+
+    if (choice.isEmpty())
+        return;
+
+    const auto targetDevice = showcontrol::routing::outputDeviceNameFromChoice (choice);
+
+    if (targetDevice.isEmpty())
+        return;
+
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup (setup);
+
+    if (setup.outputDeviceName.trim().equalsIgnoreCase (targetDevice))
+        return;
+
+    if (auto* type = deviceManager.getCurrentDeviceTypeObject())
+    {
+        type->scanForDevices();
+
+        for (const auto& name : type->getDeviceNames (false))
+        {
+            if (name.trim().equalsIgnoreCase (targetDevice))
+            {
+                setup.outputDeviceName = name;
+                deviceManager.setAudioDeviceSetup (setup, true);
+                return;
+            }
+        }
+    }
+}
+
 void MainComponent::refreshLocalizedBusNames()
 {
-    for (int b = 0; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+    const auto customNames = showcontrol::prefs::loadCustomBusNamesFromPrefs();
+
+    for (int b = 0; b < showcontrol::routing::kRouteCount; ++b)
     {
         const auto current = multiOutputCallback.getBusName (b).trim();
 
-        if (showcontrol::routing::isDefaultBusName (b, current))
-            multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
+        if (! showcontrol::routing::isDefaultBusName (b, current))
+            continue;
+
+        if (b == showcontrol::routing::kMasterRouteId)
+            multiOutputCallback.setBusName (b, showcontrol::routing::masterRouteDisplayName());
+        else
+        {
+            const int idx = b - 1;
+            multiOutputCallback.setBusName (b,
+                idx < customNames.size()
+                    ? customNames[idx]
+                    : showcontrol::routing::defaultCustomBusName (idx));
+        }
     }
 
-    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+    refreshInspectorRoutingLabels();
 }
 
 void MainComponent::syncWindowChromeWithTheme()
@@ -12795,6 +12984,9 @@ static SoundPad::PadProjectState readPadProjectState (const juce::XmlElement& pa
     for (int b = 0; b < PadParametricEq6::kNumBands; ++b)
         state.dspEqBandDb[(size_t) b] = (float) padElem.getDoubleAttribute ("dspEqBand" + juce::String (b), 0.0);
 
+    if (auto* fxXml = padElem.getChildByName ("audioFx"))
+        state.audioFxDescription.loadFromXml (*fxXml);
+
     return state;
 }
 
@@ -12915,6 +13107,12 @@ static void writePadProjectState (juce::XmlElement& padElem, const SoundPad& pad
             if (std::abs (g) > 0.05f)
                 padElem.setAttribute ("dspEqBand" + juce::String (b), (double) g);
         }
+    }
+
+    if (pad.getAudioFxDescription().name.isNotEmpty())
+    {
+        if (auto fxXml = pad.getAudioFxDescription().createXml())
+            padElem.addChildElement (fxXml.release());
     }
 
     if (! showcontrol::colours::isDefaultTagColour (pad.getTagColour()))
@@ -13157,13 +13355,23 @@ void MainComponent::applyFactoryDefaultApplicationState()
     multiOutputCallback.setMasterLimiterThresholdDb (-1.0f);
     multiOutputCallback.setMasterLimiterReleaseMs (80.0f);
 
-    for (int b = 0; b < showcontrol::routing::kInspectorBusCount; ++b)
-        multiOutputCallback.setBusName (b, showcontrol::routing::getBusDisplayName (b));
+    for (int b = 0; b < showcontrol::routing::kRouteCount; ++b)
+    {
+        if (b == showcontrol::routing::kMasterRouteId)
+            multiOutputCallback.setBusName (b, showcontrol::routing::masterRouteDisplayName());
+        else
+        {
+            const auto custom = showcontrol::prefs::loadCustomBusNamesFromPrefs();
+            const int idx = b - 1;
+            multiOutputCallback.setBusName (b,
+                idx < custom.size() ? custom[idx] : showcontrol::routing::defaultCustomBusName (idx));
+        }
+    }
 
-    for (int b = showcontrol::routing::kInspectorBusCount; b < MultiOutputAudioCallback::kMaxBuses; ++b)
+    for (int b = showcontrol::routing::kRouteCount; b < MultiOutputAudioCallback::kMaxBuses; ++b)
         multiOutputCallback.setBusName (b, "AUX " + juce::String (b));
 
-    inspectorPanel.setBusNames (multiOutputCallback.getAllBusNames());
+    refreshInspectorRoutingLabels();
     sidebarPanel.setSelectedIndex (-1);
 }
 
@@ -14331,7 +14539,7 @@ bool MainComponent::triggerBgmSyncPlayAtIndex (int padIndex, int listIndexOverri
             other->triggerStop();
     }
 
-    targetPad->triggerPlay();
+    triggerPadPlayWithRoute (targetPad);
 
     if (listIndexOverride >= 0)
     {

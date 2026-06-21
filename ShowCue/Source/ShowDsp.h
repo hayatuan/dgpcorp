@@ -504,3 +504,123 @@ private:
     PadParametricEq6   eq;
     LoudnessSyncGain   loudness;
 };
+
+//==============================================================================
+/** FX nhúng sẵn ShowCue — 3-band EQ hoặc Limiter (0 latency, không cần VST3/AU). */
+class PadStockFxProcessor
+{
+public:
+    enum class Mode { bypass, eq3, limiter };
+
+    void prepare (double sampleRate, int maxBlockSize) noexcept
+    {
+        spec.sampleRate       = sampleRate > 0.0 ? sampleRate : 44100.0;
+        spec.maximumBlockSize = (juce::uint32) juce::jmax (1, maxBlockSize);
+        spec.numChannels      = 2;
+
+        eqChain.prepare (spec);
+        limiter.prepare (spec);
+        limiter.setThreshold (limiterThresholdDb.load (std::memory_order_relaxed));
+        limiter.setRelease (limiterReleaseMs.load (std::memory_order_relaxed));
+        updateEqCoefficients();
+        prepared.store (true, std::memory_order_release);
+    }
+
+    void reset() noexcept
+    {
+        eqChain.reset();
+        limiter.reset();
+    }
+
+    void setMode (Mode newMode) noexcept
+    {
+        activeMode.store (static_cast<int> (newMode), std::memory_order_release);
+    }
+
+    Mode getMode() const noexcept
+    {
+        return static_cast<Mode> (activeMode.load (std::memory_order_acquire));
+    }
+
+    void setEqLowGainDb (float db) noexcept   { eqLowDb.store (db, std::memory_order_relaxed);  updateEqCoefficients(); }
+    void setEqMidGainDb (float db) noexcept   { eqMidDb.store (db, std::memory_order_relaxed);  updateEqCoefficients(); }
+    void setEqHighGainDb (float db) noexcept  { eqHighDb.store (db, std::memory_order_relaxed); updateEqCoefficients(); }
+
+    float getEqLowGainDb() const noexcept   { return eqLowDb.load (std::memory_order_relaxed); }
+    float getEqMidGainDb() const noexcept   { return eqMidDb.load (std::memory_order_relaxed); }
+    float getEqHighGainDb() const noexcept  { return eqHighDb.load (std::memory_order_relaxed); }
+
+    void setLimiterThresholdDb (float db) noexcept
+    {
+        limiterThresholdDb.store (db, std::memory_order_relaxed);
+        limiter.setThreshold (db);
+    }
+
+    void setLimiterReleaseMs (float ms) noexcept
+    {
+        limiterReleaseMs.store (ms, std::memory_order_relaxed);
+        limiter.setRelease (ms);
+    }
+
+    float getLimiterThresholdDb() const noexcept { return limiterThresholdDb.load (std::memory_order_relaxed); }
+    float getLimiterReleaseMs() const noexcept   { return limiterReleaseMs.load (std::memory_order_relaxed); }
+
+    void process (juce::AudioBuffer<float>& buffer, int startSample, int numSamples) noexcept
+    {
+        if (! prepared.load (std::memory_order_acquire) || numSamples <= 0)
+            return;
+
+        const auto mode = getMode();
+
+        if (mode == Mode::bypass)
+            return;
+
+        const int channels = juce::jmin (2, buffer.getNumChannels());
+
+        if (channels <= 0)
+            return;
+
+        juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), (size_t) channels,
+                                            (size_t) startSample, (size_t) numSamples);
+        juce::dsp::ProcessContextReplacing<float> ctx (block);
+
+        if (mode == Mode::eq3)
+            eqChain.process (ctx);
+        else if (mode == Mode::limiter)
+            limiter.process (ctx);
+    }
+
+private:
+    void updateEqCoefficients() noexcept
+    {
+        if (spec.sampleRate <= 0.0)
+            return;
+
+        const float lowDb  = eqLowDb.load (std::memory_order_relaxed);
+        const float midDb  = eqMidDb.load (std::memory_order_relaxed);
+        const float highDb = eqHighDb.load (std::memory_order_relaxed);
+
+        *eqChain.get<0>().coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowShelf (
+            spec.sampleRate, 120.0f, 0.707f, juce::Decibels::decibelsToGain (lowDb));
+        *eqChain.get<1>().coefficients = *juce::dsp::IIR::Coefficients<float>::makePeakFilter (
+            spec.sampleRate, 1000.0f, 1.0f, juce::Decibels::decibelsToGain (midDb));
+        *eqChain.get<2>().coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighShelf (
+            spec.sampleRate, 8000.0f, 0.707f, juce::Decibels::decibelsToGain (highDb));
+    }
+
+    using EqChain = juce::dsp::ProcessorChain<juce::dsp::IIR::Filter<float>,
+                                                juce::dsp::IIR::Filter<float>,
+                                                juce::dsp::IIR::Filter<float>>;
+
+    juce::dsp::ProcessSpec spec;
+    EqChain eqChain;
+    juce::dsp::Limiter<float> limiter;
+
+    std::atomic<bool> prepared { false };
+    std::atomic<int> activeMode { static_cast<int> (Mode::bypass) };
+    std::atomic<float> eqLowDb  { 0.0f };
+    std::atomic<float> eqMidDb  { 0.0f };
+    std::atomic<float> eqHighDb { 0.0f };
+    std::atomic<float> limiterThresholdDb { -1.0f };
+    std::atomic<float> limiterReleaseMs   { 80.0f };
+};

@@ -20,6 +20,7 @@
 #include "ShowAudioPreloadCache.h"
 #include "VideoAudioExtractor.h"
 #include "ShowLoudnessNormalize.h"
+#include "ShowPluginHost.h"
 
 namespace showcontrol::audio
 {
@@ -170,6 +171,13 @@ public:
         trackNameLabel.removeListener (this);
         stopTimer();
         cancelPendingAsyncWork();
+        showcontrol::plugins::ShowPluginHost::shared().closeEditorsForSlot (realtimeSource.getPluginSlot());
+
+        if (auto* old = realtimeSource.getPluginSlot().exchangeActive (nullptr, 0))
+            showcontrol::plugins::schedulePluginInstanceDeletion (old);
+
+        realtimeSource.getPluginSlot().clearStockFx();
+
         releaseThumbnailResources();
         realtimeSource.postStop();
         transportSource.setSource (nullptr);
@@ -429,6 +437,84 @@ public:
     /** Output bus routing cho MultiOutputAudioCallback — RT-safe atomic. */
     void setOutputBus (int bus) noexcept { realtimeSource.setOutputBus (bus); }
     int  getOutputBus() const noexcept   { return realtimeSource.getOutputBus(); }
+
+    void setPflPreviewActive (bool active) noexcept { realtimeSource.setPflPreviewActive (active); }
+    bool isPflPreviewActive() const noexcept { return realtimeSource.isPflPreviewActive(); }
+    int  getEffectiveOutputBus() const noexcept { return realtimeSource.getEffectiveOutputBus(); }
+
+    /** VST3 / AU per-pad — nạp async trên background thread, swap atomic 0ms. */
+    void applyAudioFxDescription (const juce::PluginDescription& desc,
+                                  std::function<void (bool success)> onComplete = {})
+    {
+        if (desc.name.isEmpty())
+        {
+            const auto successCb = std::move (onComplete);
+            clearAudioFx ([successCb = std::move (successCb)]() mutable
+            {
+                if (successCb)
+                    successCb (true);
+            });
+            return;
+        }
+
+        auto& slot = realtimeSource.getPluginSlot();
+        const auto stored = slot.getStoredDescription();
+
+        if (showcontrol::plugins::pluginDescriptionsMatch (stored, desc)
+            && (slot.hasActiveFx() || slot.isLoading()))
+        {
+            if (onComplete)
+                onComplete (slot.hasActiveFx());
+
+            return;
+        }
+
+        showcontrol::plugins::ShowPluginHost::shared().asyncLoadPluginIntoSlot (
+            slot,
+            desc,
+            juce::jmax (44100.0, realtimeSource.getDeviceSampleRate()),
+            juce::jmax (512, realtimeSource.getPreparedBlockSize()),
+            [this] { realtimeSource.waitUntilAudioIdle(); },
+            std::move (onComplete));
+    }
+
+    void clearAudioFx (std::function<void()> onComplete = {})
+    {
+        showcontrol::plugins::ShowPluginHost::shared().asyncClearPluginFromSlot (
+            realtimeSource.getPluginSlot(),
+            [this] { realtimeSource.waitUntilAudioIdle(); },
+            std::move (onComplete));
+    }
+
+    bool hasActiveAudioFx() const noexcept
+    {
+        return realtimeSource.getPluginSlot().hasActiveFx();
+    }
+
+    bool isAudioFxLoading() const noexcept
+    {
+        return realtimeSource.getPluginSlot().isLoading();
+    }
+
+    juce::PluginDescription getAudioFxDescription() const noexcept
+    {
+        return realtimeSource.getPluginSlot().getStoredDescription();
+    }
+
+    void openAudioFxEditor (juce::Component* anchor)
+    {
+        auto& slot = realtimeSource.getPluginSlot();
+
+        if (slot.isStockFxActive())
+        {
+            showcontrol::plugins::ShowPluginHost::shared().openStockFxEditorForSlot (
+                slot, anchor, nullptr);
+            return;
+        }
+
+        showcontrol::plugins::ShowPluginHost::shared().openPluginEditorForSlot (
+            slot, anchor, nullptr);
+    }
 
     /** Expose RT source trực tiếp để MultiOutputAudioCallback lưu con trỏ. */
     PadRealtimeSource& getRealtimeSource() noexcept { return realtimeSource; }
@@ -1078,6 +1164,7 @@ public:
 
         playState.store (PlayState::Stopped, std::memory_order_release);
         setCueState (PadCueState::stopped, CueTransitionReason::userStop, true);
+        setPflPreviewActive (false);
         realtimeSource.clearVisualFadeFlagsOnMessageThread();
         realtimeSource.postStop();
         transportSource.stop();
@@ -1302,6 +1389,7 @@ public:
         float  dspEqMidDb   = 0.0f;
         float  dspEqHighDb  = 0.0f;
         std::array<float, PadParametricEq6::kNumBands> dspEqBandDb {};
+        juce::PluginDescription audioFxDescription;
     };
 
     const AudioMetadata& getMetadata() const noexcept { return cachedMeta; }
@@ -2245,6 +2333,11 @@ private:
                              pendingProjectState.dspEqMidDb,
                              pendingProjectState.dspEqHighDb);
         refreshLufsSyncGain();
+
+        if (pendingProjectState.audioFxDescription.name.isNotEmpty())
+            applyAudioFxDescription (pendingProjectState.audioFxDescription);
+        else
+            clearAudioFx();
 
         hasPendingProjectState = false;
         repaint();

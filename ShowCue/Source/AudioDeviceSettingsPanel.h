@@ -8,8 +8,63 @@
 #include "ShowTheme.h"
 #include "ShowControlLookAndFeel.h"
 #include "ShowOutputRouting.h"
+#include "ShowAppPreferences.h"
 #include "ShowLocalization.h"
 #include "ShowGraphicsSafe.h"
+
+namespace
+{
+void localiseAudioDeviceSelector (juce::Component* root)
+{
+    if (root == nullptr)
+        return;
+
+    struct LabelMap { const char* english; const char* keyUtf8; };
+    static constexpr LabelMap maps[] = {
+        { "Output:", u8"Đầu ra:" },
+        { "Input:", u8"Đầu vào:" },
+        { "Sample rate:", u8"Tần số lấy mẫu:" },
+        { "Audio buffer size:", u8"Kích thước buffer:" },
+        { "Active input channels:", u8"Kênh vào:" },
+        { "Active output channels:", u8"Kênh ra:" },
+        { "Test:", u8"Thử:" },
+        { "Test", u8"Thử" },
+    };
+
+    std::function<void (juce::Component*)> walk;
+    walk = [&] (juce::Component* c)
+    {
+        if (auto* lbl = dynamic_cast<juce::Label*> (c))
+        {
+            for (const auto& m : maps)
+            {
+                if (lbl->getText() == m.english)
+                {
+                    lbl->setText (showcontrol::localization::tr (m.keyUtf8), juce::dontSendNotification);
+                    break;
+                }
+            }
+        }
+
+        if (auto* btn = dynamic_cast<juce::TextButton*> (c))
+        {
+            for (const auto& m : maps)
+            {
+                if (btn->getButtonText() == m.english)
+                {
+                    btn->setButtonText (showcontrol::localization::tr (m.keyUtf8));
+                    break;
+                }
+            }
+        }
+
+        for (int i = 0; i < c->getNumChildComponents(); ++i)
+            walk (c->getChildComponent (i));
+    };
+
+    walk (root);
+}
+} // namespace
 
 //==============================================================================
 /** LAF phạm vi Cài đặt Audio — Roboto 14.5–15pt cho ComboBox, Label, nút bấm. */
@@ -640,35 +695,304 @@ private:
 };
 
 //==============================================================================
-/** ⚙ Audio: thiết bị + đặt tên output bus (message thread only). */
-class AudioDeviceSettingsPanel : public juce::Component
+/** Bảng định tuyến phẳng: Master + Bus phụ → cặp cổng hardware (quét động). */
+class DirectRoutingSettingsList : public juce::Component
 {
 public:
-    static constexpr int kNumBuses = AudioBusNamingList::kNumBuses;
+    static constexpr int kNumRoutes = showcontrol::routing::kRouteCount;
+
+    explicit DirectRoutingSettingsList (juce::AudioDeviceManager& deviceManagerIn)
+        : deviceManager (deviceManagerIn)
+    {
+        for (int i = 0; i < kNumRoutes; ++i)
+        {
+            rowLabels[i].setFont (showcontrol::audioSettings::labelFont().withHeight (12.5f));
+            rowLabels[i].setJustificationType (juce::Justification::centredLeft);
+            addAndMakeVisible (rowLabels[i]);
+
+            if (i == showcontrol::routing::kMasterRouteId)
+            {
+                masterNameLabel.setFont (showcontrol::audioSettings::editorFont());
+                masterNameLabel.setJustificationType (juce::Justification::centredLeft);
+                addAndMakeVisible (masterNameLabel);
+            }
+            else
+            {
+                const int busIdx = i - 1;
+                nameEdits[(size_t) busIdx].setFont (showcontrol::audioSettings::editorFont());
+                nameEdits[(size_t) busIdx].setJustification (juce::Justification::centredLeft);
+                nameEdits[(size_t) busIdx].setIndents (8, 5);
+                nameEdits[(size_t) busIdx].setReturnKeyStartsNewLine (false);
+                nameEdits[(size_t) busIdx].onTextChange = [this, busIdx]
+                {
+                    if (onRouteNameLiveChanged != nullptr)
+                        onRouteNameLiveChanged (busIdx + 1, nameEdits[(size_t) busIdx].getText());
+                };
+                addAndMakeVisible (nameEdits[(size_t) busIdx]);
+            }
+
+            hwCombos[i].setTextWhenNothingSelected (showcontrol::localization::tr (u8"Chọn thiết bị Out..."));
+            hwCombos[i].onChange = [this, i]
+            {
+                applyComboSelectionToLiveTable (i);
+                if (onRoutingChanged != nullptr)
+                    onRoutingChanged();
+            };
+            addAndMakeVisible (hwCombos[i]);
+        }
+
+        rescanAvailableOutputs();
+        loadFromStoredPreferences();
+        refreshRowLabels();
+        applyRowTheme();
+    }
+
+    std::function<void (int routeId, const juce::String& text)> onRouteNameLiveChanged;
+    std::function<void()> onRoutingChanged;
+
+    void setDarkMode (bool dark) noexcept
+    {
+        if (isDark == dark)
+            return;
+
+        isDark = dark;
+        applyRowTheme();
+        repaint();
+    }
+
+    void setPreferencesChrome (bool enabled) noexcept
+    {
+        preferencesChrome = enabled;
+        applyRowTheme();
+    }
+
+    void rescanAvailableOutputs()
+    {
+        cachedOutputChoices = showcontrol::routing::scanAvailableOutputEndpoints (deviceManager);
+
+        for (int i = 0; i < kNumRoutes; ++i)
+        {
+            const auto prevChoice = hwCombos[i].getText();
+            hwCombos[i].clear (juce::dontSendNotification);
+
+            for (int p = 0; p < cachedOutputChoices.size(); ++p)
+                hwCombos[i].addItem (cachedOutputChoices[p], p + 1);
+
+            syncComboFromOutputChoice (i, prevChoice);
+        }
+    }
+
+    void rescanHardwareOutputPairs()
+    {
+        rescanAvailableOutputs();
+    }
+
+    void loadFromStoredPreferences()
+    {
+        const auto customNames = showcontrol::prefs::loadCustomBusNamesFromPrefs();
+        const auto choices     = showcontrol::prefs::loadAllRouteOutputChoices();
+
+        masterNameLabel.setText (showcontrol::routing::masterRouteDisplayName(),
+                                 juce::dontSendNotification);
+
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+        {
+            nameEdits[(size_t) i].setText (customNames[i], juce::dontSendNotification);
+            nameEdits[(size_t) i].setTextToShowWhenEmpty (
+                showcontrol::routing::defaultCustomBusName (i),
+                juce::Colours::grey.withAlpha (0.45f));
+        }
+
+        for (int r = 0; r < kNumRoutes; ++r)
+            syncComboFromOutputChoice (r, choices[(size_t) r]);
+
+        showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+    }
+
+    void refreshRowLabels()
+    {
+        rowLabels[0].setText (showcontrol::localization::tr (u8"MASTER OUT"), juce::dontSendNotification);
+
+        for (int i = 1; i < kNumRoutes; ++i)
+            rowLabels[i].setText (showcontrol::localization::tr (u8"BUS ") + juce::String (i),
+                                  juce::dontSendNotification);
+    }
+
+    void refreshLocalizedDefaultBusTexts()
+    {
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+        {
+            const auto current = nameEdits[(size_t) i].getText().trim();
+
+            if (showcontrol::routing::isDefaultRouteName (i + 1, current))
+                nameEdits[(size_t) i].setText ({}, juce::dontSendNotification);
+
+            nameEdits[(size_t) i].setTextToShowWhenEmpty (
+                showcontrol::routing::defaultCustomBusName (i),
+                juce::Colours::grey.withAlpha (0.45f));
+        }
+
+        masterNameLabel.setText (showcontrol::routing::masterRouteDisplayName(),
+                                 juce::dontSendNotification);
+        refreshRowLabels();
+        applyRowTheme();
+    }
+
+    juce::StringArray getRouteDisplayNames() const
+    {
+        juce::StringArray names;
+        names.add (showcontrol::routing::masterRouteDisplayName());
+
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+        {
+            const auto t = nameEdits[(size_t) i].getText().trim();
+            names.add (t.isNotEmpty() ? t : showcontrol::routing::defaultCustomBusName (i));
+        }
+
+        return names;
+    }
+
+    void persistToPreferencesAndLiveTable()
+    {
+        std::array<juce::String, kNumRoutes> outputChoices {};
+        juce::StringArray customNames;
+
+        for (int r = 0; r < kNumRoutes; ++r)
+            outputChoices[(size_t) r] = hwCombos[r].getText().trim();
+
+        for (int i = 0; i < showcontrol::routing::kMaxCustomBuses; ++i)
+            customNames.add (nameEdits[(size_t) i].getText().trim());
+
+        showcontrol::prefs::saveDirectRoutingSettings (outputChoices, customNames);
+        showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
+    }
+
+    void applyThemeColoursDirectly (const juce::LookAndFeel& lf)
+    {
+        if (auto* showLaf = dynamic_cast<const ShowControlLookAndFeel*> (&lf))
+            isDark = showLaf->isDarkMode();
+
+        applyRowTheme();
+        repaint();
+    }
+
+    void resized() override
+    {
+        auto bounds = getLocalBounds();
+        constexpr int rowH = 34;
+        const int labelW = 92;
+        const int nameW  = juce::jmax (120, bounds.getWidth() / 3);
+        const int gap    = 6;
+
+        for (int i = 0; i < kNumRoutes; ++i)
+        {
+            auto row = bounds.removeFromTop (rowH).reduced (0, 2);
+            rowLabels[i].setBounds (row.removeFromLeft (labelW));
+
+            if (i == showcontrol::routing::kMasterRouteId)
+                masterNameLabel.setBounds (row.removeFromLeft (nameW).reduced (0, 3));
+            else
+                nameEdits[(size_t) (i - 1)].setBounds (row.removeFromLeft (nameW).reduced (0, 3));
+
+            row.removeFromLeft (gap);
+            hwCombos[i].setBounds (row.reduced (0, 3));
+        }
+    }
+
+private:
+    void syncComboFromOutputChoice (int routeIndex, const juce::String& choice) noexcept
+    {
+        int idx = cachedOutputChoices.indexOf (choice.trim());
+
+        if (idx < 0 && routeIndex < cachedOutputChoices.size())
+            idx = routeIndex;
+
+        if (idx < 0 && cachedOutputChoices.size() > 0)
+            idx = 0;
+
+        hwCombos[routeIndex].setSelectedItemIndex (
+            juce::jlimit (0, juce::jmax (0, hwCombos[routeIndex].getNumItems() - 1), idx),
+            juce::dontSendNotification);
+    }
+
+    void applyComboSelectionToLiveTable (int routeIndex) noexcept
+    {
+        const auto choice = hwCombos[routeIndex].getText().trim();
+        showcontrol::routing::bindRouteOutputChoice (
+            routeIndex, choice, deviceManager.getCurrentAudioDevice());
+    }
+
+    void applyRowTheme()
+    {
+        const auto& lf = getLookAndFeel();
+        const auto labelCol = lf.findColour (ShowControlLookAndFeel::textSecondaryColourId);
+        const auto textCol  = lf.findColour (juce::Label::textColourId);
+        const auto fieldBg  = lf.findColour (juce::TextEditor::backgroundColourId);
+        const auto fieldOut = lf.findColour (juce::TextEditor::outlineColourId);
+
+        for (int i = 0; i < kNumRoutes; ++i)
+            rowLabels[i].setColour (juce::Label::textColourId, labelCol);
+
+        masterNameLabel.setColour (juce::Label::textColourId, textCol);
+
+        for (auto& ed : nameEdits)
+        {
+            ed.setColour (juce::TextEditor::textColourId, textCol);
+            ed.setColour (juce::TextEditor::backgroundColourId, fieldBg);
+            ed.setColour (juce::TextEditor::outlineColourId, fieldOut);
+        }
+
+        for (auto& cb : hwCombos)
+            cb.setColour (juce::ComboBox::textColourId, textCol);
+    }
+
+    juce::AudioDeviceManager& deviceManager;
+    bool isDark = true;
+    bool preferencesChrome = false;
+    juce::StringArray cachedOutputChoices;
+
+    std::array<juce::Label, kNumRoutes> rowLabels;
+    juce::Label masterNameLabel;
+    std::array<BusNameTextEditor, showcontrol::routing::kMaxCustomBuses> nameEdits;
+    std::array<juce::ComboBox, kNumRoutes> hwCombos;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DirectRoutingSettingsList)
+};
+
+//==============================================================================
+/** ⚙ Audio: thiết bị + đặt tên output bus (message thread only). */
+class AudioDeviceSettingsPanel : public juce::Component,
+                                 private juce::ChangeListener
+{
+public:
+    static constexpr int kNumRoutes = DirectRoutingSettingsList::kNumRoutes;
+    static constexpr int kNumBuses  = kNumRoutes;
+
+    static int getEmbeddedRoutingListHeight() noexcept
+    {
+        constexpr int rowH = 34;
+        return rowH * kNumRoutes;
+    }
 
     static int getPreferredEmbeddedHeight() noexcept
     {
-        constexpr int outerPad     = 12;
-        constexpr int busLabelH    = 20;
-        constexpr int busListH     = 132;
-        constexpr int sectionGap   = 8;
-        constexpr int groupChrome  = 34;
-        constexpr int deviceMinH   = 228;
-        return outerPad * 2 + busLabelH + 4 + busListH + sectionGap + groupChrome + deviceMinH;
+        return 480;
     }
 
-    AudioDeviceSettingsPanel (juce::AudioDeviceManager& deviceManager,
+    AudioDeviceSettingsPanel (juce::AudioDeviceManager& deviceManagerIn,
                               bool darkMode,
                               const juce::StringArray& busNames,
                               bool embeddedInPreferences = false)
         : isDark (darkMode),
-          embeddedInPreferences (embeddedInPreferences)
+          embeddedInPreferences (embeddedInPreferences),
+          deviceManager (deviceManagerIn),
+          routingList (deviceManagerIn)
     {
         audioGroup.setText (showcontrol::localization::tr (u8"Cấu hình Audio"));
         audioGroup.setTextLabelPosition (juce::Justification::centredLeft);
         addAndMakeVisible (audioGroup);
 
-        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output Bus"),
+        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output"),
                                  juce::dontSendNotification);
         busSectionLabel.setFont (showcontrol::audioSettings::labelFont().withHeight (13.0f));
         busSectionLabel.setJustificationType (juce::Justification::centredLeft);
@@ -677,11 +1001,17 @@ public:
         deviceSelector = std::make_unique<juce::AudioDeviceSelectorComponent> (
             deviceManager, 0, 0, 2, 16, false, false, false, false);
         addAndMakeVisible (*deviceSelector);
+        localiseAudioDeviceSelector (deviceSelector.get());
 
-        busList.setDarkMode (isDark);
-        busList.setPreferencesChrome (embeddedInPreferences);
-        busList.initialiseRows (busNames);
-        addAndMakeVisible (busList);
+        routingList.setDarkMode (isDark);
+        routingList.setPreferencesChrome (embeddedInPreferences);
+        juce::ignoreUnused (busNames);
+        addAndMakeVisible (routingList);
+
+        routingList.onRoutingChanged = [this]
+        {
+            routingList.persistToPreferencesAndLiveTable();
+        };
 
         okBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
         addAndMakeVisible (okBtn);
@@ -691,9 +1021,13 @@ public:
         applyTheme();
         setWantsKeyboardFocus (true);
         setSize (540, embeddedInPreferences ? getPreferredEmbeddedHeight() : 500);
+        deviceManager.addChangeListener (this);
     }
 
-    ~AudioDeviceSettingsPanel() override = default;
+    ~AudioDeviceSettingsPanel() override
+    {
+        deviceManager.removeChangeListener (this);
+    }
 
     void setDarkMode (bool dark) noexcept
     {
@@ -727,11 +1061,17 @@ public:
     void setOnBusNameLiveChanged (std::function<void (int busIndex, const juce::String& text)> handler)
     {
         onBusNameLiveChanged = std::move (handler);
-        busList.onBusNameLiveChanged = [this] (int busIndex, const juce::String& text)
+        routingList.onRouteNameLiveChanged = [this] (int routeId, const juce::String& text)
         {
             if (onBusNameLiveChanged != nullptr)
-                onBusNameLiveChanged (busIndex, text);
+                onBusNameLiveChanged (routeId, text);
         };
+    }
+
+    void rescanHardwareRoutes()
+    {
+        routingList.rescanAvailableOutputs();
+        showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
     }
 
     void parentHierarchyChanged() override
@@ -744,10 +1084,10 @@ public:
 
     juce::StringArray getBusNames() const
     {
-        return busList.getBusNames();
+        return routingList.getRouteDisplayNames();
     }
 
-    /** Manual Push — ép màu Bus 0–5 và nhãn phân khu ngay lập tức. */
+    /** Manual Push — ép màu route và nhãn phân khu ngay lập tức. */
     void applyThemeColoursDirectly()
     {
         auto& lf = getLookAndFeel();
@@ -762,7 +1102,7 @@ public:
         audioGroup.setColour (juce::GroupComponent::outlineColourId, groupOutline);
         audioGroup.repaint();
 
-        busList.applyThemeColoursDirectly (lf);
+        routingList.applyThemeColoursDirectly (lf);
 
         if (deviceSelector != nullptr)
         {
@@ -776,10 +1116,14 @@ public:
     void refreshLocalizedText()
     {
         audioGroup.setText (showcontrol::localization::tr (u8"Cấu hình Audio"));
-        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output Bus"),
+        busSectionLabel.setText (showcontrol::localization::tr (u8"Định tuyến Output"),
                                  juce::dontSendNotification);
         okBtn.setButtonText (showcontrol::localization::tr (u8"Đóng"));
-        busList.refreshLocalizedDefaultBusTexts();
+        routingList.refreshLocalizedDefaultBusTexts();
+
+        if (deviceSelector != nullptr)
+            localiseAudioDeviceSelector (deviceSelector.get());
+
         OutputBusNamingOverlay::refreshLocalizedActive();
         repaint();
     }
@@ -793,6 +1137,14 @@ public:
         juce::Component::lookAndFeelChanged();
         refreshLocalizedText();
         repaint();
+    }
+
+    void visibilityChanged() override
+    {
+        juce::Component::visibilityChanged();
+
+        if (isVisible())
+            routingList.rescanAvailableOutputs();
     }
 
     void paint (juce::Graphics& g) override
@@ -817,12 +1169,15 @@ public:
         if (embeddedInPreferences)
         {
             constexpr int busLabelH = 20;
-            constexpr int busListH  = 132;
+            const int routingListH  = getEmbeddedRoutingListHeight();
+            const int routeMinH     = busLabelH + 4 + routingListH;
+            const int routeBlockH   = juce::jmax (routeMinH,
+                                                  (int) std::round (bounds.getHeight() * 0.45f));
 
-            busSectionLabel.setBounds (bounds.removeFromTop (busLabelH));
-            bounds.removeFromTop (4);
-            busList.setBounds (bounds.removeFromTop (busListH));
-            busList.resized();
+            auto routingBlock = bounds.removeFromTop (routeBlockH);
+            busSectionLabel.setBounds (routingBlock.removeFromTop (busLabelH));
+            routingBlock.removeFromTop (4);
+            routingList.setBounds (routingBlock.removeFromTop (routingListH));
             bounds.removeFromTop (sectionGap);
 
             audioGroup.setBounds (bounds);
@@ -834,10 +1189,10 @@ public:
 
         auto audioInner = audioGroup.getBounds().reduced (10, 14);
         constexpr int busLabelH = 18;
-        constexpr int busListH  = 124;
+        constexpr int routingListH = 124;
         constexpr int deviceMinH = 164;
         const int deviceH = juce::jmax (deviceMinH,
-                                        audioInner.getHeight() - busLabelH - busListH - sectionGap * 2);
+                                        audioInner.getHeight() - busLabelH - routingListH - sectionGap * 2);
 
         auto deviceArea = audioInner.removeFromTop (deviceH);
         deviceSelector->setBounds (deviceArea);
@@ -845,8 +1200,7 @@ public:
         audioInner.removeFromTop (sectionGap);
         busSectionLabel.setBounds (audioInner.removeFromTop (busLabelH));
         audioInner.removeFromTop (sectionGap);
-        busList.setBounds (audioInner.removeFromTop (busListH));
-        busList.resized();
+        routingList.setBounds (audioInner.removeFromTop (routingListH));
     }
 
 private:
@@ -858,7 +1212,8 @@ private:
     juce::Label busSectionLabel;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> deviceSelector;
     juce::TextButton okBtn;
-    AudioBusNamingList busList;
+    juce::AudioDeviceManager& deviceManager;
+    DirectRoutingSettingsList routingList;
     std::function<void (int busIndex, const juce::String& text)> onBusNameLiveChanged;
 
     void applyTheme()
@@ -884,9 +1239,8 @@ private:
         okBtn.setColour (juce::TextButton::buttonColourId, pal.buttonSecondary);
         okBtn.setColour (juce::TextButton::textColourOffId, pal.textPrimary);
 
-        busList.setDarkMode (isDark);
-        busList.setPreferencesChrome (embeddedInPreferences);
-        busList.applyRowTheme();
+        routingList.setDarkMode (isDark);
+        routingList.setPreferencesChrome (embeddedInPreferences);
 
         if (deviceSelector != nullptr)
             deviceSelector->lookAndFeelChanged();
@@ -898,6 +1252,8 @@ private:
             return;
 
         hasAppliedOnClose = true;
+
+        routingList.persistToPreferencesAndLiveTable();
 
         if (onApplied)
         {
@@ -922,6 +1278,15 @@ private:
     void closeParentDialogWindow (int result) noexcept
     {
         closeParentDialogWindow (*this, result);
+    }
+
+    void changeListenerCallback (juce::ChangeBroadcaster* source) override
+    {
+        if (source != &deviceManager)
+            return;
+
+        routingList.rescanAvailableOutputs();
+        showcontrol::prefs::loadDirectRoutingIntoLiveTable (&deviceManager);
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioDeviceSettingsPanel)

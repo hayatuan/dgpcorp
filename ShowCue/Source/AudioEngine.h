@@ -1,6 +1,7 @@
 #pragma once
 #include "SoundPad.h"
 #include "ShowAudioPreloadCache.h"
+#include "ShowPluginHost.h"
 
 //==============================================================================
 /**
@@ -33,6 +34,9 @@ public:
     /** Dừng một CUE. */
     bool stopCue (SoundPad* pad) noexcept;
 
+    /** PFL Preview — nghe thử qua bus monitor, không đổi route GO đã lưu. */
+    bool playPflPreview (SoundPad* pad) noexcept;
+
     /** Có ít nhất một pad trong danh sách đang transport-active. */
     static bool anyCueActive (const juce::OwnedArray<SoundPad>& pads) noexcept;
 
@@ -46,6 +50,19 @@ public:
     void clearPreloadPool() noexcept;
 
     size_t getPreloadPoolUsedBytes() const noexcept;
+
+    /** Quét / cache VST3 + AU (macOS) — gọi một lần lúc khởi động app. */
+    void initPluginScanner();
+
+    juce::KnownPluginList& getKnownPluginList() noexcept;
+    const juce::KnownPluginList& getKnownPluginList() const noexcept;
+
+    juce::AudioPluginFormatManager& getPluginFormatManager() noexcept;
+    const juce::AudioPluginFormatManager& getPluginFormatManager() const noexcept;
+
+    void loadEffectIntoPad (SoundPad* pad, const juce::PluginDescription& desc);
+    void removeEffectFromPad (SoundPad* pad);
+    void openPluginEditorForPad (SoundPad* pad, juce::Component* centreRelativeTo);
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)

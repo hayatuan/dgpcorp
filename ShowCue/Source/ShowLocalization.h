@@ -335,7 +335,29 @@ inline juce::String getEnglishDictionary()
         u8"\"Chưa đo\" = \"Not measured\"\n"
         u8"\" · Peak \" = \" · Peak \"\n"
         u8"\" · Gain \" = \" · Gain \"\n"
-        u8"\" · LUFS sync \" = \" · LUFS sync \"\n");
+        u8"\" · LUFS sync \" = \" · LUFS sync \"\n"
+        u8"\"Đầu ra (Routing):\" = \"Output (Routing):\"\n"
+        u8"\"Định tuyến Output\" = \"Output Routing\"\n"
+        u8"\"Reset Quyền\" = \"Reset Permissions\"\n"
+        u8"\"Truy cập phần cứng âm thanh\" = \"Audio Hardware Access\"\n"
+        u8"\"Kết nối mạng\" = \"Network Connectivity\"\n"
+        u8"\"Tường lửa Windows (đồng bộ LAN)\" = \"Windows Firewall (LAN sync)\"\n"
+        u8"\"Quyền kéo thả file\" = \"Drag & Drop File Access\"\n"
+        u8"\"Đầu ra:\" = \"Output:\"\n"
+        u8"\"Đầu vào:\" = \"Input:\"\n"
+        u8"\"Tần số lấy mẫu:\" = \"Sample rate:\"\n"
+        u8"\"Kích thước buffer:\" = \"Audio buffer size:\"\n"
+        u8"\"Kênh vào:\" = \"Active input channels:\"\n"
+        u8"\"Kênh ra:\" = \"Active output channels:\"\n"
+        u8"\"Thử:\" = \"Test:\"\n"
+        u8"\"Thử\" = \"Test\"\n"
+        u8"\"Audio FX:\" = \"Audio FX:\"\n"
+        u8"\"[ Không dùng Audio FX ]\" = \"[ No Audio FX ]\"\n"
+        u8"\"Edit\" = \"Edit\"\n"
+        u8"\"Chọn plugin VST3/AU xử lý âm thanh riêng cho track này.\" = \"Select a VST3/AU plugin to process this track.\"\n"
+        u8"\"Mở giao diện native của plugin để hiệu chỉnh tham số.\" = \"Open the plugin native UI to adjust parameters.\"\n"
+        u8"\"Chọn thiết bị Out...\" = \"Select output device...\"\n"
+        u8"\"IN/OUT: kéo marker vàng/đỏ. Playhead: click trên waveform. Chọn vùng cắt: kéo trên waveform (Shift = chọn ngay). Zoom: lăn chuột (thanh ngang khi zoom).\" = \"IN/OUT: drag yellow/red markers. Playhead: click on waveform. Cut region: drag on waveform (Shift = select immediately). Zoom: mouse wheel (horizontal bar when zoomed).\"\n");
 
     return dict;
 }

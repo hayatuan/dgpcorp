@@ -489,19 +489,31 @@ public:
         g.fillAll (showcontrol::preferences::dynamicDialogBackground (getLookAndFeel()));
     }
 
+    static int getPreferredEmbeddedHeight() noexcept
+    {
+        juce::ignoreUnused (0);
+        return 480;
+    }
+
     void resized() override
     {
         auto bounds = getLocalBounds().reduced (22, 18);
-        sectionLabel.setBounds (bounds.removeFromTop (22));
-        bounds.removeFromTop (6);
-        hintLabel.setBounds (bounds.removeFromTop (34));
-        bounds.removeFromTop (18);
+        const int totalH = bounds.getHeight();
 
-        const int cardW = 88;
-        const int cardH = 78;
+        const int themeSecH = juce::jmax (160, (int) (totalH * 0.36f));
+        const int langSecH  = juce::jmax (130, (int) (totalH * 0.30f));
+
+        auto themeSec = bounds.removeFromTop (themeSecH);
+        sectionLabel.setBounds (themeSec.removeFromTop (22));
+        themeSec.removeFromTop (6);
+        hintLabel.setBounds (themeSec.removeFromTop (34));
+        themeSec.removeFromTop (12);
+
+        const int cardW = 92;
+        const int cardH = juce::jlimit (72, kThemeCardH, themeSec.getHeight());
         const int gap   = 16;
         const int totalW = cardW * 3 + gap * 2;
-        auto row = bounds.removeFromTop (cardH);
+        auto row = themeSec.removeFromTop (cardH);
         row = row.withSizeKeepingCentre (totalW, cardH);
 
         systemCard.setBounds (row.removeFromLeft (cardW));
@@ -510,12 +522,13 @@ public:
         row.removeFromLeft (gap);
         darkCard.setBounds (row.removeFromLeft (cardW));
 
-        bounds.removeFromTop (20);
-        languageLabel.setBounds (bounds.removeFromTop (22));
-        bounds.removeFromTop (14);
+        bounds.removeFromTop (12);
+        auto langSec = bounds.removeFromTop (langSecH);
+        languageLabel.setBounds (langSec.removeFromTop (22));
+        langSec.removeFromTop (12);
 
-        auto langRow = bounds.removeFromTop (cardH);
-        langRow = langRow.withSizeKeepingCentre (totalW, cardH);
+        auto langRow = langSec.removeFromTop (juce::jlimit (72, kThemeCardH, langSec.getHeight()));
+        langRow = langRow.withSizeKeepingCentre (totalW, langRow.getHeight());
 
         systemLangCard.setBounds (langRow.removeFromLeft (cardW));
         langRow.removeFromLeft (gap);
@@ -523,17 +536,18 @@ public:
         langRow.removeFromLeft (gap);
         englishLangCard.setBounds (langRow.removeFromLeft (cardW));
 
-        bounds.removeFromTop (24);
+        bounds.removeFromTop (12);
         updateSectionLabel.setBounds (bounds.removeFromTop (22));
         bounds.removeFromTop (4);
         updateHintLabel.setBounds (bounds.removeFromTop (34));
         bounds.removeFromTop (8);
-        auto btnRow = bounds.removeFromTop (32);
         const int btnW = 180;
-        checkUpdateButton.setBounds (btnRow.withSizeKeepingCentre (btnW, 28));
+        checkUpdateButton.setBounds (bounds.removeFromTop (28).withSizeKeepingCentre (btnW, 28));
     }
 
 private:
+    static constexpr int kThemeCardH = 84;
+
     int currentThemeId = 1;
     int currentLanguageIndex = 0;
     juce::Label sectionLabel, hintLabel, languageLabel;
@@ -585,55 +599,26 @@ private:
 };
 
 //==============================================================================
-/** Hộp thoại Cài đặt — Tab bar icon Farrago + nội dung phẳng. */
+/** Hộp thoại Cài đặt — Tab bar icon Farrago + nội dung phẳng (geometry cố định QLab). */
 class GlobalPreferencesDialog : public juce::Component
 {
 public:
-    static constexpr int kDefaultDialogWidth = 680;
+    static constexpr int kDialogWidth        = 720;
+    static constexpr int kDialogHeight       = 580;
+    static constexpr int kMinContentHeight   = 480;
+    static constexpr int kMaxContentHeight   = 1080;
+    static constexpr int kTopBarHeight       = 75;
+    static constexpr int kContentMarginH     = 20;
+    static constexpr int kContentMarginV     = 15;
 
-    static int getPreferredPanelHeight() noexcept
-    {
-        const int cardCount =
-       #if JUCE_WINDOWS
-            4;
-       #else
-            2;
-       #endif
+    /** @deprecated alias — dùng kDialogWidth. */
+    static constexpr int kDefaultDialogWidth = kDialogWidth;
 
-        constexpr int cardH = 116;
-        constexpr int gap   = 12;
-        constexpr int pad   = 28;
-        const int cardsH = pad + cardCount * cardH + (cardCount - 1) * gap;
-        const int heroMinH = 260;
-        return juce::jmax (cardsH, heroMinH);
-    }
-
-    static int getPermissionsPanelHeight() noexcept
-    {
-        return getPreferredPanelHeight();
-    }
-
-    static int getPreferredPanelHeightForTab (int tabIndex) noexcept
-    {
-        switch (tabIndex)
-        {
-            case 0: return AudioDeviceSettingsPanel::getPreferredEmbeddedHeight();
-            case 1: return 460;
-            case 2: return getPreferredPanelHeight();
-            case 3: return 640;
-            default: return 520;
-        }
-    }
-
-    /** Chiều cao nội dung tab Quyền (đo từ UI mẫu ~645px cửa sổ trên Windows). */
-    static int getDefaultContentHeight() noexcept
-    {
-        return kMacTitleDragInset + kTabBarHeight + 1 + getPreferredPanelHeightForTab (2);
-    }
+    static int getFixedContentHeight() noexcept { return kDialogHeight; }
 
     static juce::Point<int> getDefaultContentSize() noexcept
     {
-        return { kDefaultDialogWidth, getDefaultContentHeight() };
+        return { kDialogWidth, kDialogHeight };
     }
 
     static int getNativeTitleBarAllowance() noexcept
@@ -647,20 +632,52 @@ public:
        #endif
     }
 
+    /** macOS Farrago full-size content view: content fills the window; inset handled by kMacTitleDragInset. */
+    static int getWindowHeightForContentHeight (int contentH) noexcept
+    {
+       #if JUCE_MAC
+        return contentH;
+       #else
+        return contentH + getNativeTitleBarAllowance();
+       #endif
+    }
+
     static juce::Point<int> getDefaultWindowSize() noexcept
     {
-        const auto content = getDefaultContentSize();
-        return { content.x, content.y + getNativeTitleBarAllowance() };
+        return { kDialogWidth, getWindowHeightForContentHeight (kDialogHeight) };
     }
 
     static void configureDialogWindow (juce::DialogWindow& window)
     {
-        const auto windowSize = getDefaultWindowSize();
-        window.setResizeLimits (kDefaultDialogWidth - 120,
-                                windowSize.y - 140,
-                                1200,
-                                1000);
-        window.centreWithSize (windowSize.x, windowSize.y);
+        const int minWinH = getWindowHeightForContentHeight (kMinContentHeight);
+        const int maxWinH = getWindowHeightForContentHeight (kMaxContentHeight);
+        window.setResizable (true, true);
+        window.setResizeLimits (kDialogWidth, minWinH, kDialogWidth, maxWinH);
+    }
+
+    void ensureWindowFitsActiveTab (juce::Component* positionAnchor = nullptr)
+    {
+        attachBoundsConstrainerToParentWindow();
+
+        if (! dialogTopAnchorInitialized)
+        {
+            applyInitialGeometry();
+
+            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+            {
+                if (positionAnchor != nullptr)
+                {
+                    const auto anchor = positionAnchor->getScreenBounds();
+                    const int x = anchor.getCentreX() - dw->getWidth() / 2;
+                    const int y = anchor.getY() + kDialogTopAnchorOffsetY;
+                    dw->setTopLeftPosition (x, y);
+                }
+
+                dialogTopAnchorInitialized = true;
+            }
+        }
+
+        resized();
     }
 
     struct Callbacks
@@ -688,6 +705,11 @@ public:
                              Callbacks callbacks)
         : cb (std::move (callbacks))
     {
+        boundsConstrainer.setMinimumWidth (kDialogWidth);
+        boundsConstrainer.setMaximumWidth (kDialogWidth);
+        boundsConstrainer.setMinimumHeight (getWindowHeightForContentHeight (kMinContentHeight));
+        boundsConstrainer.setMaximumHeight (getWindowHeightForContentHeight (kMaxContentHeight));
+
         audioPanel = std::make_unique<AudioDeviceSettingsPanel> (deviceManager, darkMode, busNames, true);
         themePanel = std::make_unique<ThemePreferencesPanel> (themeId, languageIndex);
         permissionsPanel = std::make_unique<showcontrol::permissions::SystemPermissionsPanel> (&deviceManager);
@@ -735,6 +757,12 @@ public:
         {
             if (cb.onSyncProjectConfigToBackups != nullptr)
                 cb.onSyncProjectConfigToBackups();
+        };
+
+        backupPanel->onPreferredHeightChanged = [this]
+        {
+            if (activeTab == 3 && backupPanel != nullptr)
+                backupPanel->resized();
         };
 
         if (cb.onBusNameLiveChanged != nullptr)
@@ -802,13 +830,14 @@ public:
 
         selectTab (0);
         setWantsKeyboardFocus (true);
-
-        const auto contentSize = getDefaultContentSize();
-        setSize (contentSize.x, contentSize.y);
+        setSize (kDialogWidth, kDialogHeight);
     }
 
     ~GlobalPreferencesDialog() override
     {
+        if (auto* rw = findParentComponentOfClass<juce::ResizableWindow>())
+            rw->setConstrainer (nullptr);
+
         if (backupPanel != nullptr)
             backupPanel->haltActiveTimers();
 
@@ -873,14 +902,14 @@ public:
         const auto bgColor = getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId);
         g.fillAll (bgColor);
 
-        const int sepY = kMacTitleDragInset + kTabBarHeight;
+        const int sepY = kMacTitleDragInset + kTopBarHeight;
         g.setColour (showcontrol::preferences::dynamicSeparator (getLookAndFeel()));
         g.fillRect (0, sepY, getWidth(), 1);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
-        constexpr int kTabBarDragHeight = 65;
+        constexpr int kTabBarDragHeight = kMacTitleDragInset + kTopBarHeight;
 
         if (e.y < kTabBarDragHeight && e.mods.isLeftButtonDown())
         {
@@ -926,7 +955,7 @@ public:
         if (kMacTitleDragInset > 0)
             bounds.removeFromTop (kMacTitleDragInset);
 
-        auto tabBar = bounds.removeFromTop (kTabBarHeight).reduced (10, 8);
+        auto tabBar = bounds.removeFromTop (kTopBarHeight).reduced (10, 8);
 
         const int tabW = juce::jmax (72, tabBar.getWidth() / 4);
         const int total = tabW * 4;
@@ -938,15 +967,19 @@ public:
         networkTabBtn->setBounds (tabBar.removeFromLeft (tabW));
 
         bounds.removeFromTop (1);
-        audioPanel->setBounds (bounds);
-        themePanel->setBounds (bounds);
-        permissionsPanel->setBounds (bounds);
-        backupPanel->setBounds (bounds);
+
+        const auto panelBounds = bounds.reduced (kContentMarginH, kContentMarginV);
+        audioPanel->setBounds (panelBounds);
+        themePanel->setBounds (panelBounds);
+        permissionsPanel->setBounds (panelBounds);
+        backupPanel->setBounds (panelBounds);
     }
 
     void parentHierarchyChanged() override
     {
         juce::Component::parentHierarchyChanged();
+
+        attachBoundsConstrainerToParentWindow();
 
         if (getParentComponent() == nullptr && audioPanel != nullptr)
             audioPanel->parentHierarchyChanged();
@@ -958,9 +991,9 @@ private:
    #else
     static constexpr int kMacTitleDragInset = 0;
    #endif
-    static constexpr int kTabBarHeight = 76;
 
     juce::ComponentDragger windowDragger;
+    juce::ComponentBoundsConstrainer boundsConstrainer;
     bool windowDragActive = false;
 
     bool isClickOnTabButtonArea (const juce::MouseEvent& e) const
@@ -989,6 +1022,9 @@ private:
     std::unique_ptr<showcontrol::permissions::SystemPermissionsPanel> permissionsPanel;
     std::unique_ptr<BackupSyncPreferencesPanel> backupPanel;
     int activeTab = 0;
+    bool dialogTopAnchorInitialized = false;
+
+    static constexpr int kDialogTopAnchorOffsetY = 24;
 
     void syncDialogWindowBackground()
     {
@@ -1035,6 +1071,9 @@ private:
         if (index == 2 && permissionsPanel != nullptr)
             permissionsPanel->resized();
 
+        if (index == 0 && audioPanel != nullptr)
+            audioPanel->resized();
+
         if (index == 3 && backupPanel != nullptr)
         {
             backupPanel->refreshLocalizedText();
@@ -1042,21 +1081,29 @@ private:
             backupPanel->resized();
         }
 
-        resizeToFitActiveTab();
+        resized();
     }
 
-    void resizeToFitActiveTab()
+    void applyInitialGeometry()
     {
-        const int panelH = getPreferredPanelHeightForTab (activeTab);
-        const int contentH = kMacTitleDragInset + kTabBarHeight + 1 + panelH;
-        setSize (kDefaultDialogWidth, contentH);
-        resized();
+        setSize (kDialogWidth, kDialogHeight);
 
         if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+            dw->setSize (kDialogWidth, getWindowHeightForContentHeight (kDialogHeight));
+    }
+
+    void attachBoundsConstrainerToParentWindow()
+    {
+        if (auto* rw = findParentComponentOfClass<juce::ResizableWindow>())
         {
-            const int winH = contentH + getNativeTitleBarAllowance();
-            dw->setSize (kDefaultDialogWidth, winH);
-            dw->centreWithSize (kDefaultDialogWidth, winH);
+            boundsConstrainer.setMinimumWidth (kDialogWidth);
+            boundsConstrainer.setMaximumWidth (kDialogWidth);
+            boundsConstrainer.setMinimumHeight (getWindowHeightForContentHeight (kMinContentHeight));
+            boundsConstrainer.setMaximumHeight (getWindowHeightForContentHeight (kMaxContentHeight));
+
+            rw->setResizable (true, true);
+            rw->setConstrainer (&boundsConstrainer);
+            configureDialogWindow (static_cast<juce::DialogWindow&> (*rw));
         }
     }
 };

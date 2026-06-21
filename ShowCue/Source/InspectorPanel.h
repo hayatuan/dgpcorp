@@ -11,6 +11,7 @@
 #include "ShowControlMacWindow.h"
 #include "ShowOutputRouting.h"
 #include "ShowLocalization.h"
+#include "ShowPluginHost.h"
 #include "ShowTagColors.h"
 #include "ConfirmDeleteDialog.h"
 
@@ -420,7 +421,22 @@ public:
 
     double getVisibleDuration() const noexcept { return viewEnd - viewStart; }
     double getTotalLength() const noexcept { return totalLen; }
+    double getViewStartTime() const noexcept { return viewStart; }
     double getCurrentPosition() const noexcept { return currentPos; }
+
+    void setViewStartTime (double start)
+    {
+        if (! canScrollHorizontally())
+            return;
+
+        const double range = viewEnd - viewStart;
+        viewStart = juce::jlimit (0.0, juce::jmax (0.0, totalLen - range), start);
+        viewEnd   = viewStart + range;
+        repaint();
+
+        if (onViewRangeChanged)
+            onViewRangeChanged();
+    }
 
     /** True while pointer is down on waveform (scrub / marker / cut-select drag). */
     bool isPointerInteractionActive() const noexcept { return pointerInteractionActive; }
@@ -461,6 +477,15 @@ public:
         trimEditedDuringDrag = false;
         cutSelDragging = false;
 
+        if (dragMode == 4)
+        {
+            const auto waveArea = getWaveformBounds();
+            const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
+            pendingClickTime = juce::jlimit (0.0, totalLen,
+                                             viewStart + (double) ratio * (viewEnd - viewStart));
+            return;
+        }
+
         if (dragMode == 3)
         {
             const auto waveArea = getWaveformBounds();
@@ -483,6 +508,17 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override
     {
         if (thumbnail == nullptr || totalLen <= 0.0) return;
+
+        if (dragMode == 4 && e.getDistanceFromDragStart() >= 4)
+        {
+            dragMode = 3;
+            const auto waveArea = getWaveformBounds();
+            const float ratio = showcontrol::gfx::ratioFromMouseX (e.getMouseDownX(), waveArea);
+            cutSelAnchor = viewStart + (double) ratio * (viewEnd - viewStart);
+            cutSelStart = cutSelEnd = cutSelAnchor;
+            cutSelDragging = true;
+        }
+
         const auto waveArea = getWaveformBounds();
         const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
         double t = viewStart + (double) ratio * (viewEnd - viewStart);
@@ -526,7 +562,16 @@ public:
         const bool wasTrimDrag = (dragMode == 1 || dragMode == 2);
         const bool wasCutSelect = (dragMode == 3);
 
-        if (wasCutSelect && ! cutSelDragging && thumbnail != nullptr && totalLen > 0.0)
+        if (dragMode == 4)
+        {
+            currentPos = pendingClickTime;
+
+            if (onPlayheadScrubbed)
+                onPlayheadScrubbed (currentPos);
+
+            repaint();
+        }
+        else if (wasCutSelect && ! cutSelDragging && thumbnail != nullptr && totalLen > 0.0)
         {
             const auto waveArea = getWaveformBounds();
             const float ratio = showcontrol::gfx::ratioFromMouseX (e.x, waveArea);
@@ -553,7 +598,7 @@ public:
 
         if (mode == 1 || mode == 2)
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
-        else if (mode == 3)
+        else if (mode == 3 || mode == 4)
             setMouseCursor (juce::MouseCursor::CrosshairCursor);
         else
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
@@ -629,7 +674,14 @@ private:
         if (! waveArea.contains (mousePos))
             return 0;
 
-        if (allowCutSelect) return 3;
+        if (cutSelectionEnabled)
+        {
+            if (allowCutSelect)
+                return 3;
+
+            return 4;
+        }
+
         return 0;
     }
     juce::AudioThumbnail* thumbnail = nullptr; double currentPos = 0.0, totalLen = 0.0, trimStart = 0.0, trimEnd = 0.0; bool isDark = true; int dragMode = 0;
@@ -641,6 +693,7 @@ private:
     bool cutSelectionEnabled = false;
     bool cutSelDragging = false;
     double cutSelStart = -1.0, cutSelEnd = -1.0, cutSelAnchor = 0.0;
+    double pendingClickTime = 0.0;
     juce::Colour itemInk { showcontrol::colours::tagColourAt (7) };
 };
 
@@ -649,6 +702,30 @@ class InspectorStyle : public juce::LookAndFeel_V4
 {
 public:
     void setDarkMode (bool dark) { isDarkMode = dark; }
+
+    void setPopupMenuColours (juce::Colour bg, juce::Colour text,
+                                juce::Colour hiBg, juce::Colour hiText) noexcept
+    {
+        popupMenuBg     = bg;
+        popupMenuText   = text;
+        popupMenuHiBg   = hiBg;
+        popupMenuHiText = hiText;
+    }
+
+    juce::Colour findColour (int colourId) const
+    {
+        switch (colourId)
+        {
+            case juce::PopupMenu::backgroundColourId:            return popupMenuBg;
+            case juce::PopupMenu::textColourId:                  return popupMenuText;
+            case juce::PopupMenu::highlightedBackgroundColourId: return popupMenuHiBg;
+            case juce::PopupMenu::highlightedTextColourId:       return popupMenuHiText;
+            case juce::PopupMenu::headerTextColourId:            return popupMenuText.withAlpha (0.55f);
+            default: break;
+        }
+
+        return LookAndFeel_V4::findColour (colourId);
+    }
 
     void setItemAccentColour (juce::Colour c) noexcept { itemAccent = c; }
 
@@ -735,23 +812,160 @@ public:
     void drawComboBox (juce::Graphics& g, int width, int height, bool, int, int, int, int, juce::ComboBox& box) override
     {
         const auto bounds = juce::Rectangle<float> (0.0f, 0.0f, (float) width, (float) height);
-        const bool highlighted = box.isMouseOver();
-        g.setColour (showcontrol::ui::comboBoxBackground (isDarkMode, highlighted));
-        g.fillRoundedRectangle (bounds, 4.0f);
-        g.setColour (box.findColour (juce::ComboBox::outlineColourId));
-        g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
+        const bool highlighted = box.isMouseOver() || box.isPopupActive();
+        const auto pal = ShowTheme::get (isDarkMode);
 
-        const auto textArea = bounds.reduced (6.0f, 2.0f).withTrimmedRight (16.0f);
+        g.setColour (box.findColour (juce::ComboBox::backgroundColourId));
+        g.fillRoundedRectangle (bounds, 4.0f);
+
+        g.setColour (box.findColour (juce::ComboBox::outlineColourId));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, 1.0f);
+
+        if (box.isPopupActive())
+        {
+            g.setColour (pal.accent.withAlpha (isDarkMode ? 0.35f : 0.22f));
+            g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, 1.5f);
+        }
+
+        const auto textArea = bounds.reduced (8.0f, 2.0f).withTrimmedRight (18.0f);
         g.setColour (box.findColour (juce::ComboBox::textColourId));
         g.setFont (showcontrol::inspector::paramLabelFont());
         g.drawText (box.getText(), textArea.toNearestInt(), juce::Justification::centredLeft, true);
 
         juce::Path p;
-        p.addTriangle ((float) width - 16.0f, (float) height * 0.5f - 2.0f,
+        p.addTriangle ((float) width - 16.0f, (float) height * 0.5f - 2.5f,
                        (float) width - 20.0f, (float) height * 0.5f + 3.0f,
                        (float) width - 12.0f, (float) height * 0.5f + 3.0f);
         g.setColour (box.findColour (juce::ComboBox::arrowColourId));
         g.fillPath (p);
+    }
+
+    juce::Font getPopupMenuFont() override
+    {
+        return showcontrol::ui::popupMenuFont();
+    }
+
+    int getPopupMenuBorderSizeWithOptions (const juce::PopupMenu::Options&) override
+    {
+        return 6;
+    }
+
+    void drawPopupMenuBackgroundWithOptions (juce::Graphics& g, int width, int height,
+                                             const juce::PopupMenu::Options&) override
+    {
+        const auto pal = ShowTheme::get (isDarkMode);
+        constexpr float cornerRadius = 8.0f;
+
+        g.setColour (pal.borderSubtle);
+        g.fillRoundedRectangle (0.5f, 0.5f, (float) width - 1.0f, (float) height - 1.0f, cornerRadius);
+
+        g.setColour (findColour (juce::PopupMenu::backgroundColourId));
+        g.fillRoundedRectangle (1.0f, 1.0f, (float) width - 2.0f, (float) height - 2.0f, cornerRadius - 1.0f);
+    }
+
+    /** Fade cuộn 2 đầu list — dùng đúng màu popup Inspector, tránh band đen mặc định JUCE. */
+    void drawPopupMenuUpDownArrowWithOptions (juce::Graphics& g, int width, int height,
+                                              bool isScrollUpArrow,
+                                              const juce::PopupMenu::Options&) override
+    {
+        g.setGradientFill (juce::ColourGradient (popupMenuBg, 0.0f, (float) height * 0.5f,
+                                                 popupMenuBg.withAlpha (0.0f),
+                                                 0.0f, isScrollUpArrow ? (float) height : 0.0f,
+                                                 false));
+        g.fillRect (1, 1, width - 2, height - 2);
+
+        const float hw = (float) width * 0.5f;
+        const float arrowW = (float) height * 0.28f;
+        const float y1 = (float) height * (isScrollUpArrow ? 0.58f : 0.32f);
+        const float y2 = (float) height * (isScrollUpArrow ? 0.32f : 0.58f);
+
+        juce::Path p;
+        p.addTriangle (hw - arrowW, y1, hw + arrowW, y1, hw, y2);
+        g.setColour (popupMenuText.withAlpha (0.42f));
+        g.fillPath (p);
+    }
+
+    void getIdealPopupMenuSectionHeaderSizeWithOptions (const juce::String& text,
+                                                        int standardMenuItemHeight,
+                                                        int& idealWidth, int& idealHeight,
+                                                        const juce::PopupMenu::Options& options) override
+    {
+        getIdealPopupMenuItemSizeWithOptions (text, false, standardMenuItemHeight,
+                                              idealWidth, idealHeight, options);
+        idealHeight = juce::jmax (22, juce::roundToInt (getPopupMenuFont().getHeight()) + 4);
+    }
+
+    void drawPopupMenuSectionHeaderWithOptions (juce::Graphics& g, const juce::Rectangle<int>& area,
+                                                const juce::String& sectionName,
+                                                const juce::PopupMenu::Options&) override
+    {
+        auto r = area.reduced (10, 2);
+
+        g.setColour (popupMenuText.withAlpha (0.50f));
+        g.setFont (getPopupMenuFont().boldened());
+        g.drawFittedText (sectionName, r, juce::Justification::centredLeft, 1);
+
+        g.setColour (popupMenuText.withAlpha (0.16f));
+        g.fillRect (r.getX(), area.getBottom() - 3, r.getWidth(), 1);
+    }
+
+    void drawPopupMenuItem (juce::Graphics& g, const juce::Rectangle<int>& area,
+                            bool isSeparator, bool isActive, bool isHighlighted, bool isTicked, bool hasSubMenu,
+                            const juce::String& text, const juce::String& shortcutKeyText,
+                            const juce::Drawable* icon, const juce::Colour* textColour) override
+    {
+        juce::ignoreUnused (icon, shortcutKeyText, hasSubMenu);
+
+        if (isSeparator)
+        {
+            auto r = area.reduced (12, 0);
+            r.removeFromTop (r.getHeight() / 2);
+            g.setColour (findColour (juce::PopupMenu::textColourId).withAlpha (0.18f));
+            g.fillRect (r.removeFromTop (1));
+            return;
+        }
+
+        const auto pal = ShowTheme::get (isDarkMode);
+        auto textColourToUse = (textColour != nullptr ? *textColour
+                                                      : findColour (juce::PopupMenu::textColourId));
+        auto r = area.reduced (5, 2);
+
+        if (isHighlighted && isActive)
+        {
+            g.setColour (findColour (juce::PopupMenu::highlightedBackgroundColourId));
+            g.fillRoundedRectangle (r.toFloat(), 5.0f);
+            textColourToUse = findColour (juce::PopupMenu::highlightedTextColourId);
+        }
+
+        g.setColour (textColourToUse.withMultipliedAlpha (isActive ? 1.0f : 0.42f));
+        g.setFont (getPopupMenuFont());
+
+        auto content = r.reduced (8, 0);
+
+        if (isTicked)
+        {
+            const auto tickArea = content.removeFromLeft (18).toFloat().reduced (1.0f);
+            const auto tickCol = (isHighlighted && isActive) ? pal.accentOnDark : pal.accent;
+            showcontrol::icons::paintCheckmark (g, tickArea, tickCol);
+            content.removeFromLeft (4);
+        }
+
+        g.drawFittedText (text, content, juce::Justification::centredLeft, 1);
+    }
+
+    void getIdealPopupMenuItemSize (const juce::String& text, bool isSeparator, int standardMenuItemHeight,
+                                    int& idealWidth, int& idealHeight) override
+    {
+        if (isSeparator)
+        {
+            idealWidth = 160;
+            idealHeight = standardMenuItemHeight > 0 ? standardMenuItemHeight / 2 : 8;
+            return;
+        }
+
+        const auto font = getPopupMenuFont();
+        idealWidth = juce::GlyphArrangement::getStringWidthInt (font, text) + 52;
+        idealHeight = juce::jmax (standardMenuItemHeight, juce::roundToInt (font.getHeight()) + 10);
     }
 
     /** Tránh vẽ chữ 2 lần (Label mặc định của ComboBox + drawComboBox). */
@@ -1016,6 +1230,10 @@ public:
 private:
     bool isDarkMode = true;
     juce::Colour itemAccent { showcontrol::colours::tagColourAt (7) };
+    juce::Colour popupMenuBg     { juce::Colours::white };
+    juce::Colour popupMenuText   { juce::Colours::black };
+    juce::Colour popupMenuHiBg   { juce::Colours::lightblue.withAlpha (0.25f) };
+    juce::Colour popupMenuHiText { juce::Colours::black };
 };
 
 //==============================================================================
@@ -1052,9 +1270,15 @@ public:
         largeWaveform.setCutSelectionEnabled (true);
 
         addAndMakeVisible (hScrollBar);
-        hScrollBar.setSingleStepSize (0.015);
+        hScrollBar.setSingleStepSize (0.01);
         hScrollBar.setAutoHide (false);
         hScrollBar.addListener (this);
+        {
+            const auto pal = ShowTheme::get (isDark);
+            hScrollBar.setColour (juce::ScrollBar::backgroundColourId, pal.borderSubtle.withAlpha (0.45f));
+            hScrollBar.setColour (juce::ScrollBar::trackColourId, pal.borderSubtle.withAlpha (0.25f));
+            hScrollBar.setColour (juce::ScrollBar::thumbColourId, pal.textSecondary.withAlpha (0.72f));
+        }
         largeWaveform.onViewRangeChanged = [this]
         {
             syncWaveformScrollBar();
@@ -1087,8 +1311,8 @@ public:
 
         addAndMakeVisible (infoLabel);
         infoLabel.setText (showcontrol::localization::tr (
-                               u8"IN/OUT: kéo marker vàng/đỏ. Playhead: click/kéo trên waveform. "
-                               u8"Chọn vùng cắt: giữ Shift + kéo. Zoom: lăn chuột (thanh ngang khi zoom)."),
+                               u8"IN/OUT: kéo marker vàng/đỏ. Playhead: click trên waveform. "
+                               u8"Chọn vùng cắt: kéo trên waveform (Shift = chọn ngay). Zoom: lăn chuột (thanh ngang khi zoom)."),
                            juce::dontSendNotification);
         infoLabel.setFont (showcontrol::trimEditor::infoFont());
         const auto pal = ShowTheme::get (isDark);
@@ -1181,9 +1405,9 @@ public:
             return;
 
         const double total = juce::jmax (0.001, largeWaveform.getTotalLength());
-        const double proportion = juce::jlimit (0.05, 1.0, largeWaveform.getVisibleDuration() / total);
-        const double maxStart = 1.0 - proportion;
-        largeWaveform.setViewScrollRatio (maxStart > 0.0 ? newRangeStart / maxStart : 0.0);
+        const double visible = largeWaveform.getVisibleDuration();
+        largeWaveform.setViewStartTime (newRangeStart);
+        juce::ignoreUnused (total, visible);
     }
 
     void timerCallback() override
@@ -1233,7 +1457,7 @@ public:
 
         auto b = bounds.reduced (20);
         const int footerH = 108;
-        const int scrollH = (largeWaveform.canScrollHorizontally() || hScrollBar.isVisible()) ? 16 : 0;
+        const int scrollH = largeWaveform.canScrollHorizontally() ? 14 : 0;
         auto footer = b.removeFromBottom (footerH);
 
         if (scrollH > 0)
@@ -1291,17 +1515,15 @@ private:
     {
         updatingScrollFromWaveform = true;
 
-        if (largeWaveform.canScrollHorizontally())
+        const double total = juce::jmax (0.001, largeWaveform.getTotalLength());
+        const double visible = largeWaveform.getVisibleDuration();
+        const double maxScroll = juce::jmax (0.0, total - visible);
+
+        if (maxScroll > 0.01)
         {
             hScrollBar.setVisible (true);
-
-            const double total = juce::jmax (0.001, largeWaveform.getTotalLength());
-            const double proportion = juce::jlimit (0.05, 1.0, largeWaveform.getVisibleDuration() / total);
-            const double maxStart = 1.0 - proportion;
-            const double start = largeWaveform.getViewScrollRatio() * maxStart;
-
-            hScrollBar.setRangeLimits (0.0, maxStart);
-            hScrollBar.setCurrentRange (start, proportion, juce::dontSendNotification);
+            hScrollBar.setRangeLimits (0.0, maxScroll);
+            hScrollBar.setCurrentRange (largeWaveform.getViewStartTime(), visible, juce::dontSendNotification);
         }
         else
         {
@@ -1310,7 +1532,7 @@ private:
 
         updatingScrollFromWaveform = false;
 
-        if (largeWaveform.canScrollHorizontally())
+        if (hScrollBar.isVisible())
             hScrollBar.toFront (false);
     }
 
@@ -1478,9 +1700,45 @@ private:
 };
 
 //==============================================================================
+/** Nút PFL Preview (tai nghe) — chỉ hiện khi có Out độc lập. */
+class InspectorPflButton : public juce::Button
+{
+public:
+    InspectorPflButton() : juce::Button ({}) {}
+
+    void paintButton (juce::Graphics& g,
+                      bool shouldDrawButtonAsHighlighted,
+                      bool shouldDrawButtonAsDown) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced (3.0f);
+
+        if (shouldDrawButtonAsDown)
+            bounds = bounds.translated (0.0f, 0.5f);
+
+        juce::Colour iconCol = findColour (juce::TextButton::textColourOffId);
+
+        if (! isEnabled())
+            iconCol = iconCol.withAlpha (0.35f);
+        else if (getToggleState())
+            iconCol = findColour (ShowControlLookAndFeel::accentColourId);
+        else if (shouldDrawButtonAsHighlighted)
+            iconCol = iconCol.withAlpha (0.92f);
+
+        if (getToggleState() || shouldDrawButtonAsHighlighted)
+        {
+            g.setColour (iconCol.withAlpha (0.14f));
+            g.fillRoundedRectangle (bounds.expanded (1.0f), 5.0f);
+        }
+
+        showcontrol::icons::paintHeadphonesIcon (g, bounds, iconCol);
+    }
+};
+
+//==============================================================================
 class InspectorPanel : public juce::Component,
                        public juce::Timer,
-                       private juce::Label::Listener
+                       private juce::Label::Listener,
+                       private juce::ChangeListener
 {
 public:
     InspectorPanel()
@@ -1767,7 +2025,7 @@ public:
 
         // Output Bus selector — điều hướng tín hiệu pad ra cổng output riêng
         inspectorContent.addAndMakeVisible (outputBusLabel);
-        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
+        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra (Routing):"), juce::dontSendNotification);
         outputBusLabel.setFont (showcontrol::inspector::paramLabelFont());
         outputBusLabel.setJustificationType (juce::Justification::centredLeft);
 
@@ -1779,14 +2037,45 @@ public:
             if (currentPad == nullptr)
                 return;
 
-            const int bus = juce::jlimit (0, showcontrol::routing::kInspectorBusCount - 1,
+            const int route = juce::jlimit (0, showcontrol::routing::kRouteCount - 1,
                                           outputBusCombo.getSelectedItemIndex());
-            currentPad->setOutputBus (bus);
+            currentPad->setOutputBus (route);
             if (onOutputBusChanged)
-                onOutputBusChanged (bus);
+                onOutputBusChanged (route);
             if (onProjectEdited)
                 onProjectEdited();
         };
+
+        inspectorContent.addAndMakeVisible (pflPreviewBtn);
+        pflPreviewBtn.setVisible (false);
+        pflPreviewBtn.setClickingTogglesState (true);
+        pflPreviewBtn.onClick = [this]
+        {
+            if (onPflPreviewRequested != nullptr && currentPad != nullptr)
+                onPflPreviewRequested (currentPad);
+        };
+
+        inspectorContent.addAndMakeVisible (fxLabel);
+        fxLabel.setText (showcontrol::localization::tr (u8"Audio FX:"), juce::dontSendNotification);
+        fxLabel.setFont (showcontrol::inspector::paramLabelFont());
+        fxLabel.setJustificationType (juce::Justification::centredLeft);
+
+        fxComboBox.setLookAndFeel (&inspectorStyle);
+        inspectorContent.addAndMakeVisible (fxComboBox);
+        fxComboBox.onChange = [this] { handleFxComboChanged(); };
+
+        fxEditButton.setLookAndFeel (&inspectorStyle);
+        fxEditButton.setButtonText (showcontrol::localization::tr (u8"Edit"));
+        fxEditButton.setEnabled (false);
+        fxEditButton.onClick = [this]
+        {
+            if (currentPad != nullptr)
+                currentPad->openAudioFxEditor (this);
+        };
+        inspectorContent.addAndMakeVisible (fxEditButton);
+
+        showcontrol::plugins::ShowPluginHost::shared().addChangeListener (this);
+        populateFxComboBox();
 
         assignInspectorTooltips();
 
@@ -1807,6 +2096,10 @@ public:
         hotkeyScopeActiveBtn.setLookAndFeel (nullptr);
         hotkeyScopeGlobalBtn.setLookAndFeel (nullptr);
         outputBusCombo.setLookAndFeel (nullptr);
+        fxComboBox.setLookAndFeel (nullptr);
+        fxEditButton.setLookAndFeel (nullptr);
+        showcontrol::plugins::ShowPluginHost::shared().removeChangeListener (this);
+        pflPreviewBtn.setLookAndFeel (nullptr);
         fadeInSlider.setLookAndFeel (nullptr);
         fadeOutSlider.setLookAndFeel (nullptr);
         volumeSlider.setLookAndFeel (nullptr);
@@ -1831,6 +2124,7 @@ public:
     std::function<void (SoundPad*)> onPadLoopChanged;
     /** Gọi khi user đổi output bus của pad — MainComponent lưu project. */
     std::function<void(int busIndex)> onOutputBusChanged;
+    std::function<void(SoundPad*)> onPflPreviewRequested;
 
     /** Cắt & xóa đoạn âm thanh trong Trim Editor — MainComponent xử lý undo. */
     std::function<void (SoundPad*, double, double, std::function<void (bool)>)> onPadAudioCutRequested;
@@ -1883,14 +2177,44 @@ public:
         rebuildOutputBusCombo();
     }
 
+    void setPflPreviewAvailable (bool available) noexcept
+    {
+        if (pflPreviewAvailable == available)
+            return;
+
+        pflPreviewAvailable = available;
+        pflPreviewBtn.setVisible (available);
+        refreshPflPreviewButtonState();
+        resized();
+    }
+
+    void refreshPflPreviewButtonState()
+    {
+        if (! pflPreviewAvailable)
+        {
+            pflPreviewBtn.setToggleState (false, juce::dontSendNotification);
+            return;
+        }
+
+        const bool active = currentPad != nullptr
+            && currentPad->isPflPreviewActive()
+            && currentPad->isTransportActive();
+
+        pflPreviewBtn.setEnabled (currentPad != nullptr && currentPad->hasAudioFile());
+        pflPreviewBtn.setToggleState (active, juce::dontSendNotification);
+    }
+
     void refreshLocalizedText()
     {
         equalizerBtn.setButtonText (showcontrol::localization::tr (u8"Equalizer"));
         normalizeToggle.setButtonText (showcontrol::localization::tr (u8"Đồng bộ âm lượng"));
         normalizeAdvancedBtn.setButtonText (showcontrol::localization::tr (u8"Cài đặt nâng cao..."));
         volumeLabel.setText (showcontrol::localization::tr (u8"Âm lượng:"), juce::dontSendNotification);
-        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra Audio (Bus):"), juce::dontSendNotification);
+        outputBusLabel.setText (showcontrol::localization::tr (u8"Đầu ra (Routing):"), juce::dontSendNotification);
+        fxLabel.setText (showcontrol::localization::tr (u8"Audio FX:"), juce::dontSendNotification);
+        fxEditButton.setButtonText (showcontrol::localization::tr (u8"Edit"));
         loopToggle.setButtonText (getLoopToggleLabel());
+        populateFxComboBox();
         assignInspectorTooltips();
         rebuildOutputBusCombo();
         repaint();
@@ -1956,23 +2280,33 @@ public:
         volumeLabel.setColour (juce::Label::textColourId, mutedCol);
         normalizeToggle.setColour (juce::ToggleButton::textColourId, textCol);
         outputBusLabel.setColour (juce::Label::textColourId, mutedCol);
+        fxLabel.setColour (juce::Label::textColourId, mutedCol);
+        pflPreviewBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+        pflPreviewBtn.setColour (juce::TextButton::textColourOffId, textCol);
+        pflPreviewBtn.setColour (ShowControlLookAndFeel::accentColourId, pal.accent);
         sectionDivider.setDarkMode (isDark);
         updateRmsLabelAppearance();
 
         const auto comboBg = editorBg;
         const auto comboText = textCol;
-        for (auto* combo : { &outputBusCombo })
+        const auto popupBg   = isDark ? pal.panelElevated : juce::Colours::white;
+        const auto popupHiBg = isDark ? pal.rowSelected : pal.accent.withAlpha (0.16f);
+        const auto popupHiTx = isDark ? juce::Colours::white : pal.textPrimary;
+
+        for (auto* combo : { &outputBusCombo, &fxComboBox })
         {
             combo->setColour (juce::ComboBox::backgroundColourId, comboBg);
             combo->setColour (juce::ComboBox::textColourId, comboText);
             combo->setColour (juce::ComboBox::outlineColourId, pal.border);
-            combo->setColour (juce::ComboBox::arrowColourId, mutedCol);
-            combo->setColour (juce::PopupMenu::backgroundColourId, comboBg);
+            combo->setColour (juce::ComboBox::arrowColourId, mutedCol.withAlpha (0.85f));
+            combo->setColour (juce::PopupMenu::backgroundColourId, popupBg);
             combo->setColour (juce::PopupMenu::textColourId, comboText);
-            combo->setColour (juce::PopupMenu::highlightedBackgroundColourId,
-                               isDark ? pal.rowSelected : getItemAccentColour().withAlpha (0.14f));
-            combo->setColour (juce::PopupMenu::highlightedTextColourId, textCol);
+            combo->setColour (juce::PopupMenu::highlightedBackgroundColourId, popupHiBg);
+            combo->setColour (juce::PopupMenu::highlightedTextColourId, popupHiTx);
         }
+
+        inspectorStyle.setPopupMenuColours (popupBg, comboText, popupHiBg, popupHiTx);
+
         fadeInLabel.setColour (juce::Label::textColourId, mutedCol);
         fadeOutLabel.setColour (juce::Label::textColourId, mutedCol);
 
@@ -2041,6 +2375,7 @@ public:
 
             syncInspectorColourFromPad();
             applyItemAccentColours();
+            refreshPflPreviewButtonState();
             return;
         }
 
@@ -2053,8 +2388,13 @@ public:
         {
             nameValueLabel.setText (currentPad->getPadName(), juce::dontSendNotification);
             volumeSlider.setValue (currentPad->getOutputGain(), juce::dontSendNotification);
+
+            if (currentPad->getOutputBus() < 0
+                || currentPad->getOutputBus() >= showcontrol::routing::kRouteCount)
+                currentPad->setOutputBus (showcontrol::routing::kMasterRouteId);
+
             outputBusCombo.setSelectedItemIndex (
-                juce::jlimit (0, showcontrol::routing::kInspectorBusCount - 1, currentPad->getOutputBus()),
+                juce::jlimit (0, showcontrol::routing::kRouteCount - 1, currentPad->getOutputBus()),
                 juce::dontSendNotification);
             loopToggle.setButtonText (getLoopToggleLabel());
             loopToggle.setToggleState (currentPad->isLooping(), juce::dontSendNotification);
@@ -2074,6 +2414,7 @@ public:
             fadeOutSlider.setValue (currentPad->getFadeOutMs(), juce::dontSendNotification);
             waveformDisplay.setFadeRegions (currentPad->getFadeInMs(), currentPad->getFadeOutMs(), currentPad->getEffectiveLength());
             syncDspControlsFromPad();
+            syncFxComboFromPad();
             currentPad->scheduleDeferredInspectorLoads();
             applyItemAccentColours();
         }
@@ -2086,11 +2427,15 @@ public:
             waveformDisplay.setThumbnail (nullptr);
             updateRmsLabelAppearance();
             updateFileInfoLabels ({});
+            fxComboBox.setSelectedId (1, juce::dontSendNotification);
+            updateFxEditButtonState();
             applyItemAccentColours();
         }
 
         if (onActivePadChanged)
             onActivePadChanged();
+
+        refreshPflPreviewButtonState();
     }
 
     void refreshTagColourUi()
@@ -2451,6 +2796,8 @@ public:
             {
                 shortCircuitTransportVisuals();
             }
+
+            refreshPflPreviewButtonState();
         }
     }
 
@@ -2488,6 +2835,7 @@ public:
         static constexpr int rowHMeta = 14;
         static constexpr int rowHLoopEq = 32;
         static constexpr int rowHBus = 28;
+        static constexpr int rowHFx = 34;
         static constexpr int rowHBusLabel = 110;
         static constexpr int rowHVolume = 28;
         static constexpr int rowHBtn = 28;
@@ -2573,14 +2921,36 @@ public:
 
         skipGap();
 
-        // --- Bus: nhãn + ComboBox cùng một hàng ngang ---
+        // --- Bus: nhãn + ComboBox + PFL (tai nghe) ---
         {
             auto busRow = area.removeFromTop (rowHBus);
             const int busLabelW = juce::jmin (busRow.getWidth() - 60,
                                               juce::jmax (rowHBusLabel,
                                                           measureInspectorLabelWidth (outputBusLabel, busRow.getWidth() / 2)));
             outputBusLabel.setBounds (busRow.removeFromLeft (busLabelW));
+
+            if (pflPreviewAvailable)
+            {
+                busRow.removeFromLeft (4);
+                pflPreviewBtn.setBounds (busRow.removeFromRight (30).reduced (0, 2));
+            }
+
             outputBusCombo.setBounds (busRow);
+        }
+
+        skipGap();
+
+        // --- Audio FX (VST3 / AU) ---
+        {
+            auto fxRow = area.removeFromTop (rowHFx);
+            const int editW = 56;
+            const int fxLabelW = juce::jmin (fxRow.getWidth() - editW - 8,
+                                             juce::jmax (rowHBusLabel,
+                                                         measureInspectorLabelWidth (fxLabel, fxRow.getWidth() / 2)));
+            fxLabel.setBounds (fxRow.removeFromLeft (fxLabelW));
+            fxRow.removeFromLeft (6);
+            fxEditButton.setBounds (fxRow.removeFromRight (editW).reduced (0, 2));
+            fxComboBox.setBounds (fxRow.reduced (0, 2));
         }
 
         skipGap();
@@ -2689,22 +3059,23 @@ public:
 
     void rebuildOutputBusCombo()
     {
-        const int prevBus = currentPad != nullptr
-            ? juce::jlimit (0, showcontrol::routing::kInspectorBusCount - 1, currentPad->getOutputBus())
+        const int prevRoute = currentPad != nullptr
+            ? juce::jlimit (0, showcontrol::routing::kRouteCount - 1, currentPad->getOutputBus())
             : outputBusCombo.getSelectedItemIndex();
 
         outputBusCombo.clear (juce::dontSendNotification);
 
-        for (int i = 0; i < showcontrol::routing::kInspectorBusCount; ++i)
+        for (int i = 0; i < showcontrol::routing::kRouteCount; ++i)
         {
-            const juce::String label = (i < cachedInspectorBusNames.size())
+            const juce::String label = (i < cachedInspectorBusNames.size() && cachedInspectorBusNames[i].isNotEmpty())
                 ? cachedInspectorBusNames[i]
                 : showcontrol::routing::getBusDisplayName (i);
+
             outputBusCombo.addItem (label, i + 1);
         }
 
         outputBusCombo.setSelectedItemIndex (
-            juce::jlimit (0, juce::jmax (0, outputBusCombo.getNumItems() - 1), prevBus),
+            juce::jlimit (0, juce::jmax (0, outputBusCombo.getNumItems() - 1), prevRoute),
             juce::dontSendNotification);
     }
 
@@ -2723,8 +3094,181 @@ public:
         fadeOutSlider.setTooltip (showcontrol::localization::tr (
             u8"Thời gian lịm tiếng to đến nhỏ khi chủ động dừng phát nhạc (tính bằng mili-giây)."));
         outputBusCombo.setTooltip (showcontrol::localization::tr (
-            u8"Định tuyến đầu ra stereo của pad/track ra Main FOH hoặc AUX trên soundcard/Dante. "
-            u8"Nếu thiết bị không đủ kênh, tự động fallback về Main FOH (Ch 1-2)."));
+            u8"Chọn đường ra GO đã khai báo trong Cài đặt Audio → Định tuyến Output."));
+        pflPreviewBtn.setTooltip (showcontrol::localization::tr (
+            u8"PFL Preview: nghe thử qua bus monitor độc lập — không đổi route GO, "
+            u8"không ảnh hưởng pad đang phát FOH (cần soundcard nhiều Out)."));
+        fxComboBox.setTooltip (showcontrol::localization::tr (
+            u8"Chọn hiệu ứng nhúng sẵn ShowCue hoặc plugin VST3/AU trên máy."));
+        fxEditButton.setTooltip (showcontrol::localization::tr (
+            u8"Mở giao diện hiệu ứng nhúng sẵn hoặc native GUI của plugin."));
+    }
+
+    void changeListenerCallback (juce::ChangeBroadcaster*) override
+    {
+        populateFxComboBox();
+        syncFxComboFromPad();
+    }
+
+    void populateFxComboBox()
+    {
+        const int prevId = fxComboBox.getSelectedId();
+        fxComboBox.clear (juce::dontSendNotification);
+        fxComboBox.addItem (showcontrol::localization::tr (u8"[ Không dùng Audio FX ]"), 1);
+
+        fxComboBox.addSectionHeading (showcontrol::localization::tr (u8"[ Bộ lọc nhúng sẵn ShowCue ]"));
+        fxComboBox.addItem (showcontrol::localization::tr (u8"Stock EQ (3-Band)"),
+                            showcontrol::plugins::kFxComboIdStockEq);
+        fxComboBox.addItem (showcontrol::localization::tr (u8"Stock Limiter (Bảo vệ loa)"),
+                            showcontrol::plugins::kFxComboIdStockLimiter);
+
+        const auto& types = showcontrol::plugins::ShowPluginHost::shared().getKnownPluginList().getTypes();
+        int thirdPartyCount = 0;
+
+        for (const auto& desc : types)
+        {
+            if (desc.isInstrument)
+                continue;
+
+            ++thirdPartyCount;
+        }
+
+        if (thirdPartyCount > 0)
+        {
+            fxComboBox.addSectionHeading (showcontrol::localization::tr (u8"[ Plugin Hệ thống phát hiện ]"));
+
+            int pluginIndex = 0;
+            for (const auto& desc : types)
+            {
+                if (desc.isInstrument)
+                    continue;
+
+                fxComboBox.addItem (desc.name + " (" + desc.manufacturerName + ")",
+                                    showcontrol::plugins::thirdPartyComboIdForIndex (pluginIndex++));
+            }
+        }
+
+        fxComboBox.setSelectedId (prevId > 0 ? prevId : 1, juce::dontSendNotification);
+        updateFxEditButtonState();
+    }
+
+    void syncFxComboFromPad()
+    {
+        if (currentPad == nullptr)
+        {
+            fxComboBox.setSelectedId (1, juce::dontSendNotification);
+            updateFxEditButtonState();
+            return;
+        }
+
+        const auto stored = currentPad->getAudioFxDescription();
+
+        if (stored.name.isEmpty())
+        {
+            fxComboBox.setSelectedId (1, juce::dontSendNotification);
+            updateFxEditButtonState();
+            return;
+        }
+
+        int matchId = 1;
+
+        if (stored.fileOrIdentifier == showcontrol::plugins::kStockEqIdentifier)
+            matchId = showcontrol::plugins::kFxComboIdStockEq;
+        else if (stored.fileOrIdentifier == showcontrol::plugins::kStockLimiterIdentifier)
+            matchId = showcontrol::plugins::kFxComboIdStockLimiter;
+        else
+        {
+            const auto& types = showcontrol::plugins::ShowPluginHost::shared().getKnownPluginList().getTypes();
+            int pluginIndex = 0;
+
+            for (int i = 0; i < types.size(); ++i)
+            {
+                if (types.getReference (i).isInstrument)
+                    continue;
+
+                if (types.getReference (i).fileOrIdentifier == stored.fileOrIdentifier
+                    && types.getReference (i).name == stored.name)
+                {
+                    matchId = showcontrol::plugins::thirdPartyComboIdForIndex (pluginIndex);
+                    break;
+                }
+
+                ++pluginIndex;
+            }
+        }
+
+        fxComboBox.setSelectedId (matchId, juce::dontSendNotification);
+
+        if (! currentPad->hasActiveAudioFx()
+            && ! currentPad->isAudioFxLoading()
+            && stored.name.isNotEmpty())
+            currentPad->applyAudioFxDescription (stored);
+
+        updateFxEditButtonState();
+    }
+
+    void handleFxComboChanged()
+    {
+        if (currentPad == nullptr)
+            return;
+
+        const int id = fxComboBox.getSelectedId();
+        const auto persistProject = [this] (bool success)
+        {
+            updateFxEditButtonState();
+
+            if (success && onProjectEdited)
+                onProjectEdited();
+        };
+
+        if (id <= 1)
+        {
+            currentPad->clearAudioFx ([this]
+            {
+                updateFxEditButtonState();
+
+                if (onProjectEdited)
+                    onProjectEdited();
+            });
+        }
+        else if (id == showcontrol::plugins::kFxComboIdStockEq)
+        {
+            currentPad->applyAudioFxDescription (showcontrol::plugins::makeStockEqDescription(), persistProject);
+        }
+        else if (id == showcontrol::plugins::kFxComboIdStockLimiter)
+        {
+            currentPad->applyAudioFxDescription (showcontrol::plugins::makeStockLimiterDescription(), persistProject);
+        }
+        else if (showcontrol::plugins::isThirdPartyComboId (id))
+        {
+            const auto& types = showcontrol::plugins::ShowPluginHost::shared().getKnownPluginList().getTypes();
+            const int targetIndex = showcontrol::plugins::indexFromThirdPartyComboId (id);
+            int pluginIndex = 0;
+
+            for (const auto& desc : types)
+            {
+                if (desc.isInstrument)
+                    continue;
+
+                if (pluginIndex == targetIndex)
+                {
+                    currentPad->applyAudioFxDescription (desc, persistProject);
+                    break;
+                }
+
+                ++pluginIndex;
+            }
+        }
+
+        updateFxEditButtonState();
+    }
+
+    void updateFxEditButtonState()
+    {
+        const bool loading = currentPad != nullptr && currentPad->isAudioFxLoading();
+        fxEditButton.setEnabled (! loading
+                                 && currentPad != nullptr
+                                 && currentPad->hasActiveAudioFx());
     }
 
     juce::String getLoopToggleLabel() const
@@ -2753,6 +3297,11 @@ private:
     juce::Slider volumeSlider;
     juce::Label outputBusLabel;
     juce::ComboBox outputBusCombo;
+    juce::Label fxLabel;
+    juce::ComboBox fxComboBox;
+    juce::TextButton fxEditButton;
+    InspectorPflButton pflPreviewBtn;
+    bool pflPreviewAvailable = false;
     juce::Label metaSeparatorLabel, metaArtistLabel, metaAlbumLabel, metaBpmLabel, metaFormatLabel;
     juce::Label fadeInLabel, fadeOutLabel;
     juce::Slider fadeInSlider, fadeOutSlider;
