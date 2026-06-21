@@ -15182,8 +15182,6 @@ void MainComponent::scanLanPeersAsync (
     showcontrol::backup::mac::requestLocalNetworkPermissionPrompt();
    #endif
 
-    stopBackupDiscoveryResponder();
-
     juce::Component::SafePointer<MainComponent> safeThis (this);
 
     std::thread ([safeThis, wantRole, syncPort, onDone = std::move (onDone)]() mutable
@@ -15195,8 +15193,6 @@ void MainComponent::scanLanPeersAsync (
             if (safeThis == nullptr)
                 return;
 
-            safeThis->startBackupDiscoveryResponder();
-
             if (onDone)
                 onDone (peers);
         });
@@ -15205,8 +15201,6 @@ void MainComponent::scanLanPeersAsync (
 
 void MainComponent::startBackupDiscoveryResponder()
 {
-    stopBackupDiscoveryResponder();
-
     const int role = showcontrol::prefs::loadBackupRole();
 
     if (role == (int) showcontrol::backup::Role::standalone)
@@ -15215,11 +15209,19 @@ void MainComponent::startBackupDiscoveryResponder()
     const int discoveryPort = showcontrol::backup::discoveryPortForSyncPort (
         showcontrol::prefs::loadBackupSyncPort());
 
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (
+        role, resolveEffectiveBackupPeers (showcontrol::prefs::loadBackupPeerHosts()));
+
+    const juce::String responderKey = bindAddress + ":" + juce::String (discoveryPort);
+
+    if (backupDiscoverySocket != nullptr && activeDiscoveryResponderKey == responderKey)
+        return;
+
+    stopBackupDiscoveryResponder();
+
     backupDiscoverySocket = std::make_unique<juce::DatagramSocket> (true);
     backupDiscoverySocket->setEnablePortReuse (true);
 
-    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (
-        role, showcontrol::prefs::loadBackupPeerHosts());
     bool bound = false;
 
     if (bindAddress.isNotEmpty())
@@ -15240,6 +15242,8 @@ void MainComponent::startBackupDiscoveryResponder()
         return;
     }
 
+    activeDiscoveryResponderKey = responderKey;
+
     if (bindAddress.isNotEmpty())
         std::cout << "[BACKUP] Discovery listening on " << bindAddress.toRawUTF8()
                   << ":" << discoveryPort << std::endl;
@@ -15256,6 +15260,7 @@ void MainComponent::stopBackupDiscoveryResponder()
    #endif
 
     backupDiscoverySocket.reset();
+    activeDiscoveryResponderKey = {};
     lastLanAnnounceBroadcastMs = 0;
 }
 
@@ -15369,7 +15374,7 @@ void MainComponent::tickBackupHeartbeat()
                    >= (juce::uint32) showcontrol::backup::kPrimaryBroadcasterRefreshMs)
         {
             lastPrimaryBroadcasterRefreshMs = now;
-            const auto peers = showcontrol::prefs::loadBackupPeerHosts();
+            const auto peers = resolveEffectiveBackupPeers (showcontrol::prefs::loadBackupPeerHosts());
             const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
             backupBroadcaster->configure (peers, showcontrol::prefs::loadBackupSyncPort(), bindAddress);
             showcontrol::backup::logSyncEvent ("Primary refreshed OSC sender after heartbeat TX failure");
@@ -15395,12 +15400,79 @@ bool MainComponent::hasReachableBackupPeer() const noexcept
     return false;
 }
 
+juce::StringArray MainComponent::resolveEffectiveBackupPeers (const juce::StringArray& loadedPeers)
+{
+    if (loadedPeers.size() > 0)
+    {
+        lastKnownBackupPeerHosts = loadedPeers;
+        return loadedPeers;
+    }
+
+    if (lastKnownBackupPeerHosts.size() > 0)
+        return lastKnownBackupPeerHosts;
+
+    return {};
+}
+
+juce::String MainComponent::computeBackupSyncFingerprint() const
+{
+    const int role = showcontrol::prefs::loadBackupRole();
+    const int port = showcontrol::prefs::loadBackupSyncPort();
+    auto peers = showcontrol::prefs::loadBackupPeerHosts();
+
+    if (peers.isEmpty() && lastKnownBackupPeerHosts.size() > 0)
+        peers = lastKnownBackupPeerHosts;
+
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+
+    bool listenEnabled = showcontrol::prefs::loadOscEnabled();
+
+    if (const char* env = std::getenv ("SHOWCUE_OSC_ENABLE"))
+        listenEnabled = (env[0] != '0' && env[0] != '\0');
+
+    if (role != (int) showcontrol::backup::Role::standalone)
+        listenEnabled = true;
+
+    return juce::String (role) + "|" + juce::String (port) + "|"
+         + peers.joinIntoString (",") + "|" + bindAddress + "|"
+         + (listenEnabled ? "1" : "0");
+}
+
+void MainComponent::refreshPrimaryOscBroadcasterOnly()
+{
+    const int role = showcontrol::prefs::loadBackupRole();
+
+    if (role != (int) showcontrol::backup::Role::primary)
+        return;
+
+    const auto peers = resolveEffectiveBackupPeers (showcontrol::prefs::loadBackupPeerHosts());
+    const int port   = showcontrol::prefs::loadBackupSyncPort();
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+
+    if (backupBroadcaster == nullptr)
+        backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
+
+    backupBroadcaster->configure (peers, port, bindAddress);
+}
+
 void MainComponent::scheduleRestartBackupSync (int delayMs, bool resetBackupHeartbeat)
 {
     if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
 
     const auto now = juce::Time::getMillisecondCounter();
+    const bool forceRestart = (delayMs == 0);
+
+    if (! forceRestart)
+    {
+        const auto fingerprint = computeBackupSyncFingerprint();
+
+        if (fingerprint == activeBackupSyncFingerprint && oscListener != nullptr)
+        {
+            refreshPrimaryOscBroadcasterOnly();
+            return;
+        }
+    }
 
     if (delayMs > 0
         && lastScheduleRestartRequestMs != 0
@@ -15449,6 +15521,7 @@ void MainComponent::stopBackupNetworking() noexcept
     backupBroadcaster.reset();
     stopBackupDiscoveryResponder();
     backupPeerHealthPingInFlight.store (false, std::memory_order_release);
+    activeBackupSyncFingerprint = {};
 }
 
 void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
@@ -15456,12 +15529,60 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
     if (applicationShuttingDown.load (std::memory_order_acquire))
         return;
 
-    stopBackupNetworking();
+    if (backupSyncRestartInFlight)
+    {
+        pendingBackupSyncRestartAfterFlight = true;
+        pendingRestartResetHeartbeat = pendingRestartResetHeartbeat || resetBackupHeartbeat;
+        return;
+    }
 
-    const int role     = showcontrol::prefs::loadBackupRole();
-    const int port     = showcontrol::prefs::loadBackupSyncPort();
-    const auto peers   = showcontrol::prefs::loadBackupPeerHosts();
+    backupSyncRestartInFlight = true;
+
+    struct RestartInFlightGuard
+    {
+        MainComponent& owner;
+        bool resetHeartbeat;
+
+        ~RestartInFlightGuard()
+        {
+            owner.backupSyncRestartInFlight = false;
+
+            if (owner.pendingBackupSyncRestartAfterFlight)
+            {
+                owner.pendingBackupSyncRestartAfterFlight = false;
+                const bool resetHb = owner.pendingRestartResetHeartbeat;
+                owner.pendingRestartResetHeartbeat = false;
+                owner.scheduleRestartBackupSync (250, resetHb);
+            }
+        }
+    } inFlightGuard { *this, resetBackupHeartbeat };
+
+    const auto peers = resolveEffectiveBackupPeers (showcontrol::prefs::loadBackupPeerHosts());
+    const int role   = showcontrol::prefs::loadBackupRole();
+    const int port   = showcontrol::prefs::loadBackupSyncPort();
     bool listenEnabled = showcontrol::prefs::loadOscEnabled();
+
+    if (const char* env = std::getenv ("SHOWCUE_OSC_ENABLE"))
+        listenEnabled = (env[0] != '0' && env[0] != '\0');
+
+    if (role != (int) showcontrol::backup::Role::standalone)
+        listenEnabled = true;
+
+    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+    const auto fingerprint = juce::String (role) + "|" + juce::String (port) + "|"
+                           + peers.joinIntoString (",") + "|" + bindAddress + "|"
+                           + (listenEnabled ? "1" : "0");
+
+    if (fingerprint == activeBackupSyncFingerprint && oscListener != nullptr)
+    {
+        if (role == (int) showcontrol::backup::Role::primary)
+            refreshPrimaryOscBroadcasterOnly();
+
+        updateBackupConnectionUi();
+        return;
+    }
+
+    stopBackupNetworking();
 
     if (role == (int) showcontrol::backup::Role::standalone)
     {
@@ -15509,22 +15630,25 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
     }
 #endif
 
-    const auto bindAddress = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
+    const auto bindAddressAfterStop = showcontrol::backup::resolveBackupLanBindAddress (role, peers);
 
     if (role == (int) showcontrol::backup::Role::primary)
     {
         backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
+        const bool configured = backupBroadcaster->configure (peers, port, bindAddressAfterStop);
 
-        if (! backupBroadcaster->configure (peers, port, bindAddress))
-            std::cout << "[BACKUP] [WARN] Primary: no backup peer IP configured." << std::endl;
+        juce::String logLine;
+
+        if (! configured || peers.isEmpty())
+            logLine = "[BACKUP] [WARN] Primary: no backup peer configured or OSC sender failed.";
         else
-            std::cout << "[BACKUP] Primary broadcasting to " << peers.size()
-                      << " peer(s) on port " << port;
+            logLine = "[BACKUP] Primary broadcasting to " + juce::String (peers.size())
+                    + " peer(s) on port " + juce::String (port);
 
-        if (bindAddress.isNotEmpty())
-            std::cout << " via " << bindAddress.toRawUTF8();
+        if (bindAddressAfterStop.isNotEmpty())
+            logLine += " via " + bindAddressAfterStop;
 
-        std::cout << std::endl;
+        std::cout << logLine << std::endl;
     }
 
     if (role == (int) showcontrol::backup::Role::backup)
@@ -15538,7 +15662,7 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
         if (peers.size() > 0)
         {
             backupBroadcaster = std::make_unique<showcontrol::backup::ShowBackupSyncBroadcaster>();
-            backupBroadcaster->configure (peers[0], port, bindAddress);
+            backupBroadcaster->configure (peers[0], port, bindAddressAfterStop);
         }
     }
 
@@ -15551,6 +15675,7 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
 
     if (! listenEnabled)
     {
+        activeBackupSyncFingerprint = fingerprint;
         updateBackupConnectionUi();
         return;
     }
@@ -15658,12 +15783,12 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
 
     auto listener = std::make_unique<showcontrol::osc::ShowOscListener> (callbacks);
 
-    if (! listener->start (port, bindAddress))
+    if (! listener->start (port, bindAddressAfterStop))
     {
         std::cout << "[BACKUP] [WARN] Cannot bind UDP port " << port;
 
-        if (bindAddress.isNotEmpty())
-            std::cout << " on " << bindAddress.toRawUTF8();
+        if (bindAddressAfterStop.isNotEmpty())
+            std::cout << " on " << bindAddressAfterStop.toRawUTF8();
 
         std::cout << " — kiểm tra firewall Windows (inbound UDP "
                   << port << ") khi vai trò Máy phụ." << std::endl;
@@ -15699,11 +15824,13 @@ void MainComponent::restartBackupSync (bool resetBackupHeartbeat)
         return;
     }
 
-    if (bindAddress.isNotEmpty())
-        std::cout << "[BACKUP] Listening on " << bindAddress.toRawUTF8() << ":" << port << std::endl;
+    if (bindAddressAfterStop.isNotEmpty())
+        std::cout << "[BACKUP] Listening on " << bindAddressAfterStop.toRawUTF8() << ":" << port << std::endl;
     else
         std::cout << "[BACKUP] Listening on UDP port " << port << std::endl;
+
     oscListener = std::move (listener);
+    activeBackupSyncFingerprint = fingerprint;
     updateBackupConnectionUi();
 }
 

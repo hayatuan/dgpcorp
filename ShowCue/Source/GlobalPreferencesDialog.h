@@ -720,8 +720,6 @@ public:
 
         backupPanel->onSettingsChanged = [this]
         {
-            backupPanel->saveToPreferences();
-
             if (cb.onBackupSettingsChanged != nullptr)
                 cb.onBackupSettingsChanged();
         };

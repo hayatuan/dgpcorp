@@ -93,18 +93,13 @@ public:
 
         peerEditor.setVisible (false);
         addChildComponent (peerEditor);
-        peerEditor.onTextChange = [this]
-        {
-            if (isBackupRole())
-                notifyChanged();
-        };
+        peerEditor.onReturnKey = [this] { commitPeerEditorChange(); };
+        peerEditor.onFocusLost = [this] { commitPeerEditorChange(); };
 
         portEditor.setInputRestrictions (5, "0123456789");
-        portEditor.onTextChange = [this]
-        {
-            refreshLocalMachineDisplay();
-            notifyChanged();
-        };
+        portEditor.onTextChange = [this] { refreshLocalMachineDisplay(); };
+        portEditor.onReturnKey = [this] { commitPortEditorChange(); };
+        portEditor.onFocusLost = [this] { commitPortEditorChange(); };
         addChildComponent (portEditor);
 
         followerLockToggle.onClick = [this] { notifyChanged(); };
@@ -167,6 +162,7 @@ public:
         oscEnableToggle.setToggleState (showcontrol::prefs::loadOscEnabled(), juce::dontSendNotification);
         clearScanResults (false);
         refreshActivePeerList();
+        lastPersistedSettingsKey = currentSettingsKey();
     }
 
     void saveToPreferences() const
@@ -802,8 +798,57 @@ private:
     {
         saveToPreferences();
 
+        const auto key = currentSettingsKey();
+
+        if (key == lastPersistedSettingsKey)
+            return;
+
+        lastPersistedSettingsKey = key;
+
         if (onSettingsChanged != nullptr)
             onSettingsChanged();
+    }
+
+    void commitPortEditorChange()
+    {
+        refreshLocalMachineDisplay();
+        notifyChanged();
+    }
+
+    void commitPeerEditorChange()
+    {
+        if (! isBackupRole())
+            return;
+
+        notifyChanged();
+    }
+
+    juce::String currentSettingsKey() const
+    {
+        const int role = juce::jlimit (0, 2, roleCombo.getSelectedId() - 1);
+        const int port = portEditor.getText().getIntValue() > 0
+                       ? portEditor.getText().getIntValue()
+                       : (int) showcontrol::backup::kDefaultSyncPort;
+
+        juce::StringArray peers;
+
+        if (role == (int) showcontrol::backup::Role::backup)
+        {
+            if (peerEditor.getText().trim().isNotEmpty())
+                peers.add (peerEditor.getText().trim());
+            else if (configuredPeerEntries.size() > 0)
+                peers.add (configuredPeerEntries.getReference (0).ip);
+        }
+        else if (role == (int) showcontrol::backup::Role::primary)
+        {
+            for (const auto& entry : configuredPeerEntries)
+                peers.add (entry.ip);
+        }
+
+        return juce::String (role) + "|" + juce::String (port) + "|"
+             + peers.joinIntoString (",") + "|"
+             + (followerLockToggle.getToggleState() ? "1" : "0") + "|"
+             + (oscEnableToggle.getToggleState() ? "1" : "0");
     }
 
     void refreshReconnectButton()
@@ -1029,4 +1074,5 @@ private:
     int selectedActivePeerIndex = -1;
     bool scanResultsVisible = false;
     bool takeoverActive = false;
+    juce::String lastPersistedSettingsKey;
 };

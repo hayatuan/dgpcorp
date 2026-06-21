@@ -273,6 +273,9 @@ private:
     void startBackupDiscoveryResponder();
     void stopBackupDiscoveryResponder();
     void stopBackupNetworking() noexcept;
+    juce::String computeBackupSyncFingerprint() const;
+    juce::StringArray resolveEffectiveBackupPeers (const juce::StringArray& loadedPeers);
+    void refreshPrimaryOscBroadcasterOnly();
     void scanLanPeersAsync (int wantRole,
                             std::function<void (const juce::Array<showcontrol::backup::LanPeerInfo>&)> onDone);
     void shutdownActiveTimers() noexcept;
@@ -890,6 +893,11 @@ private:
     juce::uint32 lastPrimaryBroadcasterRefreshMs = 0;
     juce::uint32 lastScheduleRestartRequestMs = 0;
     bool pendingRestartResetHeartbeat = false;
+    bool backupSyncRestartInFlight = false;
+    bool pendingBackupSyncRestartAfterFlight = false;
+    juce::String activeBackupSyncFingerprint;
+    juce::String activeDiscoveryResponderKey;
+    juce::StringArray lastKnownBackupPeerHosts;
     std::atomic<bool> backupPeerHealthPingInFlight { false };
     std::atomic<bool> applicationShuttingDown { false };
     juce::Array<showcontrol::backup::PeerRuntimeStatus> backupPeerStatuses;

@@ -29,7 +29,7 @@ inline constexpr int kPeerHealthIntervalMs        = 1000;
 inline constexpr int kPeerPingTimeoutMs           = 400;
 inline constexpr int kLanAnnounceIntervalMs       = 1500;
 inline constexpr int kPrimaryBroadcasterRefreshMs = 15000;
-inline constexpr int kRestartBackupSyncDebounceMs = 3000;
+inline constexpr int kRestartBackupSyncDebounceMs = 8000;
 inline constexpr int kPadPatchDebounceMs          = 60;
 inline constexpr int kSelectionSyncDebounceMs     = 20;
 inline constexpr int kMaxBackupPeers            = 16;
@@ -95,10 +95,10 @@ class ShowBackupSyncBroadcaster
 public:
     bool configure (const juce::StringArray& peerHosts, int port, const juce::String& localBindAddress = {})
     {
-        peerSenders.clear();
-        targetHosts.clear();
-        targetPort = juce::jlimit (1024, 65535, port);
-        localBind = localBindAddress.trim();
+        const int nextPort = juce::jlimit (1024, 65535, port);
+        const auto nextBind = localBindAddress.trim();
+
+        juce::StringArray nextHosts;
 
         for (const auto& host : peerHosts)
         {
@@ -109,7 +109,7 @@ public:
 
             bool duplicate = false;
 
-            for (const auto& existing : targetHosts)
+            for (const auto& existing : nextHosts)
             {
                 if (existing.equalsIgnoreCase (trimmed))
                 {
@@ -119,8 +119,34 @@ public:
             }
 
             if (! duplicate)
-                targetHosts.add (trimmed);
+                nextHosts.add (trimmed);
         }
+
+        if (nextPort == targetPort
+            && nextBind == localBind
+            && nextHosts.size() == targetHosts.size()
+            && peerSenders.size() == targetHosts.size()
+            && peerSenders.size() > 0)
+        {
+            bool hostsMatch = true;
+
+            for (int i = 0; i < nextHosts.size(); ++i)
+            {
+                if (! nextHosts[i].equalsIgnoreCase (targetHosts[i]))
+                {
+                    hostsMatch = false;
+                    break;
+                }
+            }
+
+            if (hostsMatch)
+                return true;
+        }
+
+        peerSenders.clear();
+        targetHosts = std::move (nextHosts);
+        targetPort = nextPort;
+        localBind = nextBind;
 
         connected = targetHosts.size() > 0;
         peerSenders.clear();
@@ -169,7 +195,7 @@ public:
         peerSenders.clear();
     }
 
-    bool isConnected() const noexcept { return connected && targetHosts.size() > 0; }
+    bool isConnected() const noexcept { return connected && peerSenders.size() > 0; }
 
     int getPeerCount() const noexcept { return targetHosts.size(); }
 
